@@ -56,3 +56,4 @@ android/app/build
 *.pem
 credentials.json
 service-account.json
+data/
