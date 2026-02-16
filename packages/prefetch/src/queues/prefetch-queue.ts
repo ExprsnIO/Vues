@@ -1,4 +1,4 @@
-import { Queue, Worker, Job, QueueEvents } from 'bullmq';
+import { Queue, Worker, Job, QueueEvents, ConnectionOptions } from 'bullmq';
 import { Redis } from 'ioredis';
 
 /**
@@ -78,9 +78,9 @@ export class PrefetchQueue {
       maxRetriesPerRequest: null,
     });
 
-    // Create queues
+    // Create queues (cast connection to avoid ioredis version mismatch)
     this.queue = new Queue<PrefetchJob>('prefetch', {
-      connection: this.connection,
+      connection: this.connection as unknown as ConnectionOptions,
       defaultJobOptions: {
         attempts: this.config.maxAttempts,
         backoff: {
@@ -93,7 +93,7 @@ export class PrefetchQueue {
     });
 
     this.videoQueue = new Queue<VideoPrefetchJob>('video-prefetch', {
-      connection: this.connection,
+      connection: this.connection as unknown as ConnectionOptions,
       defaultJobOptions: {
         attempts: 2,
         backoff: {

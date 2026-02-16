@@ -177,8 +177,8 @@ export class PrefetchService {
         const segmentUrl = segments[segmentIndex];
         const segmentData = await this.fetchSegment(segmentUrl);
 
-        // Cache in hot tier
-        await this.cache.set(cacheKey, { url: segmentUrl, size: segmentData.length }, 'hot');
+        // Cache in hot tier (ArrayBuffer uses byteLength, not length)
+        await this.cache.set(cacheKey, { url: segmentUrl, size: segmentData.byteLength }, 'hot');
         success++;
       } catch {
         failed++;
@@ -208,10 +208,10 @@ export class PrefetchService {
       throw new Error(`Timeline service error: ${response.status}`);
     }
 
-    const data = await response.json();
+    const data = await response.json() as { posts?: unknown[]; feed?: unknown[]; cursor?: string };
 
     return {
-      posts: data.posts || data.feed || [],
+      posts: (data.posts || data.feed || []) as TimelineData['posts'],
       cursor: data.cursor,
       fetchedAt: Date.now(),
     };

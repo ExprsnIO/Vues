@@ -56,9 +56,12 @@ export function createSyncRouter(
     // Export to CAR
     const carBytes = await exportRepoCar(blockStore, commitCid);
 
-    return c.body(carBytes, 200, {
-      'Content-Type': 'application/vnd.ipld.car',
-      'Content-Disposition': `attachment; filename="${did}.car"`,
+    return new Response(carBytes, {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/vnd.ipld.car',
+        'Content-Disposition': `attachment; filename="${did}.car"`,
+      },
     });
   });
 
@@ -221,8 +224,11 @@ export function createSyncRouter(
     }
 
     // Would need to get MIME type from metadata
-    return c.body(blob, 200, {
-      'Content-Type': 'application/octet-stream',
+    return new Response(blob, {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/octet-stream',
+      },
     });
   });
 

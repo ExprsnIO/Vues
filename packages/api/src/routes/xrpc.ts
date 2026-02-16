@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { authMiddleware, optionalAuthMiddleware } from '../auth/middleware.js';
-import { db, videos, users, likes, comments, sounds, follows, trendingVideos } from '../db/index.js';
+import { db, videos, users, likes, comments, sounds, follows, trendingVideos, userInteractions } from '../db/index.js';
 import { cacheService, CacheKeys, CACHE_TTL } from '../cache/redis.js';
 import { eq, desc, inArray, and, sql, lt } from 'drizzle-orm';
 import type { VideoView, AuthorView, FeedResult } from '@exprsn/shared';
@@ -431,6 +431,54 @@ xrpcRouter.post('/io.exprsn.video.unlike', authMiddleware, async (c) => {
     collection: 'io.exprsn.video.like',
     rkey: rkey!,
   });
+
+  return c.json({ success: true });
+});
+
+/**
+ * Track video view
+ * POST /xrpc/io.exprsn.video.trackView
+ */
+xrpcRouter.post('/io.exprsn.video.trackView', optionalAuthMiddleware, async (c) => {
+  let body: { videoUri?: string; watchDuration?: number; completed?: boolean } = {};
+
+  try {
+    body = await c.req.json();
+  } catch {
+    // Invalid or empty JSON body - just return success silently
+    return c.json({ success: true });
+  }
+
+  const { videoUri, watchDuration, completed } = body;
+
+  if (!videoUri) {
+    // No video URI provided - return success silently to avoid client errors
+    return c.json({ success: true });
+  }
+
+  // Increment view count
+  await db
+    .update(videos)
+    .set({
+      viewCount: sql`${videos.viewCount} + 1`,
+    })
+    .where(eq(videos.uri, videoUri));
+
+  // Optionally track in user_interactions if authenticated
+  const userDid = c.get('did');
+  if (userDid) {
+    await db
+      .insert(userInteractions)
+      .values({
+        userDid,
+        videoUri,
+        interactionType: 'view',
+        watchDuration: watchDuration || 0,
+        watchPercentage: completed ? 100 : Math.min(99, Math.floor((watchDuration || 0) / 10)),
+        createdAt: new Date(),
+      })
+      .onConflictDoNothing();
+  }
 
   return c.json({ success: true });
 });

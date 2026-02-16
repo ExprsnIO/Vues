@@ -4,6 +4,10 @@ import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
 import { prettyJSON } from 'hono/pretty-json';
 import { secureHeaders } from 'hono/secure-headers';
+import { createReadStream, statSync, existsSync } from 'fs';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
+import { Readable } from 'stream';
 
 import { createOAuthClient } from './auth/oauth-client.js';
 import { xrpcRouter } from './routes/xrpc.js';
@@ -43,6 +47,76 @@ app.get('/client-metadata.json', (c) => {
     dpop_bound_access_tokens: true,
     application_type: 'web',
   });
+});
+
+// Serve static video files from data/videos/samples
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const videosPath = join(__dirname, '../../..', 'data/videos/samples');
+
+app.get('/videos/:filename', async (c) => {
+  const filename = c.req.param('filename');
+
+  // Sanitize filename to prevent directory traversal
+  if (filename.includes('..') || filename.includes('/')) {
+    return c.json({ error: 'Invalid filename' }, 400);
+  }
+
+  const filePath = join(videosPath, filename);
+
+  if (!existsSync(filePath)) {
+    return c.json({ error: 'Video not found' }, 404);
+  }
+
+  try {
+    const stat = statSync(filePath);
+    const range = c.req.header('Range');
+
+    // Determine content type based on extension
+    const ext = filename.split('.').pop()?.toLowerCase();
+    const contentTypes: Record<string, string> = {
+      'mp4': 'video/mp4',
+      'webm': 'video/webm',
+      'mov': 'video/quicktime',
+      'avi': 'video/x-msvideo',
+      'mkv': 'video/x-matroska',
+    };
+    const contentType = contentTypes[ext || ''] || 'video/mp4';
+
+    // Handle range requests for video streaming
+    if (range) {
+      const parts = range.replace(/bytes=/, '').split('-');
+      const start = parseInt(parts[0], 10);
+      const end = parts[1] ? parseInt(parts[1], 10) : stat.size - 1;
+      const chunkSize = end - start + 1;
+
+      const stream = createReadStream(filePath, { start, end });
+
+      return new Response(Readable.toWeb(stream) as ReadableStream, {
+        status: 206,
+        headers: {
+          'Content-Range': `bytes ${start}-${end}/${stat.size}`,
+          'Accept-Ranges': 'bytes',
+          'Content-Length': chunkSize.toString(),
+          'Content-Type': contentType,
+        },
+      });
+    }
+
+    // Full file request
+    const stream = createReadStream(filePath);
+    return new Response(Readable.toWeb(stream) as ReadableStream, {
+      status: 200,
+      headers: {
+        'Content-Length': stat.size.toString(),
+        'Content-Type': contentType,
+        'Accept-Ranges': 'bytes',
+      },
+    });
+  } catch (err) {
+    console.error('Error serving video:', err);
+    return c.json({ error: 'Error serving video' }, 500);
+  }
 });
 
 // Mount routers

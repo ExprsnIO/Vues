@@ -1,4 +1,4 @@
-import { Worker, Job } from 'bullmq';
+import { Worker, Job, ConnectionOptions } from 'bullmq';
 import { Redis } from 'ioredis';
 import { createTieredCache } from './cache/tiered-cache.js';
 import { createPrefetchService } from './services/prefetch-service.js';
@@ -68,7 +68,7 @@ const prefetchWorker = new Worker<PrefetchJob>(
     }
   },
   {
-    connection,
+    connection: connection as unknown as ConnectionOptions,
     concurrency: config.concurrency,
   }
 );
@@ -94,7 +94,7 @@ const videoWorker = new Worker<VideoPrefetchJob>(
     return result;
   },
   {
-    connection,
+    connection: connection as unknown as ConnectionOptions,
     concurrency: 10, // Lower concurrency for video segments
   }
 );

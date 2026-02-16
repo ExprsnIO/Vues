@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
-import { authMiddleware } from '../auth/middleware.js';
+import { authMiddleware, optionalAuthMiddleware } from '../auth/middleware.js';
 import { db, dbType, userSettings } from '../db/index.js';
 import { eq } from 'drizzle-orm';
 import type {
@@ -60,8 +60,18 @@ const defaultSettings: Omit<UserSettings, 'updatedAt'> = {
  * Get user settings
  * GET /xrpc/io.exprsn.settings.getSettings
  */
-settingsRouter.get('/io.exprsn.settings.getSettings', authMiddleware, async (c) => {
+settingsRouter.get('/io.exprsn.settings.getSettings', optionalAuthMiddleware, async (c) => {
   const userDid = c.get('did');
+
+  // Return defaults for unauthenticated users
+  if (!userDid) {
+    return c.json({
+      settings: {
+        ...defaultSettings,
+        updatedAt: new Date().toISOString(),
+      },
+    });
+  }
 
   const existing = await db.query.userSettings.findFirst({
     where: eq(userSettings.userDid, userDid),

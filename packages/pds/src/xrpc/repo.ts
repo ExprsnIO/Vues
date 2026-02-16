@@ -1,4 +1,4 @@
-import { Hono } from 'hono';
+import { Hono, Context, Next } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { CID } from 'multiformats/cid';
 import { Repository, RepoRecord } from '../repo/repo.js';
@@ -21,6 +21,13 @@ export interface SessionContext {
 }
 
 /**
+ * Variables set by middleware
+ */
+type Variables = {
+  session: SessionContext;
+};
+
+/**
  * Create repo XRPC router
  */
 export function createRepoRouter(
@@ -28,15 +35,12 @@ export function createRepoRouter(
   blobStore: BlobStore,
   getSession: (c: { req: { header(name: string): string | undefined } }) => Promise<SessionContext | null>
 ) {
-  const router = new Hono();
+  const router = new Hono<{ Variables: Variables }>();
 
   /**
    * Require authentication middleware
    */
-  const requireAuth = async (c: {
-    req: { header(name: string): string | undefined };
-    set(key: string, value: unknown): void;
-  }, next: () => Promise<void>) => {
+  const requireAuth = async (c: Context<{ Variables: Variables }>, next: Next) => {
     const session = await getSession(c);
     if (!session) {
       throw new HTTPException(401, { message: 'Authentication required' });

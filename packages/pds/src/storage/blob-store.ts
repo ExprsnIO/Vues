@@ -259,3 +259,45 @@ export class BlobStore {
 export function createBlobStore(config: BlobStoreConfig): BlobStore {
   return new BlobStore(config);
 }
+
+/**
+ * Create a local filesystem blob store
+ */
+export function createLocalBlobStore(basePath: string): BlobStore {
+  return new BlobStore({
+    type: 'local',
+    localPath: basePath,
+  });
+}
+
+/**
+ * S3 configuration for blob store
+ */
+export interface S3BlobStoreConfig {
+  endpoint: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+  bucket: string;
+  region?: string;
+}
+
+/**
+ * Create an S3-backed blob store
+ * Note: For S3, we use the AWS SDK S3Client which should be passed to the config
+ */
+export function createS3BlobStore(config: S3BlobStoreConfig): BlobStore {
+  // Create a minimal S3 client wrapper
+  // In production, use @aws-sdk/client-s3
+  const s3Client = {
+    async send(command: unknown): Promise<unknown> {
+      // This is a placeholder - in real usage, pass a real S3Client
+      throw new Error('S3 client not configured. Please use createBlobStore with a real S3Client.');
+    },
+  };
+
+  return new BlobStore({
+    type: 's3',
+    s3Client,
+    s3Bucket: config.bucket,
+  });
+}

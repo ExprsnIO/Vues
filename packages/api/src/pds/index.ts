@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import * as bcrypt from 'bcryptjs';
 import { eq } from 'drizzle-orm';
 import { createPdsRouter, PdsDependencies, PdsServerConfig } from '@exprsn/pds';
-import { createDidWebService } from '@exprsn/pds';
+import { createDidService, DidWebConfig } from '@exprsn/pds';
 import { createLocalBlobStore, createS3BlobStore } from '@exprsn/pds';
 import { db } from '../db/index.js';
 import { actorRepos, repoCommits, repoRecords, blobs, repoBlocks, sessions } from '../db/schema.js';
@@ -362,7 +362,11 @@ export function createPdsApp(config: PdsConfig): Hono {
   };
 
   const pdsRouter = createPdsRouter(deps);
-  const didService = createDidWebService(config.domain);
+  const didServiceConfig: DidWebConfig = {
+    domain: config.domain,
+    pdsEndpoint: `https://${config.domain}`,
+  };
+  const didService = createDidService(didServiceConfig);
 
   const app = new Hono();
 
@@ -378,7 +382,7 @@ export function createPdsApp(config: PdsConfig): Hono {
       return c.json({ error: 'NotFound', message: 'Handle not found' }, 404);
     }
 
-    const didDoc = didService.createDidDocument(account.did, handle, account.signingKeyPublic);
+    const didDoc = didService.createDocument(account.did, account.signingKeyPublic, handle);
     return c.json(didDoc, 200, { 'Content-Type': 'application/did+json' });
   });
 
