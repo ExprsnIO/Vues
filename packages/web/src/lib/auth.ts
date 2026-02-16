@@ -13,6 +13,7 @@ export function getOAuthClient(): BrowserOAuthClient {
       clientMetadata: {
         client_id: CLIENT_ID,
         redirect_uris: [REDIRECT_URI],
+        scope: 'atproto',
       },
       handleResolver: 'https://bsky.social',
     });
