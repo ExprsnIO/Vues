@@ -14,6 +14,10 @@ export function getOAuthClient(): BrowserOAuthClient {
         client_id: CLIENT_ID,
         redirect_uris: [REDIRECT_URI],
         scope: 'atproto',
+        token_endpoint_auth_method: 'none', // Public client (browser-based)
+        grant_types: ['authorization_code', 'refresh_token'],
+        response_types: ['code'],
+        dpop_bound_access_tokens: true,
       },
       handleResolver: 'https://bsky.social',
     });
