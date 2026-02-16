@@ -9,6 +9,7 @@ import { createOAuthClient } from './auth/oauth-client.js';
 import { xrpcRouter } from './routes/xrpc.js';
 import { oauthRouter } from './routes/oauth.js';
 import { settingsRouter } from './routes/settings.js';
+import { createPdsApp, getPdsConfig } from './pds/index.js';
 
 const app = new Hono();
 
@@ -48,6 +49,14 @@ app.get('/client-metadata.json', (c) => {
 app.route('/xrpc', xrpcRouter);
 app.route('/xrpc', settingsRouter);
 app.route('/oauth', oauthRouter);
+
+// Mount PDS routes if enabled
+const pdsConfig = getPdsConfig();
+if (pdsConfig.enabled) {
+  const pdsApp = createPdsApp(pdsConfig);
+  app.route('/', pdsApp);
+  console.log('PDS enabled at', pdsConfig.domain);
+}
 
 // Error handling
 app.onError((err, c) => {

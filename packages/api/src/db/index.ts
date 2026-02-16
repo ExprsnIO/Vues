@@ -226,6 +226,83 @@ function createSqliteTables(sqlite: Database.Database): void {
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
+
+    -- PDS Tables
+    CREATE TABLE IF NOT EXISTS actor_repos (
+      did TEXT PRIMARY KEY,
+      handle TEXT NOT NULL,
+      email TEXT,
+      password_hash TEXT,
+      signing_key_public TEXT NOT NULL,
+      signing_key_private TEXT NOT NULL,
+      root_cid TEXT,
+      rev TEXT,
+      status TEXT NOT NULL DEFAULT 'active',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS actor_repos_handle_idx ON actor_repos(handle);
+    CREATE INDEX IF NOT EXISTS actor_repos_email_idx ON actor_repos(email);
+    CREATE INDEX IF NOT EXISTS actor_repos_status_idx ON actor_repos(status);
+
+    CREATE TABLE IF NOT EXISTS repo_commits (
+      cid TEXT PRIMARY KEY,
+      did TEXT NOT NULL REFERENCES actor_repos(did) ON DELETE CASCADE,
+      rev TEXT NOT NULL,
+      data TEXT NOT NULL,
+      prev TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS repo_commits_did_idx ON repo_commits(did);
+    CREATE INDEX IF NOT EXISTS repo_commits_rev_idx ON repo_commits(rev);
+
+    CREATE TABLE IF NOT EXISTS repo_records (
+      uri TEXT PRIMARY KEY,
+      cid TEXT NOT NULL,
+      did TEXT NOT NULL REFERENCES actor_repos(did) ON DELETE CASCADE,
+      collection TEXT NOT NULL,
+      rkey TEXT NOT NULL,
+      record TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      indexed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS repo_records_did_collection_idx ON repo_records(did, collection);
+    CREATE INDEX IF NOT EXISTS repo_records_collection_idx ON repo_records(collection);
+    CREATE INDEX IF NOT EXISTS repo_records_rkey_idx ON repo_records(rkey);
+
+    CREATE TABLE IF NOT EXISTS blobs (
+      cid TEXT PRIMARY KEY,
+      did TEXT NOT NULL REFERENCES actor_repos(did) ON DELETE CASCADE,
+      mime_type TEXT NOT NULL,
+      size INTEGER NOT NULL,
+      storage_path TEXT NOT NULL,
+      temp_path TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS blobs_did_idx ON blobs(did);
+    CREATE INDEX IF NOT EXISTS blobs_mime_type_idx ON blobs(mime_type);
+
+    CREATE TABLE IF NOT EXISTS repo_blocks (
+      cid TEXT PRIMARY KEY,
+      did TEXT NOT NULL REFERENCES actor_repos(did) ON DELETE CASCADE,
+      content TEXT NOT NULL,
+      referenced_by TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS repo_blocks_did_idx ON repo_blocks(did);
+
+    CREATE TABLE IF NOT EXISTS sessions (
+      id TEXT PRIMARY KEY,
+      did TEXT NOT NULL REFERENCES actor_repos(did) ON DELETE CASCADE,
+      access_jwt TEXT NOT NULL,
+      refresh_jwt TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS sessions_did_idx ON sessions(did);
+    CREATE UNIQUE INDEX IF NOT EXISTS sessions_access_jwt_idx ON sessions(access_jwt);
+    CREATE UNIQUE INDEX IF NOT EXISTS sessions_refresh_jwt_idx ON sessions(refresh_jwt);
+    CREATE INDEX IF NOT EXISTS sessions_expires_at_idx ON sessions(expires_at);
   `);
 }
 

@@ -1,0 +1,261 @@
+import { CID } from 'multiformats/cid';
+import { sha256 } from 'multiformats/hashes/sha2';
+import { Readable } from 'stream';
+import * as fs from 'fs/promises';
+import * as fsSync from 'fs';
+import * as path from 'path';
+
+/**
+ * Blob metadata
+ */
+export interface BlobMetadata {
+  cid: CID;
+  mimeType: string;
+  size: number;
+  createdAt: Date;
+}
+
+/**
+ * Storage backend interface
+ */
+export interface StorageBackend {
+  put(key: string, data: Buffer | Readable): Promise<void>;
+  get(key: string): Promise<Buffer | null>;
+  delete(key: string): Promise<void>;
+  exists(key: string): Promise<boolean>;
+  stream(key: string): Promise<Readable | null>;
+}
+
+/**
+ * Local filesystem storage backend
+ */
+export class LocalStorageBackend implements StorageBackend {
+  constructor(private basePath: string) {}
+
+  private getFullPath(key: string): string {
+    // Sanitize key to prevent directory traversal
+    const sanitized = key.replace(/\.\./g, '').replace(/^\/+/, '');
+    return path.join(this.basePath, sanitized);
+  }
+
+  async put(key: string, data: Buffer | Readable): Promise<void> {
+    const fullPath = this.getFullPath(key);
+    await fs.mkdir(path.dirname(fullPath), { recursive: true });
+
+    if (Buffer.isBuffer(data)) {
+      await fs.writeFile(fullPath, data);
+    } else {
+      // Handle stream
+      const chunks: Buffer[] = [];
+      for await (const chunk of data) {
+        chunks.push(Buffer.from(chunk));
+      }
+      await fs.writeFile(fullPath, Buffer.concat(chunks));
+    }
+  }
+
+  async get(key: string): Promise<Buffer | null> {
+    const fullPath = this.getFullPath(key);
+    try {
+      return await fs.readFile(fullPath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        return null;
+      }
+      throw err;
+    }
+  }
+
+  async delete(key: string): Promise<void> {
+    const fullPath = this.getFullPath(key);
+    try {
+      await fs.unlink(fullPath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw err;
+      }
+    }
+  }
+
+  async exists(key: string): Promise<boolean> {
+    const fullPath = this.getFullPath(key);
+    try {
+      await fs.access(fullPath);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async stream(key: string): Promise<Readable | null> {
+    const fullPath = this.getFullPath(key);
+    try {
+      await fs.access(fullPath);
+      return fsSync.createReadStream(fullPath);
+    } catch {
+      return null;
+    }
+  }
+}
+
+/**
+ * S3-compatible storage backend
+ */
+export class S3StorageBackend implements StorageBackend {
+  constructor(
+    private s3Client: {
+      send(command: unknown): Promise<unknown>;
+    },
+    private bucket: string,
+    private prefix: string = ''
+  ) {}
+
+  private getKey(key: string): string {
+    return this.prefix ? `${this.prefix}/${key}` : key;
+  }
+
+  async put(key: string, data: Buffer | Readable): Promise<void> {
+    // S3 PutObject implementation
+    // This is a placeholder - actual implementation would use @aws-sdk/client-s3
+    const fullKey = this.getKey(key);
+    console.log(`S3: PUT ${this.bucket}/${fullKey}`);
+
+    // In real implementation:
+    // await this.s3Client.send(new PutObjectCommand({
+    //   Bucket: this.bucket,
+    //   Key: fullKey,
+    //   Body: data,
+    // }));
+  }
+
+  async get(key: string): Promise<Buffer | null> {
+    const fullKey = this.getKey(key);
+    console.log(`S3: GET ${this.bucket}/${fullKey}`);
+
+    // In real implementation:
+    // const response = await this.s3Client.send(new GetObjectCommand({...}));
+    // return Buffer.from(await response.Body.transformToByteArray());
+
+    return null;
+  }
+
+  async delete(key: string): Promise<void> {
+    const fullKey = this.getKey(key);
+    console.log(`S3: DELETE ${this.bucket}/${fullKey}`);
+  }
+
+  async exists(key: string): Promise<boolean> {
+    const fullKey = this.getKey(key);
+    console.log(`S3: HEAD ${this.bucket}/${fullKey}`);
+    return false;
+  }
+
+  async stream(key: string): Promise<Readable | null> {
+    const data = await this.get(key);
+    if (!data) return null;
+    return Readable.from(data);
+  }
+}
+
+/**
+ * Blob store configuration
+ */
+export interface BlobStoreConfig {
+  type: 'local' | 's3';
+  localPath?: string;
+  s3Bucket?: string;
+  s3Prefix?: string;
+  s3Client?: {
+    send(command: unknown): Promise<unknown>;
+  };
+}
+
+/**
+ * Blob store for managing binary content
+ */
+export class BlobStore {
+  private backend: StorageBackend;
+
+  constructor(config: BlobStoreConfig) {
+    if (config.type === 'local') {
+      this.backend = new LocalStorageBackend(config.localPath || './data/blobs');
+    } else if (config.type === 's3' && config.s3Client && config.s3Bucket) {
+      this.backend = new S3StorageBackend(
+        config.s3Client,
+        config.s3Bucket,
+        config.s3Prefix
+      );
+    } else {
+      throw new Error('Invalid blob store configuration');
+    }
+  }
+
+  /**
+   * Get storage path for a blob
+   */
+  private getBlobPath(did: string, cid: CID): string {
+    const cidStr = cid.toString();
+    // Use first 2 chars of CID as subdirectory for better filesystem performance
+    const prefix = cidStr.slice(0, 2);
+    return `${did}/${prefix}/${cidStr}`;
+  }
+
+  /**
+   * Store a blob and return its CID
+   */
+  async putBlob(did: string, data: Buffer, mimeType: string): Promise<BlobMetadata> {
+    // Calculate CID
+    const hash = await sha256.digest(data);
+    const cid = CID.create(1, 0x55, hash); // 0x55 = raw codec
+
+    // Store blob
+    const blobPath = this.getBlobPath(did, cid);
+    await this.backend.put(blobPath, data);
+
+    return {
+      cid,
+      mimeType,
+      size: data.length,
+      createdAt: new Date(),
+    };
+  }
+
+  /**
+   * Get a blob by CID
+   */
+  async getBlob(did: string, cid: CID): Promise<Buffer | null> {
+    const blobPath = this.getBlobPath(did, cid);
+    return this.backend.get(blobPath);
+  }
+
+  /**
+   * Stream a blob by CID
+   */
+  async streamBlob(did: string, cid: CID): Promise<Readable | null> {
+    const blobPath = this.getBlobPath(did, cid);
+    return this.backend.stream(blobPath);
+  }
+
+  /**
+   * Check if blob exists
+   */
+  async hasBlob(did: string, cid: CID): Promise<boolean> {
+    const blobPath = this.getBlobPath(did, cid);
+    return this.backend.exists(blobPath);
+  }
+
+  /**
+   * Delete a blob
+   */
+  async deleteBlob(did: string, cid: CID): Promise<void> {
+    const blobPath = this.getBlobPath(did, cid);
+    await this.backend.delete(blobPath);
+  }
+}
+
+/**
+ * Create a blob store from config
+ */
+export function createBlobStore(config: BlobStoreConfig): BlobStore {
+  return new BlobStore(config);
+}

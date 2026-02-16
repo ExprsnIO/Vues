@@ -1,0 +1,27 @@
+{
+  "name": "@exprsn/pds",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@atproto/crypto": "^0.4.0",
+    "@atproto/syntax": "^0.3.0",
+    "@exprsn/shared": "workspace:*",
+    "@ipld/car": "^5.2.0",
+    "@ipld/dag-cbor": "^9.0.0",
+    "hono": "^4.6.0",
+    "ioredis": "^5.4.0",
+    "multiformats": "^13.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}

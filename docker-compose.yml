@@ -93,6 +93,46 @@ services:
       exit 0;
       "
 
+  ffmpeg-worker:
+    build:
+      context: .
+      dockerfile: docker/ffmpeg/Dockerfile
+    container_name: exprsn-ffmpeg-worker
+    environment:
+      - NODE_ENV=production
+      - REDIS_URL=redis://redis:6379
+      - DO_SPACES_ENDPOINT=http://minio:9000
+      - DO_SPACES_KEY=minioadmin
+      - DO_SPACES_SECRET=minioadmin
+      - DO_SPACES_BUCKET=exprsn-uploads
+      - DO_SPACES_PROCESSED_BUCKET=exprsn-processed
+      - STORAGE_PATH=/app/data
+      - WORKER_CONCURRENCY=2
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    restart: unless-stopped
+
+  prefetch-worker:
+    build:
+      context: .
+      dockerfile: docker/prefetch/Dockerfile
+    container_name: exprsn-prefetch-worker
+    environment:
+      - NODE_ENV=production
+      - REDIS_URL=redis://redis:6379
+      - TIMELINE_SERVICE_URL=http://host.docker.internal:3002
+      - PREFETCH_CONCURRENCY=50
+      - PREFETCH_DEFAULT_LIMIT=20
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   postgres_data:
   redis_data:

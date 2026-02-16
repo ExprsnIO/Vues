@@ -278,6 +278,132 @@ export const userSettings = pgTable('user_settings', {
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
 
+// ============================================
+// PDS (Personal Data Server) Tables
+// ============================================
+
+// Actor repositories - PDS hosted accounts
+export const actorRepos = pgTable(
+  'actor_repos',
+  {
+    did: text('did').primaryKey(),
+    handle: text('handle').notNull(),
+    email: text('email'),
+    passwordHash: text('password_hash'),
+    signingKeyPublic: text('signing_key_public').notNull(),
+    signingKeyPrivate: text('signing_key_private').notNull(),
+    rootCid: text('root_cid'),
+    rev: text('rev'),
+    status: text('status').default('active').notNull(), // active, suspended, deleted
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    handleIdx: uniqueIndex('actor_repos_handle_idx').on(table.handle),
+    emailIdx: index('actor_repos_email_idx').on(table.email),
+    statusIdx: index('actor_repos_status_idx').on(table.status),
+  })
+);
+
+// Repository commits
+export const repoCommits = pgTable(
+  'repo_commits',
+  {
+    cid: text('cid').primaryKey(),
+    did: text('did')
+      .notNull()
+      .references(() => actorRepos.did, { onDelete: 'cascade' }),
+    rev: text('rev').notNull(),
+    data: text('data').notNull(), // CBOR base64
+    prev: text('prev'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    didIdx: index('repo_commits_did_idx').on(table.did),
+    revIdx: index('repo_commits_rev_idx').on(table.rev),
+  })
+);
+
+// Repository records (denormalized for query performance)
+export const repoRecords = pgTable(
+  'repo_records',
+  {
+    uri: text('uri').primaryKey(), // at://did/collection/rkey
+    cid: text('cid').notNull(),
+    did: text('did')
+      .notNull()
+      .references(() => actorRepos.did, { onDelete: 'cascade' }),
+    collection: text('collection').notNull(),
+    rkey: text('rkey').notNull(),
+    record: jsonb('record').notNull(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    indexedAt: timestamp('indexed_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    didCollectionIdx: index('repo_records_did_collection_idx').on(table.did, table.collection),
+    collectionIdx: index('repo_records_collection_idx').on(table.collection),
+    rkeyIdx: index('repo_records_rkey_idx').on(table.rkey),
+  })
+);
+
+// Blobs stored in PDS
+export const blobs = pgTable(
+  'blobs',
+  {
+    cid: text('cid').primaryKey(),
+    did: text('did')
+      .notNull()
+      .references(() => actorRepos.did, { onDelete: 'cascade' }),
+    mimeType: text('mime_type').notNull(),
+    size: integer('size').notNull(),
+    storagePath: text('storage_path').notNull(),
+    tempPath: text('temp_path'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    didIdx: index('blobs_did_idx').on(table.did),
+    mimeTypeIdx: index('blobs_mime_type_idx').on(table.mimeType),
+  })
+);
+
+// MST blocks (Merkle Search Tree nodes)
+export const repoBlocks = pgTable(
+  'repo_blocks',
+  {
+    cid: text('cid').primaryKey(),
+    did: text('did')
+      .notNull()
+      .references(() => actorRepos.did, { onDelete: 'cascade' }),
+    content: text('content').notNull(), // CBOR base64
+    referencedBy: text('referenced_by'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    didIdx: index('repo_blocks_did_idx').on(table.did),
+  })
+);
+
+// PDS sessions
+export const sessions = pgTable(
+  'sessions',
+  {
+    id: text('id').primaryKey(),
+    did: text('did')
+      .notNull()
+      .references(() => actorRepos.did, { onDelete: 'cascade' }),
+    accessJwt: text('access_jwt').notNull(),
+    refreshJwt: text('refresh_jwt').notNull(),
+    expiresAt: timestamp('expires_at').notNull(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    didIdx: index('sessions_did_idx').on(table.did),
+    accessJwtIdx: uniqueIndex('sessions_access_jwt_idx').on(table.accessJwt),
+    refreshJwtIdx: uniqueIndex('sessions_refresh_jwt_idx').on(table.refreshJwt),
+    expiresAtIdx: index('sessions_expires_at_idx').on(table.expiresAt),
+  })
+);
+
 // Type exports
 export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
@@ -299,3 +425,17 @@ export type UploadJob = typeof uploadJobs.$inferSelect;
 export type NewUploadJob = typeof uploadJobs.$inferInsert;
 export type UserSettingsRow = typeof userSettings.$inferSelect;
 export type NewUserSettingsRow = typeof userSettings.$inferInsert;
+
+// PDS type exports
+export type ActorRepo = typeof actorRepos.$inferSelect;
+export type NewActorRepo = typeof actorRepos.$inferInsert;
+export type RepoCommit = typeof repoCommits.$inferSelect;
+export type NewRepoCommit = typeof repoCommits.$inferInsert;
+export type RepoRecord = typeof repoRecords.$inferSelect;
+export type NewRepoRecord = typeof repoRecords.$inferInsert;
+export type Blob = typeof blobs.$inferSelect;
+export type NewBlob = typeof blobs.$inferInsert;
+export type RepoBlock = typeof repoBlocks.$inferSelect;
+export type NewRepoBlock = typeof repoBlocks.$inferInsert;
+export type Session = typeof sessions.$inferSelect;
+export type NewSession = typeof sessions.$inferInsert;
