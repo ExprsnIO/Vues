@@ -1,0 +1,52 @@
+{
+  "lexicon": 1,
+  "id": "io.exprsn.video.duet",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A duet or stitch video response to another video",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["video", "original", "type", "createdAt"],
+        "properties": {
+          "video": {
+            "type": "ref",
+            "ref": "io.exprsn.video.post#videoEmbed",
+            "description": "The duet/stitch video content"
+          },
+          "original": {
+            "type": "ref",
+            "ref": "com.atproto.repo.strongRef",
+            "description": "Reference to the original video"
+          },
+          "type": {
+            "type": "string",
+            "knownValues": ["duet", "stitch"],
+            "description": "Type of response video"
+          },
+          "caption": {
+            "type": "string",
+            "maxLength": 2000,
+            "maxGraphemes": 500,
+            "description": "Caption for the duet/stitch"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "maxLength": 10,
+            "description": "Hashtags for discovery"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime",
+            "description": "When the duet/stitch was created"
+          }
+        }
+      }
+    }
+  }
+}

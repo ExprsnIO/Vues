@@ -1,0 +1,18 @@
+{
+  "client_id": "https://exprsn.io/client-metadata.json",
+  "client_name": "Exprsn",
+  "client_uri": "https://exprsn.io",
+  "logo_uri": "https://exprsn.io/logo.png",
+  "tos_uri": "https://exprsn.io/terms",
+  "policy_uri": "https://exprsn.io/privacy",
+  "redirect_uris": [
+    "https://exprsn.io/oauth/callback",
+    "http://localhost:3000/oauth/callback"
+  ],
+  "grant_types": ["authorization_code", "refresh_token"],
+  "response_types": ["code"],
+  "scope": "atproto",
+  "token_endpoint_auth_method": "none",
+  "application_type": "web",
+  "dpop_bound_access_tokens": true
+}

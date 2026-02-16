@@ -1,0 +1,40 @@
+{
+  "lexicon": 1,
+  "id": "io.exprsn.video.completeUpload",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Signal that video upload is complete and start processing",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["uploadId"],
+          "properties": {
+            "uploadId": {
+              "type": "string",
+              "description": "Upload ID from uploadVideo"
+            }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["status"],
+          "properties": {
+            "status": {
+              "type": "string",
+              "knownValues": ["processing", "completed", "failed"]
+            },
+            "jobId": {
+              "type": "string",
+              "description": "Processing job ID for status polling"
+            }
+          }
+        }
+      }
+    }
+  }
+}

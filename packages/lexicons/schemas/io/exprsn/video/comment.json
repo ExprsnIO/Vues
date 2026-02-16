@@ -1,0 +1,77 @@
+{
+  "lexicon": 1,
+  "id": "io.exprsn.video.comment",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A comment on a video post",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["root", "text", "createdAt"],
+        "properties": {
+          "root": {
+            "type": "ref",
+            "ref": "com.atproto.repo.strongRef",
+            "description": "Reference to the video post being commented on"
+          },
+          "parent": {
+            "type": "ref",
+            "ref": "com.atproto.repo.strongRef",
+            "description": "Reference to parent comment (for replies)"
+          },
+          "text": {
+            "type": "string",
+            "maxLength": 1000,
+            "maxGraphemes": 300,
+            "description": "Comment text content"
+          },
+          "mentions": {
+            "type": "array",
+            "items": {
+              "type": "ref",
+              "ref": "#mention"
+            },
+            "maxLength": 10,
+            "description": "Users mentioned in the comment"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime",
+            "description": "When the comment was created"
+          }
+        }
+      }
+    },
+    "mention": {
+      "type": "object",
+      "required": ["did", "index"],
+      "properties": {
+        "did": {
+          "type": "string",
+          "format": "did",
+          "description": "DID of the mentioned user"
+        },
+        "index": {
+          "type": "ref",
+          "ref": "#byteSlice",
+          "description": "Byte position of the mention in text"
+        }
+      }
+    },
+    "byteSlice": {
+      "type": "object",
+      "required": ["byteStart", "byteEnd"],
+      "properties": {
+        "byteStart": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "byteEnd": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

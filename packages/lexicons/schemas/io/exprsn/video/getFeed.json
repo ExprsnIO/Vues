@@ -1,0 +1,205 @@
+{
+  "lexicon": 1,
+  "id": "io.exprsn.video.getFeed",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Get a feed of videos",
+      "parameters": {
+        "type": "params",
+        "required": ["feed"],
+        "properties": {
+          "feed": {
+            "type": "string",
+            "description": "Feed type: 'following', 'trending', 'foryou', 'sound:{id}', or 'tag:{hashtag}'"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 30,
+            "description": "Number of videos to return"
+          },
+          "cursor": {
+            "type": "string",
+            "description": "Pagination cursor"
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["feed"],
+          "properties": {
+            "cursor": {
+              "type": "string",
+              "description": "Cursor for next page"
+            },
+            "feed": {
+              "type": "array",
+              "items": {
+                "type": "ref",
+                "ref": "#feedViewPost"
+              }
+            }
+          }
+        }
+      }
+    },
+    "feedViewPost": {
+      "type": "object",
+      "required": ["post", "author"],
+      "properties": {
+        "post": {
+          "type": "ref",
+          "ref": "#videoView"
+        },
+        "author": {
+          "type": "ref",
+          "ref": "#authorView"
+        },
+        "reason": {
+          "type": "ref",
+          "ref": "#feedReason"
+        }
+      }
+    },
+    "videoView": {
+      "type": "object",
+      "required": ["uri", "cid", "video", "createdAt"],
+      "properties": {
+        "uri": {
+          "type": "string",
+          "format": "at-uri"
+        },
+        "cid": {
+          "type": "string",
+          "format": "cid"
+        },
+        "video": {
+          "type": "ref",
+          "ref": "io.exprsn.video.post#videoEmbed"
+        },
+        "caption": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "sound": {
+          "type": "ref",
+          "ref": "io.exprsn.video.post#soundRef"
+        },
+        "likeCount": {
+          "type": "integer",
+          "default": 0
+        },
+        "commentCount": {
+          "type": "integer",
+          "default": 0
+        },
+        "shareCount": {
+          "type": "integer",
+          "default": 0
+        },
+        "viewCount": {
+          "type": "integer",
+          "default": 0
+        },
+        "viewerLike": {
+          "type": "string",
+          "format": "at-uri",
+          "description": "URI of viewer's like record, if liked"
+        },
+        "indexedAt": {
+          "type": "string",
+          "format": "datetime"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "datetime"
+        }
+      }
+    },
+    "authorView": {
+      "type": "object",
+      "required": ["did", "handle"],
+      "properties": {
+        "did": {
+          "type": "string",
+          "format": "did"
+        },
+        "handle": {
+          "type": "string",
+          "format": "handle"
+        },
+        "displayName": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "avatar": {
+          "type": "string",
+          "format": "uri"
+        },
+        "verified": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "feedReason": {
+      "type": "union",
+      "refs": ["#reasonTrending", "#reasonFollowing", "#reasonSound", "#reasonHashtag"]
+    },
+    "reasonTrending": {
+      "type": "object",
+      "required": ["$type"],
+      "properties": {
+        "$type": {
+          "type": "string",
+          "const": "io.exprsn.video.getFeed#reasonTrending"
+        }
+      }
+    },
+    "reasonFollowing": {
+      "type": "object",
+      "required": ["$type"],
+      "properties": {
+        "$type": {
+          "type": "string",
+          "const": "io.exprsn.video.getFeed#reasonFollowing"
+        }
+      }
+    },
+    "reasonSound": {
+      "type": "object",
+      "required": ["$type", "soundId"],
+      "properties": {
+        "$type": {
+          "type": "string",
+          "const": "io.exprsn.video.getFeed#reasonSound"
+        },
+        "soundId": {
+          "type": "string"
+        }
+      }
+    },
+    "reasonHashtag": {
+      "type": "object",
+      "required": ["$type", "tag"],
+      "properties": {
+        "$type": {
+          "type": "string",
+          "const": "io.exprsn.video.getFeed#reasonHashtag"
+        },
+        "tag": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

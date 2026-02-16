@@ -1,0 +1,98 @@
+{
+  "lexicon": 1,
+  "id": "io.exprsn.video.getComments",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Get comments for a video post",
+      "parameters": {
+        "type": "params",
+        "required": ["uri"],
+        "properties": {
+          "uri": {
+            "type": "string",
+            "format": "at-uri",
+            "description": "AT-URI of the video post"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 50
+          },
+          "cursor": {
+            "type": "string"
+          },
+          "sort": {
+            "type": "string",
+            "knownValues": ["top", "newest"],
+            "default": "top"
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["comments"],
+          "properties": {
+            "cursor": {
+              "type": "string"
+            },
+            "comments": {
+              "type": "array",
+              "items": {
+                "type": "ref",
+                "ref": "#commentView"
+              }
+            }
+          }
+        }
+      }
+    },
+    "commentView": {
+      "type": "object",
+      "required": ["uri", "cid", "author", "text", "createdAt"],
+      "properties": {
+        "uri": {
+          "type": "string",
+          "format": "at-uri"
+        },
+        "cid": {
+          "type": "string",
+          "format": "cid"
+        },
+        "author": {
+          "type": "ref",
+          "ref": "io.exprsn.video.getFeed#authorView"
+        },
+        "text": {
+          "type": "string"
+        },
+        "likeCount": {
+          "type": "integer",
+          "default": 0
+        },
+        "replyCount": {
+          "type": "integer",
+          "default": 0
+        },
+        "viewerLike": {
+          "type": "string",
+          "format": "at-uri"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "datetime"
+        },
+        "replies": {
+          "type": "array",
+          "items": {
+            "type": "ref",
+            "ref": "#commentView"
+          }
+        }
+      }
+    }
+  }
+}

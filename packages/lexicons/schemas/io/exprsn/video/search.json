@@ -1,0 +1,102 @@
+{
+  "lexicon": 1,
+  "id": "io.exprsn.video.search",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Search for videos, users, or sounds",
+      "parameters": {
+        "type": "params",
+        "required": ["q"],
+        "properties": {
+          "q": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "Search query"
+          },
+          "type": {
+            "type": "string",
+            "knownValues": ["videos", "users", "sounds", "all"],
+            "default": "all",
+            "description": "Type of results to return"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50,
+            "default": 20
+          },
+          "cursor": {
+            "type": "string"
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "cursor": {
+              "type": "string"
+            },
+            "videos": {
+              "type": "array",
+              "items": {
+                "type": "ref",
+                "ref": "io.exprsn.video.getFeed#feedViewPost"
+              }
+            },
+            "users": {
+              "type": "array",
+              "items": {
+                "type": "ref",
+                "ref": "#userSearchResult"
+              }
+            },
+            "sounds": {
+              "type": "array",
+              "items": {
+                "type": "ref",
+                "ref": "io.exprsn.video.getSounds#soundView"
+              }
+            }
+          }
+        }
+      }
+    },
+    "userSearchResult": {
+      "type": "object",
+      "required": ["did", "handle"],
+      "properties": {
+        "did": {
+          "type": "string",
+          "format": "did"
+        },
+        "handle": {
+          "type": "string",
+          "format": "handle"
+        },
+        "displayName": {
+          "type": "string"
+        },
+        "avatar": {
+          "type": "string",
+          "format": "uri"
+        },
+        "bio": {
+          "type": "string"
+        },
+        "followerCount": {
+          "type": "integer"
+        },
+        "videoCount": {
+          "type": "integer"
+        },
+        "verified": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

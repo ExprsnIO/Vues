@@ -1,0 +1,49 @@
+{
+  "lexicon": 1,
+  "id": "io.exprsn.video.sound",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A sound/audio that can be used in videos",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["title", "audio", "createdAt"],
+        "properties": {
+          "title": {
+            "type": "string",
+            "maxLength": 200,
+            "description": "Sound title"
+          },
+          "artist": {
+            "type": "string",
+            "maxLength": 200,
+            "description": "Artist or creator name"
+          },
+          "audio": {
+            "type": "blob",
+            "accept": ["audio/mpeg", "audio/mp4", "audio/aac"],
+            "maxSize": 10485760,
+            "description": "Audio file (max 10MB)"
+          },
+          "duration": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 180,
+            "description": "Duration in seconds"
+          },
+          "originalVideoUri": {
+            "type": "string",
+            "format": "at-uri",
+            "description": "URI of the original video this audio came from"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime",
+            "description": "When the sound was created"
+          }
+        }
+      }
+    }
+  }
+}

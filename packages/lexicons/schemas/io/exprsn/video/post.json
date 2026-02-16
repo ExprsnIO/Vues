@@ -1,0 +1,169 @@
+{
+  "lexicon": 1,
+  "id": "io.exprsn.video.post",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A short-form video post on Exprsn",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["video", "createdAt"],
+        "properties": {
+          "video": {
+            "type": "ref",
+            "ref": "#videoEmbed",
+            "description": "The video content and metadata"
+          },
+          "caption": {
+            "type": "string",
+            "maxLength": 2000,
+            "maxGraphemes": 500,
+            "description": "Text caption for the video"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "maxLength": 10,
+            "description": "Hashtags for discovery"
+          },
+          "sound": {
+            "type": "ref",
+            "ref": "#soundRef",
+            "description": "Reference to the sound/audio used"
+          },
+          "mentions": {
+            "type": "array",
+            "items": {
+              "type": "ref",
+              "ref": "#mention"
+            },
+            "maxLength": 10,
+            "description": "Users mentioned in the caption"
+          },
+          "visibility": {
+            "type": "string",
+            "knownValues": ["public", "followers"],
+            "default": "public",
+            "description": "Who can see this video"
+          },
+          "allowDuet": {
+            "type": "boolean",
+            "default": true,
+            "description": "Whether other users can duet this video"
+          },
+          "allowStitch": {
+            "type": "boolean",
+            "default": true,
+            "description": "Whether other users can stitch this video"
+          },
+          "allowComments": {
+            "type": "boolean",
+            "default": true,
+            "description": "Whether comments are enabled"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime",
+            "description": "When the post was created"
+          }
+        }
+      }
+    },
+    "videoEmbed": {
+      "type": "object",
+      "description": "Video content with CDN URLs for optimized delivery",
+      "required": ["aspectRatio", "duration"],
+      "properties": {
+        "blob": {
+          "type": "blob",
+          "accept": ["video/mp4", "video/webm", "video/quicktime"],
+          "maxSize": 104857600,
+          "description": "Original video blob (max 100MB)"
+        },
+        "thumbnail": {
+          "type": "blob",
+          "accept": ["image/jpeg", "image/png", "image/webp"],
+          "maxSize": 1000000,
+          "description": "Video thumbnail image (max 1MB)"
+        },
+        "aspectRatio": {
+          "type": "ref",
+          "ref": "#aspectRatio",
+          "description": "Video aspect ratio"
+        },
+        "duration": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 180,
+          "description": "Duration in seconds (max 3 minutes)"
+        },
+        "cdnUrl": {
+          "type": "string",
+          "format": "uri",
+          "description": "CDN URL for optimized playback"
+        },
+        "hlsPlaylist": {
+          "type": "string",
+          "format": "uri",
+          "description": "HLS manifest URL for adaptive streaming"
+        }
+      }
+    },
+    "aspectRatio": {
+      "type": "object",
+      "required": ["width", "height"],
+      "properties": {
+        "width": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Width component of aspect ratio"
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Height component of aspect ratio"
+        }
+      }
+    },
+    "soundRef": {
+      "type": "object",
+      "description": "Reference to audio/sound used in the video",
+      "properties": {
+        "originalPostUri": {
+          "type": "string",
+          "format": "at-uri",
+          "description": "URI of the post containing original audio"
+        },
+        "soundId": {
+          "type": "string",
+          "description": "Unique identifier for the sound"
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 200,
+          "description": "Sound title"
+        },
+        "artist": {
+          "type": "string",
+          "maxLength": 200,
+          "description": "Artist or creator name"
+        }
+      }
+    },
+    "mention": {
+      "type": "object",
+      "required": ["did"],
+      "properties": {
+        "did": {
+          "type": "string",
+          "format": "did",
+          "description": "DID of the mentioned user"
+        }
+      }
+    }
+  }
+}

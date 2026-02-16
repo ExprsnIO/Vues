@@ -1,0 +1,52 @@
+{
+  "lexicon": 1,
+  "id": "io.exprsn.video.uploadVideo",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Get a presigned URL for video upload",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["contentType"],
+          "properties": {
+            "contentType": {
+              "type": "string",
+              "description": "MIME type of the video file"
+            },
+            "size": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 104857600,
+              "description": "File size in bytes (max 100MB)"
+            }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["uploadId", "uploadUrl", "expiresAt"],
+          "properties": {
+            "uploadId": {
+              "type": "string",
+              "description": "Unique identifier for this upload"
+            },
+            "uploadUrl": {
+              "type": "string",
+              "format": "uri",
+              "description": "Presigned URL to upload the video"
+            },
+            "expiresAt": {
+              "type": "string",
+              "format": "datetime",
+              "description": "When the upload URL expires"
+            }
+          }
+        }
+      }
+    }
+  }
+}

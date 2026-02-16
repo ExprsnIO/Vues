@@ -1,0 +1,226 @@
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3002';
+
+export interface VideoView {
+  uri: string;
+  cid: string;
+  author: {
+    did: string;
+    handle: string;
+    displayName?: string;
+    avatar?: string;
+  };
+  caption?: string;
+  tags?: string[];
+  cdnUrl?: string;
+  hlsPlaylist?: string;
+  thumbnailUrl?: string;
+  duration?: number;
+  aspectRatio?: { width: number; height: number };
+  viewCount: number;
+  likeCount: number;
+  commentCount: number;
+  shareCount: number;
+  createdAt: string;
+  viewer?: {
+    liked?: boolean;
+    likeUri?: string;
+  };
+}
+
+export interface FeedResponse {
+  feed: VideoView[];
+  cursor?: string;
+}
+
+export interface CommentView {
+  uri: string;
+  author: {
+    did: string;
+    handle: string;
+    displayName?: string;
+    avatar?: string;
+  };
+  text: string;
+  likeCount: number;
+  replyCount: number;
+  createdAt: string;
+  viewer?: {
+    liked?: boolean;
+  };
+}
+
+export interface CommentsResponse {
+  comments: CommentView[];
+  cursor?: string;
+}
+
+class ApiClient {
+  private baseUrl: string;
+  private sessionToken: string | null = null;
+
+  constructor(baseUrl: string) {
+    this.baseUrl = baseUrl;
+  }
+
+  setSession(token: string | null) {
+    this.sessionToken = token;
+  }
+
+  private async fetch<T>(
+    endpoint: string,
+    options: RequestInit = {}
+  ): Promise<T> {
+    const headers: HeadersInit = {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    };
+
+    if (this.sessionToken) {
+      (headers as Record<string, string>)['Authorization'] =
+        `Bearer ${this.sessionToken}`;
+    }
+
+    const response = await fetch(`${this.baseUrl}${endpoint}`, {
+      ...options,
+      headers,
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.message || `API error: ${response.status}`);
+    }
+
+    return response.json();
+  }
+
+  async getFeed(
+    feed: string = 'trending',
+    cursor?: string,
+    limit: number = 20
+  ): Promise<FeedResponse> {
+    const params = new URLSearchParams({ feed, limit: String(limit) });
+    if (cursor) params.set('cursor', cursor);
+    return this.fetch(`/xrpc/io.exprsn.video.getFeed?${params}`);
+  }
+
+  async getVideo(uri: string): Promise<{ video: VideoView }> {
+    const params = new URLSearchParams({ uri });
+    return this.fetch(`/xrpc/io.exprsn.video.getVideo?${params}`);
+  }
+
+  async getComments(
+    uri: string,
+    cursor?: string,
+    limit: number = 50
+  ): Promise<CommentsResponse> {
+    const params = new URLSearchParams({ uri, limit: String(limit) });
+    if (cursor) params.set('cursor', cursor);
+    return this.fetch(`/xrpc/io.exprsn.video.getComments?${params}`);
+  }
+
+  async like(uri: string, cid: string): Promise<{ uri: string }> {
+    return this.fetch('/xrpc/io.exprsn.video.like', {
+      method: 'POST',
+      body: JSON.stringify({ uri, cid }),
+    });
+  }
+
+  async unlike(likeUri: string): Promise<void> {
+    return this.fetch('/xrpc/io.exprsn.video.unlike', {
+      method: 'POST',
+      body: JSON.stringify({ uri: likeUri }),
+    });
+  }
+
+  async comment(videoUri: string, text: string): Promise<{ uri: string }> {
+    return this.fetch('/xrpc/io.exprsn.video.comment', {
+      method: 'POST',
+      body: JSON.stringify({ videoUri, text }),
+    });
+  }
+
+  async trackView(uri: string): Promise<void> {
+    return this.fetch('/xrpc/io.exprsn.video.trackView', {
+      method: 'POST',
+      body: JSON.stringify({ uri }),
+    });
+  }
+
+  async search(
+    query: string,
+    type: 'videos' | 'users' | 'sounds' = 'videos',
+    cursor?: string
+  ): Promise<{ results: unknown[]; cursor?: string }> {
+    const params = new URLSearchParams({ q: query, type });
+    if (cursor) params.set('cursor', cursor);
+    return this.fetch(`/xrpc/io.exprsn.video.search?${params}`);
+  }
+
+  async getUploadUrl(contentType: string): Promise<{
+    uploadId: string;
+    uploadUrl: string;
+    expiresAt: string;
+  }> {
+    return this.fetch('/xrpc/io.exprsn.video.uploadVideo', {
+      method: 'POST',
+      body: JSON.stringify({ contentType }),
+    });
+  }
+
+  async completeUpload(uploadId: string): Promise<{ status: string }> {
+    return this.fetch('/xrpc/io.exprsn.video.completeUpload', {
+      method: 'POST',
+      body: JSON.stringify({ uploadId }),
+    });
+  }
+
+  async getUploadStatus(
+    uploadId: string
+  ): Promise<{
+    status: 'pending' | 'processing' | 'completed' | 'failed';
+    cdnUrl?: string;
+    hlsPlaylist?: string;
+    thumbnail?: string;
+    error?: string;
+  }> {
+    const params = new URLSearchParams({ uploadId });
+    return this.fetch(`/xrpc/io.exprsn.video.getUploadStatus?${params}`);
+  }
+
+  async createPost(data: {
+    uploadId: string;
+    caption?: string;
+    tags?: string[];
+    soundUri?: string;
+    visibility?: 'public' | 'followers';
+    aspectRatio: { width: number; height: number };
+    duration: number;
+  }): Promise<{ uri: string; cid: string }> {
+    return this.fetch('/xrpc/io.exprsn.video.createPost', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  // Settings API
+  async getSettings(): Promise<{ settings: import('@exprsn/shared').UserSettings }> {
+    return this.fetch('/xrpc/io.exprsn.settings.getSettings');
+  }
+
+  async updateSettings(
+    update: import('@exprsn/shared').UserSettingsUpdate
+  ): Promise<{ settings: import('@exprsn/shared').UserSettings }> {
+    return this.fetch('/xrpc/io.exprsn.settings.updateSettings', {
+      method: 'POST',
+      body: JSON.stringify(update),
+    });
+  }
+
+  async resetSettings(): Promise<{ settings: import('@exprsn/shared').UserSettings }> {
+    return this.fetch('/xrpc/io.exprsn.settings.resetSettings', {
+      method: 'POST',
+    });
+  }
+}
+
+export const api = new ApiClient(API_BASE);

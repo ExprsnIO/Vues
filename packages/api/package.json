@@ -1,0 +1,57 @@
+{
+  "name": "@exprsn/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./db": {
+      "types": "./dist/db/index.d.ts",
+      "import": "./dist/db/index.js"
+    },
+    "./cache": {
+      "types": "./dist/cache/redis.d.ts",
+      "import": "./dist/cache/redis.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "PORT=3002 tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "db:push": "drizzle-kit push",
+    "db:studio": "drizzle-kit studio"
+  },
+  "dependencies": {
+    "@atproto/api": "^0.14.5",
+    "better-sqlite3": "^11.7.0",
+    "@hono/node-server": "^1.13.0",
+    "@atproto/oauth-client-node": "^0.3.16",
+    "@atproto/jwk-jose": "^0.1.3",
+    "@aws-sdk/client-s3": "^3.700.0",
+    "@aws-sdk/s3-request-presigner": "^3.700.0",
+    "@exprsn/lexicons": "workspace:*",
+    "@exprsn/shared": "workspace:*",
+    "@opensearch-project/opensearch": "^2.12.0",
+    "bullmq": "^5.26.0",
+    "drizzle-orm": "^0.38.2",
+    "hono": "^4.6.0",
+    "ioredis": "^5.4.1",
+    "nanoid": "^5.0.9",
+    "postgres": "^3.4.5",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.10.0",
+    "drizzle-kit": "^0.30.1",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}
