@@ -1,4 +1,4 @@
-import Redis from 'ioredis';
+import { Redis } from 'ioredis';
 
 const redisUrl = process.env.REDIS_URL;
 
@@ -59,7 +59,7 @@ class MemoryCache {
   }
 }
 
-type CacheBackend = Redis | MemoryCache;
+type CacheBackend = InstanceType<typeof Redis> | MemoryCache;
 
 async function initRedisConnection(): Promise<{ client: CacheBackend; type: 'redis' | 'memory' }> {
   if (!redisUrl) {
@@ -85,7 +85,7 @@ async function initRedisConnection(): Promise<{ client: CacheBackend; type: 'red
         resolve();
       });
 
-      client.once('error', (err) => {
+      client.once('error', (err: Error) => {
         clearTimeout(timeout);
         client.disconnect();
         reject(err);

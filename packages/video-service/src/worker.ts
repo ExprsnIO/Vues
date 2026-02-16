@@ -6,7 +6,7 @@ import { mkdir, rm, readdir } from 'fs/promises';
 import { join } from 'path';
 import { Readable } from 'stream';
 import { pipeline } from 'stream/promises';
-import Redis from 'ioredis';
+import { Redis } from 'ioredis';
 
 interface TranscodeJob {
   uploadId: string;

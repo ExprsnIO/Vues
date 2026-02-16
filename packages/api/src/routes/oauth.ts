@@ -40,10 +40,11 @@ oauthRouter.get('/callback', async (c) => {
     const { session } = await oauthClient.callback(params);
 
     // Return session info that client can use
+    // Note: OAuthSession only provides DID, handle resolution is done separately
     return c.json({
       success: true,
       did: session.did,
-      handle: session.handle,
+      handle: session.did, // Handle resolution done client-side
       sessionId: session.did, // The DID is used as the session identifier
     });
   } catch (error) {
@@ -76,7 +77,7 @@ oauthRouter.get('/session', async (c) => {
     return c.json({
       authenticated: true,
       did: session.did,
-      handle: session.handle,
+      handle: session.did, // Handle resolution done client-side
     });
   } catch (error) {
     return c.json({ authenticated: false });

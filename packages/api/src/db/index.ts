@@ -1,5 +1,5 @@
-import { drizzle as drizzlePg } from 'drizzle-orm/postgres-js';
-import { drizzle as drizzleSqlite } from 'drizzle-orm/better-sqlite3';
+import { drizzle as drizzlePg, type PostgresJsDatabase } from 'drizzle-orm/postgres-js';
+import { drizzle as drizzleSqlite, type BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import postgres from 'postgres';
 import Database from 'better-sqlite3';
 import * as pgSchema from './schema.js';
@@ -16,8 +16,12 @@ const DEFAULT_POSTGRES_URL = 'postgresql://exprsn:exprsn_dev@localhost:5432/expr
 
 export type DatabaseType = 'postgres' | 'sqlite';
 
+// Use PostgreSQL types as the canonical type since that's the primary database
+type PostgresDb = PostgresJsDatabase<typeof pgSchema>;
+type SqliteDb = BetterSQLite3Database<typeof sqliteSchema>;
+
 interface DatabaseConnection {
-  db: ReturnType<typeof drizzlePg<typeof pgSchema>> | ReturnType<typeof drizzleSqlite<typeof sqliteSchema>>;
+  db: PostgresDb | SqliteDb;
   type: DatabaseType;
   schema: typeof pgSchema | typeof sqliteSchema;
 }
@@ -248,7 +252,9 @@ async function initDatabase(): Promise<DatabaseConnection> {
 // Initialize database connection
 const connection = await initDatabase();
 
-export const db = connection.db;
+// Cast db to PostgreSQL type for consistent API (works at runtime for both)
+// This allows TypeScript to understand the query interface properly
+export const db = connection.db as PostgresDb;
 export const dbType = connection.type;
 export const schema = connection.schema;
 

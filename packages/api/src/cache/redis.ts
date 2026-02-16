@@ -1,4 +1,4 @@
-import Redis from 'ioredis';
+import { Redis } from 'ioredis';
 
 const redisUrl = process.env.REDIS_URL;
 
@@ -57,9 +57,16 @@ class MemoryCache {
   async incr(key: string): Promise<number> {
     return this.incrby(key, 1);
   }
+
+  async expire(key: string, ttlSeconds: number): Promise<number> {
+    const entry = this.store.get(key);
+    if (!entry) return 0;
+    entry.expiresAt = Date.now() + ttlSeconds * 1000;
+    return 1;
+  }
 }
 
-type CacheBackend = Redis | MemoryCache;
+type CacheBackend = InstanceType<typeof Redis> | MemoryCache;
 
 let redis: CacheBackend;
 let cacheType: 'redis' | 'memory';
@@ -89,7 +96,7 @@ async function initRedisConnection(): Promise<{ client: CacheBackend; type: 'red
         resolve();
       });
 
-      client.once('error', (err) => {
+      client.once('error', (err: Error) => {
         clearTimeout(timeout);
         client.disconnect();
         reject(err);

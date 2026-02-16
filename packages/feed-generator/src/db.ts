@@ -1,10 +1,11 @@
-import { drizzle as drizzlePg } from 'drizzle-orm/postgres-js';
-import { drizzle as drizzleSqlite } from 'drizzle-orm/better-sqlite3';
+import { drizzle as drizzlePg, type PostgresJsDatabase } from 'drizzle-orm/postgres-js';
+import { drizzle as drizzleSqlite, type BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import postgres from 'postgres';
 import Database from 'better-sqlite3';
 import { existsSync, mkdirSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
+import type { SQL } from 'drizzle-orm';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = join(__dirname, '..', 'data');
@@ -14,7 +15,9 @@ const DEFAULT_POSTGRES_URL = 'postgresql://exprsn:exprsn_dev@localhost:5432/expr
 
 export type DatabaseType = 'postgres' | 'sqlite';
 
-type DbInstance = ReturnType<typeof drizzlePg> | ReturnType<typeof drizzleSqlite>;
+type PostgresDb = PostgresJsDatabase<Record<string, never>>;
+type SqliteDb = BetterSQLite3Database<Record<string, never>>;
+type DbInstance = PostgresDb | SqliteDb;
 
 interface DatabaseConnection {
   db: DbInstance;
@@ -186,5 +189,25 @@ async function initDatabase(): Promise<DatabaseConnection> {
 // Initialize database connection
 const connection = await initDatabase();
 
-export const db = connection.db;
 export const dbType = connection.type;
+
+// Export the db with proper typing - for SQLite, we export a minimal interface
+// For PostgreSQL, we export the full interface including execute
+export const db = connection.db as PostgresDb;
+
+// Helper to get the PostgreSQL-specific database instance (for raw SQL execution)
+export function getPostgresDb(): PostgresDb | null {
+  if (connection.type === 'postgres') {
+    return connection.db as PostgresDb;
+  }
+  return null;
+}
+
+// Execute raw SQL (PostgreSQL only)
+export async function executeRawSql(query: SQL): Promise<unknown[] | null> {
+  const pgDb = getPostgresDb();
+  if (!pgDb) {
+    return null;
+  }
+  return pgDb.execute(query);
+}

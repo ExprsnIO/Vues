@@ -154,7 +154,7 @@ class UploadService {
       progress: dbRecord.progress,
       cdnUrl: dbRecord.cdnUrl ?? undefined,
       hlsPlaylist: dbRecord.hlsPlaylist ?? undefined,
-      thumbnailUrl: dbRecord.thumbnailUrl ?? undefined,
+      thumbnail: dbRecord.thumbnailUrl ?? undefined,
       error: dbRecord.error ?? undefined,
     };
   }

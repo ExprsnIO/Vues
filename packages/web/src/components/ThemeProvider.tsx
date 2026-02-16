@@ -1,14 +1,10 @@
 'use client';
 
-import { useEffect, useCallback } from 'react';
+import { useEffect, useCallback, type FC, type PropsWithChildren } from 'react';
 import { useSettingsStore, useTheme } from '../stores/settings-store';
 import { themes, themeToCSSVariables, type ThemeColors } from '@exprsn/shared';
 
-interface ThemeProviderProps {
-  children: React.ReactNode;
-}
-
-export function ThemeProvider({ children }: ThemeProviderProps) {
+export const ThemeProvider: FC<PropsWithChildren> = ({ children }) => {
   const { themeId, colorMode, resolvedColorMode, setColorMode } = useTheme();
   const setSystemColorMode = useSettingsStore((state) => state.setSystemColorMode);
   const loadFromServer = useSettingsStore((state) => state.loadFromServer);

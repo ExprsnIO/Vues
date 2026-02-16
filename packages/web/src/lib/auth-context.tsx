@@ -5,7 +5,8 @@ import {
   useContext,
   useEffect,
   useState,
-  type ReactNode,
+  type FC,
+  type PropsWithChildren,
 } from 'react';
 import { getSession, signIn as authSignIn, signOut as authSignOut } from './auth';
 
@@ -23,7 +24,7 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | null>(null);
 
-export function AuthProvider({ children }: { children: ReactNode }) {
+export const AuthProvider: FC<PropsWithChildren> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 

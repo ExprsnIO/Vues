@@ -1,5 +1,5 @@
 import { CronJob } from 'cron';
-import { db, dbType } from '../db.js';
+import { dbType, executeRawSql } from '../db.js';
 import { sql } from 'drizzle-orm';
 
 export class TrendingCalculator {
@@ -34,7 +34,7 @@ export class TrendingCalculator {
       // Score = (views*0.1 + likes + comments*2 + shares*3) / hours_since_post^1.5
       // Plus velocity bonus for recently engaging content
 
-      await db.execute(sql`
+      await executeRawSql(sql`
         WITH video_scores AS (
           SELECT
             v.uri,
@@ -82,7 +82,7 @@ export class TrendingCalculator {
       `);
 
       // Clean up old entries no longer in top 1000
-      await db.execute(sql`
+      await executeRawSql(sql`
         DELETE FROM trending_videos
         WHERE updated_at < NOW() - INTERVAL '10 minutes'
       `);

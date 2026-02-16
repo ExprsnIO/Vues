@@ -40,10 +40,10 @@ export async function handleOAuthCallback(): Promise<{
   }
 
   try {
-    const session = await client.callback(params);
+    const result = await client.callback(params);
     return {
-      did: session.did,
-      handle: session.handle || session.did,
+      did: result.session.did,
+      handle: result.session.did, // ATProto OAuth doesn't provide handle directly
     };
   } catch (error) {
     console.error('OAuth callback error:', error);
@@ -54,12 +54,12 @@ export async function handleOAuthCallback(): Promise<{
 export async function getSession() {
   const client = getOAuthClient();
   try {
-    const session = await client.init();
-    if (session) {
+    const result = await client.init();
+    if (result) {
       return {
-        did: session.did,
-        handle: session.handle || session.did,
-        agent: session,
+        did: result.session.did,
+        handle: result.session.did, // ATProto OAuth doesn't provide handle directly
+        session: result.session,
       };
     }
     return null;
@@ -70,9 +70,9 @@ export async function getSession() {
 
 export async function signOut(): Promise<void> {
   const client = getOAuthClient();
-  const session = await client.init();
-  if (session) {
-    await session.signOut();
+  const result = await client.init();
+  if (result) {
+    await result.session.signOut();
   }
   window.location.href = '/';
 }

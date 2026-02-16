@@ -2,6 +2,7 @@ import WebSocket from 'ws';
 import { db, dbType } from '../db.js';
 import { redis, cacheType } from '../cache.js';
 import { COLLECTIONS } from '@exprsn/shared';
+import { sql } from 'drizzle-orm';
 
 const JETSTREAM_URL = process.env.JETSTREAM_URL || 'wss://jetstream2.us-east.bsky.network/subscribe';
 
@@ -110,6 +111,11 @@ export class JetstreamConsumer {
   }
 
   private async processEvent(event: JetstreamEvent) {
+    // Skip event processing in SQLite mode - raw SQL queries are PostgreSQL-specific
+    if (dbType === 'sqlite') {
+      return;
+    }
+
     if (event.kind !== 'commit' || !event.commit) {
       return;
     }
@@ -174,7 +180,7 @@ export class JetstreamConsumer {
     await this.ensureUser(did);
 
     // Insert video
-    await db.execute`
+    await db.execute(sql`
       INSERT INTO videos (uri, cid, author_did, caption, tags, sound_uri, cdn_url, hls_playlist, thumbnail_url, duration, aspect_ratio, visibility, created_at, indexed_at)
       VALUES (
         ${uri},
@@ -197,29 +203,29 @@ export class JetstreamConsumer {
         caption = EXCLUDED.caption,
         tags = EXCLUDED.tags,
         indexed_at = NOW()
-    `;
+    `);
 
     // Increment user's video count
-    await db.execute`
+    await db.execute(sql`
       UPDATE users SET video_count = video_count + 1, updated_at = NOW()
       WHERE did = ${did}
-    `;
+    `);
   }
 
   private async handleVideoDelete(uri: string) {
     console.log(`Deleting video: ${uri}`);
 
     // Get author before deleting
-    const result = await db.execute`
+    const result = await db.execute(sql`
       DELETE FROM videos WHERE uri = ${uri} RETURNING author_did
-    `;
+    `);
 
     if (result.length > 0) {
       const authorDid = (result[0] as { author_did: string }).author_did;
-      await db.execute`
+      await db.execute(sql`
         UPDATE users SET video_count = GREATEST(0, video_count - 1), updated_at = NOW()
         WHERE did = ${authorDid}
-      `;
+      `);
     }
   }
 
@@ -230,16 +236,16 @@ export class JetstreamConsumer {
 
     await this.ensureUser(did);
 
-    await db.execute`
+    await db.execute(sql`
       INSERT INTO likes (uri, cid, video_uri, author_did, created_at, indexed_at)
       VALUES (${uri}, ${cid}, ${like.subject.uri}, ${did}, ${new Date(like.createdAt)}, NOW())
       ON CONFLICT (uri) DO NOTHING
-    `;
+    `);
 
     // Increment video's like count
-    await db.execute`
+    await db.execute(sql`
       UPDATE videos SET like_count = like_count + 1 WHERE uri = ${like.subject.uri}
-    `;
+    `);
 
     // Update cached counter
     await redis.incr(`counter:likes:${like.subject.uri}`);
@@ -248,15 +254,15 @@ export class JetstreamConsumer {
   private async handleLikeDelete(uri: string) {
     console.log(`Deleting like: ${uri}`);
 
-    const result = await db.execute`
+    const result = await db.execute(sql`
       DELETE FROM likes WHERE uri = ${uri} RETURNING video_uri
-    `;
+    `);
 
     if (result.length > 0) {
       const videoUri = (result[0] as { video_uri: string }).video_uri;
-      await db.execute`
+      await db.execute(sql`
         UPDATE videos SET like_count = GREATEST(0, like_count - 1) WHERE uri = ${videoUri}
-      `;
+      `);
     }
   }
 
@@ -272,7 +278,7 @@ export class JetstreamConsumer {
 
     await this.ensureUser(did);
 
-    await db.execute`
+    await db.execute(sql`
       INSERT INTO comments (uri, cid, video_uri, parent_uri, author_did, text, created_at, indexed_at)
       VALUES (
         ${uri},
@@ -285,39 +291,39 @@ export class JetstreamConsumer {
         NOW()
       )
       ON CONFLICT (uri) DO NOTHING
-    `;
+    `);
 
     // Increment video's comment count
-    await db.execute`
+    await db.execute(sql`
       UPDATE videos SET comment_count = comment_count + 1 WHERE uri = ${comment.root.uri}
-    `;
+    `);
 
     // If this is a reply, increment parent's reply count
     if (comment.parent?.uri) {
-      await db.execute`
+      await db.execute(sql`
         UPDATE comments SET reply_count = reply_count + 1 WHERE uri = ${comment.parent.uri}
-      `;
+      `);
     }
   }
 
   private async handleCommentDelete(uri: string) {
     console.log(`Deleting comment: ${uri}`);
 
-    const result = await db.execute`
+    const result = await db.execute(sql`
       DELETE FROM comments WHERE uri = ${uri} RETURNING video_uri, parent_uri
-    `;
+    `);
 
     if (result.length > 0) {
       const { video_uri, parent_uri } = result[0] as { video_uri: string; parent_uri: string | null };
 
-      await db.execute`
+      await db.execute(sql`
         UPDATE videos SET comment_count = GREATEST(0, comment_count - 1) WHERE uri = ${video_uri}
-      `;
+      `);
 
       if (parent_uri) {
-        await db.execute`
+        await db.execute(sql`
           UPDATE comments SET reply_count = GREATEST(0, reply_count - 1) WHERE uri = ${parent_uri}
-        `;
+        `);
       }
     }
   }
@@ -330,23 +336,23 @@ export class JetstreamConsumer {
     await this.ensureUser(did);
     await this.ensureUser(follow.subject);
 
-    await db.execute`
+    await db.execute(sql`
       INSERT INTO follows (uri, cid, follower_did, followee_did, created_at, indexed_at)
       VALUES (${uri}, ${cid}, ${did}, ${follow.subject}, ${new Date(follow.createdAt)}, NOW())
       ON CONFLICT (uri) DO NOTHING
-    `;
+    `);
 
     // Update follower counts
-    await db.execute`UPDATE users SET following_count = following_count + 1 WHERE did = ${did}`;
-    await db.execute`UPDATE users SET follower_count = follower_count + 1 WHERE did = ${follow.subject}`;
+    await db.execute(sql`UPDATE users SET following_count = following_count + 1 WHERE did = ${did}`);
+    await db.execute(sql`UPDATE users SET follower_count = follower_count + 1 WHERE did = ${follow.subject}`);
   }
 
   private async handleFollowDelete(uri: string) {
     console.log(`Deleting follow: ${uri}`);
 
-    const result = await db.execute`
+    const result = await db.execute(sql`
       DELETE FROM follows WHERE uri = ${uri} RETURNING follower_did, followee_did
-    `;
+    `);
 
     if (result.length > 0) {
       const { follower_did, followee_did } = result[0] as {
@@ -354,17 +360,17 @@ export class JetstreamConsumer {
         followee_did: string;
       };
 
-      await db.execute`UPDATE users SET following_count = GREATEST(0, following_count - 1) WHERE did = ${follower_did}`;
-      await db.execute`UPDATE users SET follower_count = GREATEST(0, follower_count - 1) WHERE did = ${followee_did}`;
+      await db.execute(sql`UPDATE users SET following_count = GREATEST(0, following_count - 1) WHERE did = ${follower_did}`);
+      await db.execute(sql`UPDATE users SET follower_count = GREATEST(0, follower_count - 1) WHERE did = ${followee_did}`);
     }
   }
 
   private async ensureUser(did: string) {
     // TODO: Fetch profile from PDS if not exists
-    await db.execute`
+    await db.execute(sql`
       INSERT INTO users (did, handle, created_at, updated_at, indexed_at)
       VALUES (${did}, ${did}, NOW(), NOW(), NOW())
       ON CONFLICT (did) DO NOTHING
-    `;
+    `);
   }
 }

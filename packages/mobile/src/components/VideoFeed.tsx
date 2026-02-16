@@ -9,7 +9,7 @@ import {
 } from 'react-native';
 import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { LegendList } from '@legendapp/list';
-import Video from 'react-native-video';
+import Video, { type VideoRef } from 'react-native-video';
 import { Ionicons } from '@expo/vector-icons';
 import { api, type VideoView } from '@/lib/api';
 import { useAuth } from '@/lib/auth-context';
@@ -87,7 +87,7 @@ export function VideoFeed({ feedType }: VideoFeedProps) {
       viewabilityConfig={{ itemVisiblePercentThreshold: 50 }}
       onEndReached={handleEndReached}
       onEndReachedThreshold={0.5}
-      renderItem={({ item, index }) => (
+      renderItem={({ item, index }: { item: VideoView; index: number }) => (
         <VideoItem video={item} isActive={index === currentIndex} />
       )}
       ListFooterComponent={
@@ -109,7 +109,7 @@ interface VideoItemProps {
 function VideoItem({ video, isActive }: VideoItemProps) {
   const { user } = useAuth();
   const queryClient = useQueryClient();
-  const videoRef = useRef<Video>(null);
+  const videoRef = useRef<VideoRef>(null);
   const [isPaused, setIsPaused] = useState(!isActive);
   const [isMuted, setIsMuted] = useState(false);
   const [isLiked, setIsLiked] = useState(video.viewer?.liked ?? false);
