@@ -132,7 +132,10 @@ function createSqliteTables(sqlite: Database.Database): void {
       author_did TEXT NOT NULL REFERENCES users(did) ON DELETE CASCADE,
       text TEXT NOT NULL,
       like_count INTEGER NOT NULL DEFAULT 0,
+      love_count INTEGER NOT NULL DEFAULT 0,
+      dislike_count INTEGER NOT NULL DEFAULT 0,
       reply_count INTEGER NOT NULL DEFAULT 0,
+      hot_score REAL NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
       indexed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
@@ -140,6 +143,18 @@ function createSqliteTables(sqlite: Database.Database): void {
     CREATE INDEX IF NOT EXISTS comments_parent_idx ON comments(parent_uri);
     CREATE INDEX IF NOT EXISTS comments_author_idx ON comments(author_did);
     CREATE INDEX IF NOT EXISTS comments_created_idx ON comments(created_at);
+    CREATE INDEX IF NOT EXISTS comments_hot_score_idx ON comments(hot_score);
+
+    CREATE TABLE IF NOT EXISTS comment_reactions (
+      id TEXT PRIMARY KEY,
+      comment_uri TEXT NOT NULL REFERENCES comments(uri) ON DELETE CASCADE,
+      author_did TEXT NOT NULL REFERENCES users(did) ON DELETE CASCADE,
+      reaction_type TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS comment_reactions_comment_idx ON comment_reactions(comment_uri);
+    CREATE INDEX IF NOT EXISTS comment_reactions_author_idx ON comment_reactions(author_did);
+    CREATE UNIQUE INDEX IF NOT EXISTS comment_reactions_unique_idx ON comment_reactions(comment_uri, author_did);
 
     CREATE TABLE IF NOT EXISTS follows (
       uri TEXT PRIMARY KEY,

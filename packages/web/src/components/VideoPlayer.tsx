@@ -37,7 +37,15 @@ export function VideoPlayer({
 
   useEffect(() => {
     const video = videoRef.current;
-    if (!video) return;
+    if (!video || !src) return;
+
+    const attemptPlay = () => {
+      if (autoPlay && video.paused) {
+        video.play().catch((err) => {
+          console.log('Autoplay failed:', err.message);
+        });
+      }
+    };
 
     if (src.includes('.m3u8')) {
       if (Hls.isSupported()) {
@@ -49,11 +57,7 @@ export function VideoPlayer({
         hls.attachMedia(video);
         hlsRef.current = hls;
 
-        hls.on(Hls.Events.MANIFEST_PARSED, () => {
-          if (autoPlay) {
-            video.play().catch(() => {});
-          }
-        });
+        hls.on(Hls.Events.MANIFEST_PARSED, attemptPlay);
 
         return () => {
           hls.destroy();
@@ -61,16 +65,18 @@ export function VideoPlayer({
         };
       } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
         video.src = src;
-        if (autoPlay) {
-          video.play().catch(() => {});
-        }
+        video.addEventListener('canplay', attemptPlay, { once: true });
       }
     } else {
+      // For MP4 and other formats
       video.src = src;
-      if (autoPlay) {
-        video.play().catch(() => {});
-      }
+      video.load();
+      video.addEventListener('canplay', attemptPlay, { once: true });
     }
+
+    return () => {
+      video.removeEventListener('canplay', attemptPlay);
+    };
   }, [src, autoPlay]);
 
   useEffect(() => {
@@ -151,7 +157,8 @@ export function VideoPlayer({
         playsInline
         loop={loop}
         muted={isMuted}
-        preload="metadata"
+        autoPlay={autoPlay}
+        preload={autoPlay ? 'auto' : 'metadata'}
       />
 
       {/* Play/Pause overlay icon */}

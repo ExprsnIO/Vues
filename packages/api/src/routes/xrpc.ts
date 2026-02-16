@@ -1,10 +1,11 @@
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { authMiddleware, optionalAuthMiddleware } from '../auth/middleware.js';
-import { db, videos, users, likes, comments, sounds, follows, trendingVideos, userInteractions } from '../db/index.js';
+import { db, videos, users, likes, comments, commentReactions, sounds, follows, trendingVideos, userInteractions } from '../db/index.js';
 import { cacheService, CacheKeys, CACHE_TTL } from '../cache/redis.js';
-import { eq, desc, inArray, and, sql, lt } from 'drizzle-orm';
-import type { VideoView, AuthorView, FeedResult } from '@exprsn/shared';
+import { eq, desc, inArray, and, sql, lt, asc } from 'drizzle-orm';
+import type { VideoView, AuthorView, FeedResult, CommentView, ReactionType, CommentSortType } from '@exprsn/shared';
+import { nanoid } from 'nanoid';
 
 export const xrpcRouter = new Hono();
 
@@ -92,16 +93,26 @@ xrpcRouter.get('/io.exprsn.video.getComments', optionalAuthMiddleware, async (c)
   const uri = c.req.query('uri');
   const limit = Math.min(parseInt(c.req.query('limit') || '50', 10), 100);
   const cursor = c.req.query('cursor');
-  const sort = c.req.query('sort') || 'top';
+  const sort = (c.req.query('sort') || 'top') as CommentSortType;
+  const viewerDid = c.get('did');
 
   if (!uri) {
     throw new HTTPException(400, { message: 'Video URI is required' });
   }
 
-  // Build query with conditional orderBy and cursor
-  const orderByClause = sort === 'top'
-    ? [desc(comments.likeCount), desc(comments.createdAt)]
-    : [desc(comments.createdAt)];
+  // Build query with conditional orderBy based on sort type
+  let orderByClause;
+  switch (sort) {
+    case 'hot':
+      orderByClause = [desc(comments.hotScore), desc(comments.createdAt)];
+      break;
+    case 'recent':
+      orderByClause = [desc(comments.createdAt)];
+      break;
+    case 'top':
+    default:
+      orderByClause = [desc(comments.likeCount), desc(comments.loveCount), desc(comments.createdAt)];
+  }
 
   const whereConditions = cursor
     ? and(eq(comments.videoUri, uri), sql`${comments.parentUri} IS NULL`, lt(comments.createdAt, new Date(parseInt(cursor, 10))))
@@ -116,10 +127,153 @@ xrpcRouter.get('/io.exprsn.video.getComments', optionalAuthMiddleware, async (c)
 
   // Get authors for comments
   const authorDids = [...new Set(results.map((c) => c.authorDid))];
-  const authors = await db.select().from(users).where(inArray(users.did, authorDids));
+  const authors = authorDids.length > 0
+    ? await db.select().from(users).where(inArray(users.did, authorDids))
+    : [];
   const authorMap = new Map(authors.map((a) => [a.did, a]));
 
-  const commentViews = results.map((comment) => {
+  // Get viewer's reactions if authenticated
+  let viewerReactions = new Map<string, ReactionType>();
+  if (viewerDid && results.length > 0) {
+    const commentUris = results.map((c) => c.uri);
+    const reactions = await db
+      .select()
+      .from(commentReactions)
+      .where(and(inArray(commentReactions.commentUri, commentUris), eq(commentReactions.authorDid, viewerDid)));
+    viewerReactions = new Map(reactions.map((r) => [r.commentUri, r.reactionType as ReactionType]));
+  }
+
+  // Get first 3 replies for each comment
+  const commentUris = results.map((c) => c.uri);
+  const allReplies = commentUris.length > 0
+    ? await db
+        .select()
+        .from(comments)
+        .where(inArray(comments.parentUri, commentUris))
+        .orderBy(desc(comments.likeCount), desc(comments.createdAt))
+    : [];
+
+  // Group replies by parent
+  const repliesByParent = new Map<string, typeof allReplies>();
+  for (const reply of allReplies) {
+    if (!reply.parentUri) continue;
+    const existing = repliesByParent.get(reply.parentUri) || [];
+    if (existing.length < 3) {
+      existing.push(reply);
+      repliesByParent.set(reply.parentUri, existing);
+    }
+  }
+
+  // Get authors for replies
+  const replyAuthorDids = [...new Set(allReplies.map((r) => r.authorDid))];
+  const replyAuthors = replyAuthorDids.length > 0
+    ? await db.select().from(users).where(inArray(users.did, replyAuthorDids))
+    : [];
+  for (const author of replyAuthors) {
+    authorMap.set(author.did, author);
+  }
+
+  const commentViews: CommentView[] = results.map((comment) => {
+    const author = authorMap.get(comment.authorDid);
+    const replies = repliesByParent.get(comment.uri) || [];
+
+    return {
+      uri: comment.uri,
+      cid: comment.cid,
+      author: author
+        ? {
+            did: author.did,
+            handle: author.handle,
+            displayName: author.displayName ?? undefined,
+            avatar: author.avatar ?? undefined,
+          }
+        : { did: comment.authorDid, handle: 'unknown' },
+      text: comment.text,
+      likeCount: comment.likeCount,
+      loveCount: comment.loveCount,
+      dislikeCount: comment.dislikeCount,
+      replyCount: comment.replyCount,
+      hotScore: comment.hotScore,
+      createdAt: comment.createdAt.toISOString(),
+      viewer: viewerDid ? { reaction: viewerReactions.get(comment.uri) } : undefined,
+      replies: replies.map((reply) => {
+        const replyAuthor = authorMap.get(reply.authorDid);
+        return {
+          uri: reply.uri,
+          cid: reply.cid,
+          author: replyAuthor
+            ? {
+                did: replyAuthor.did,
+                handle: replyAuthor.handle,
+                displayName: replyAuthor.displayName ?? undefined,
+                avatar: replyAuthor.avatar ?? undefined,
+              }
+            : { did: reply.authorDid, handle: 'unknown' },
+          text: reply.text,
+          parentUri: reply.parentUri ?? undefined,
+          likeCount: reply.likeCount,
+          loveCount: reply.loveCount,
+          dislikeCount: reply.dislikeCount,
+          replyCount: reply.replyCount,
+          hotScore: reply.hotScore,
+          createdAt: reply.createdAt.toISOString(),
+          viewer: viewerDid ? { reaction: viewerReactions.get(reply.uri) } : undefined,
+        };
+      }),
+    };
+  });
+
+  return c.json({
+    comments: commentViews,
+    cursor:
+      results.length === limit ? results[results.length - 1]!.createdAt.getTime().toString() : undefined,
+  });
+});
+
+/**
+ * Get comment replies (nested comments)
+ * GET /xrpc/io.exprsn.video.getCommentReplies
+ */
+xrpcRouter.get('/io.exprsn.video.getCommentReplies', optionalAuthMiddleware, async (c) => {
+  const parentUri = c.req.query('parentUri');
+  const limit = Math.min(parseInt(c.req.query('limit') || '20', 10), 50);
+  const cursor = c.req.query('cursor');
+  const viewerDid = c.get('did');
+
+  if (!parentUri) {
+    throw new HTTPException(400, { message: 'Parent URI is required' });
+  }
+
+  const whereConditions = cursor
+    ? and(eq(comments.parentUri, parentUri), lt(comments.createdAt, new Date(parseInt(cursor, 10))))
+    : eq(comments.parentUri, parentUri);
+
+  const results = await db
+    .select()
+    .from(comments)
+    .where(whereConditions)
+    .orderBy(desc(comments.likeCount), desc(comments.createdAt))
+    .limit(limit);
+
+  // Get authors
+  const authorDids = [...new Set(results.map((c) => c.authorDid))];
+  const authors = authorDids.length > 0
+    ? await db.select().from(users).where(inArray(users.did, authorDids))
+    : [];
+  const authorMap = new Map(authors.map((a) => [a.did, a]));
+
+  // Get viewer's reactions if authenticated
+  let viewerReactions = new Map<string, ReactionType>();
+  if (viewerDid && results.length > 0) {
+    const commentUris = results.map((c) => c.uri);
+    const reactions = await db
+      .select()
+      .from(commentReactions)
+      .where(and(inArray(commentReactions.commentUri, commentUris), eq(commentReactions.authorDid, viewerDid)));
+    viewerReactions = new Map(reactions.map((r) => [r.commentUri, r.reactionType as ReactionType]));
+  }
+
+  const commentViews: CommentView[] = results.map((comment) => {
     const author = authorMap.get(comment.authorDid);
     return {
       uri: comment.uri,
@@ -128,14 +282,19 @@ xrpcRouter.get('/io.exprsn.video.getComments', optionalAuthMiddleware, async (c)
         ? {
             did: author.did,
             handle: author.handle,
-            displayName: author.displayName,
-            avatar: author.avatar,
+            displayName: author.displayName ?? undefined,
+            avatar: author.avatar ?? undefined,
           }
         : { did: comment.authorDid, handle: 'unknown' },
       text: comment.text,
+      parentUri: comment.parentUri ?? undefined,
       likeCount: comment.likeCount,
+      loveCount: comment.loveCount,
+      dislikeCount: comment.dislikeCount,
       replyCount: comment.replyCount,
+      hotScore: comment.hotScore,
       createdAt: comment.createdAt.toISOString(),
+      viewer: viewerDid ? { reaction: viewerReactions.get(comment.uri) } : undefined,
     };
   });
 
@@ -482,6 +641,291 @@ xrpcRouter.post('/io.exprsn.video.trackView', optionalAuthMiddleware, async (c) 
 
   return c.json({ success: true });
 });
+
+/**
+ * Create a comment
+ * POST /xrpc/io.exprsn.video.createComment
+ */
+xrpcRouter.post('/io.exprsn.video.createComment', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  const { videoUri, text, parentUri } = await c.req.json<{
+    videoUri: string;
+    text: string;
+    parentUri?: string;
+  }>();
+
+  if (!videoUri || !text) {
+    throw new HTTPException(400, { message: 'Video URI and text are required' });
+  }
+
+  if (text.length > 500) {
+    throw new HTTPException(400, { message: 'Comment text must be 500 characters or less' });
+  }
+
+  // Verify video exists
+  const video = await db.query.videos.findFirst({
+    where: eq(videos.uri, videoUri),
+  });
+
+  if (!video) {
+    throw new HTTPException(404, { message: 'Video not found' });
+  }
+
+  // If replying, verify parent comment exists
+  if (parentUri) {
+    const parentComment = await db.query.comments.findFirst({
+      where: eq(comments.uri, parentUri),
+    });
+    if (!parentComment) {
+      throw new HTTPException(404, { message: 'Parent comment not found' });
+    }
+  }
+
+  const commentUri = `at://${userDid}/io.exprsn.video.comment/${nanoid()}`;
+  const commentCid = nanoid(); // Simplified CID for now
+  const now = new Date();
+
+  await db.insert(comments).values({
+    uri: commentUri,
+    cid: commentCid,
+    videoUri,
+    parentUri: parentUri ?? null,
+    authorDid: userDid,
+    text,
+    likeCount: 0,
+    loveCount: 0,
+    dislikeCount: 0,
+    replyCount: 0,
+    hotScore: 0,
+    createdAt: now,
+    indexedAt: now,
+  });
+
+  // Update counts
+  await db
+    .update(videos)
+    .set({ commentCount: sql`${videos.commentCount} + 1` })
+    .where(eq(videos.uri, videoUri));
+
+  if (parentUri) {
+    await db
+      .update(comments)
+      .set({ replyCount: sql`${comments.replyCount} + 1` })
+      .where(eq(comments.uri, parentUri));
+  }
+
+  return c.json({ uri: commentUri, cid: commentCid });
+});
+
+/**
+ * Delete a comment
+ * POST /xrpc/io.exprsn.video.deleteComment
+ */
+xrpcRouter.post('/io.exprsn.video.deleteComment', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  const { uri } = await c.req.json<{ uri: string }>();
+
+  if (!uri) {
+    throw new HTTPException(400, { message: 'Comment URI is required' });
+  }
+
+  const comment = await db.query.comments.findFirst({
+    where: eq(comments.uri, uri),
+  });
+
+  if (!comment) {
+    throw new HTTPException(404, { message: 'Comment not found' });
+  }
+
+  if (comment.authorDid !== userDid) {
+    throw new HTTPException(403, { message: 'You can only delete your own comments' });
+  }
+
+  // Delete the comment and all replies
+  await db.delete(comments).where(eq(comments.parentUri, uri));
+  await db.delete(comments).where(eq(comments.uri, uri));
+
+  // Update video comment count
+  await db
+    .update(videos)
+    .set({ commentCount: sql`${videos.commentCount} - 1 - ${comment.replyCount}` })
+    .where(eq(videos.uri, comment.videoUri));
+
+  // Update parent reply count if this was a reply
+  if (comment.parentUri) {
+    await db
+      .update(comments)
+      .set({ replyCount: sql`${comments.replyCount} - 1` })
+      .where(eq(comments.uri, comment.parentUri));
+  }
+
+  return c.json({ success: true });
+});
+
+/**
+ * React to a comment (like/love/dislike)
+ * POST /xrpc/io.exprsn.video.reactToComment
+ */
+xrpcRouter.post('/io.exprsn.video.reactToComment', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  const { commentUri, reactionType } = await c.req.json<{
+    commentUri: string;
+    reactionType: ReactionType;
+  }>();
+
+  if (!commentUri || !reactionType) {
+    throw new HTTPException(400, { message: 'Comment URI and reaction type are required' });
+  }
+
+  if (!['like', 'love', 'dislike'].includes(reactionType)) {
+    throw new HTTPException(400, { message: 'Invalid reaction type' });
+  }
+
+  const comment = await db.query.comments.findFirst({
+    where: eq(comments.uri, commentUri),
+  });
+
+  if (!comment) {
+    throw new HTTPException(404, { message: 'Comment not found' });
+  }
+
+  // Check for existing reaction
+  const existingReaction = await db.query.commentReactions.findFirst({
+    where: and(
+      eq(commentReactions.commentUri, commentUri),
+      eq(commentReactions.authorDid, userDid)
+    ),
+  });
+
+  if (existingReaction) {
+    // If same reaction, do nothing
+    if (existingReaction.reactionType === reactionType) {
+      return c.json({ success: true, reactionType });
+    }
+
+    // Update reaction type and adjust counts
+    const oldType = existingReaction.reactionType as ReactionType;
+    await db
+      .update(commentReactions)
+      .set({ reactionType, createdAt: new Date() })
+      .where(eq(commentReactions.id, existingReaction.id));
+
+    // Decrement old count, increment new count
+    const updates: Record<string, unknown> = {};
+    if (oldType === 'like') updates.likeCount = sql`${comments.likeCount} - 1`;
+    if (oldType === 'love') updates.loveCount = sql`${comments.loveCount} - 1`;
+    if (oldType === 'dislike') updates.dislikeCount = sql`${comments.dislikeCount} - 1`;
+    if (reactionType === 'like') updates.likeCount = sql`${comments.likeCount} + 1`;
+    if (reactionType === 'love') updates.loveCount = sql`${comments.loveCount} + 1`;
+    if (reactionType === 'dislike') updates.dislikeCount = sql`${comments.dislikeCount} + 1`;
+
+    await db.update(comments).set(updates).where(eq(comments.uri, commentUri));
+  } else {
+    // Create new reaction
+    await db.insert(commentReactions).values({
+      id: nanoid(),
+      commentUri,
+      authorDid: userDid,
+      reactionType,
+      createdAt: new Date(),
+    });
+
+    // Increment count
+    const countField =
+      reactionType === 'like'
+        ? { likeCount: sql`${comments.likeCount} + 1` }
+        : reactionType === 'love'
+          ? { loveCount: sql`${comments.loveCount} + 1` }
+          : { dislikeCount: sql`${comments.dislikeCount} + 1` };
+
+    await db.update(comments).set(countField).where(eq(comments.uri, commentUri));
+  }
+
+  // Recalculate hot score
+  await updateCommentHotScore(commentUri);
+
+  return c.json({ success: true, reactionType });
+});
+
+/**
+ * Remove reaction from a comment
+ * POST /xrpc/io.exprsn.video.unreactToComment
+ */
+xrpcRouter.post('/io.exprsn.video.unreactToComment', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  const { commentUri } = await c.req.json<{ commentUri: string }>();
+
+  if (!commentUri) {
+    throw new HTTPException(400, { message: 'Comment URI is required' });
+  }
+
+  const existingReaction = await db.query.commentReactions.findFirst({
+    where: and(
+      eq(commentReactions.commentUri, commentUri),
+      eq(commentReactions.authorDid, userDid)
+    ),
+  });
+
+  if (!existingReaction) {
+    return c.json({ success: true });
+  }
+
+  // Delete reaction
+  await db.delete(commentReactions).where(eq(commentReactions.id, existingReaction.id));
+
+  // Decrement count
+  const reactionType = existingReaction.reactionType as ReactionType;
+  const countField =
+    reactionType === 'like'
+      ? { likeCount: sql`${comments.likeCount} - 1` }
+      : reactionType === 'love'
+        ? { loveCount: sql`${comments.loveCount} - 1` }
+        : { dislikeCount: sql`${comments.dislikeCount} - 1` };
+
+  await db.update(comments).set(countField).where(eq(comments.uri, commentUri));
+
+  // Recalculate hot score
+  await updateCommentHotScore(commentUri);
+
+  return c.json({ success: true });
+});
+
+/**
+ * Helper: Update comment hot score
+ * Uses Wilson score lower bound + time decay
+ */
+async function updateCommentHotScore(commentUri: string): Promise<void> {
+  const comment = await db.query.comments.findFirst({
+    where: eq(comments.uri, commentUri),
+  });
+
+  if (!comment) return;
+
+  const positive = comment.likeCount + comment.loveCount * 2; // Love counts double
+  const negative = comment.dislikeCount;
+  const total = positive + negative;
+
+  if (total === 0) {
+    await db.update(comments).set({ hotScore: 0 }).where(eq(comments.uri, commentUri));
+    return;
+  }
+
+  // Wilson score lower bound
+  const z = 1.96; // 95% confidence
+  const phat = positive / total;
+  const wilson =
+    (phat + (z * z) / (2 * total) - z * Math.sqrt((phat * (1 - phat) + (z * z) / (4 * total)) / total)) /
+    (1 + (z * z) / total);
+
+  // Time decay (half-life of 24 hours)
+  const ageHours = (Date.now() - comment.createdAt.getTime()) / (1000 * 60 * 60);
+  const timeDecay = Math.pow(0.5, ageHours / 24);
+
+  // Final score
+  const hotScore = wilson * Math.log(total + 1) * timeDecay;
+
+  await db.update(comments).set({ hotScore }).where(eq(comments.uri, commentUri));
+}
 
 // =============================================================================
 // Helper Functions

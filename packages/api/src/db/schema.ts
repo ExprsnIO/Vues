@@ -106,7 +106,10 @@ export const comments = pgTable(
       .references(() => users.did, { onDelete: 'cascade' }),
     text: text('text').notNull(),
     likeCount: integer('like_count').default(0).notNull(),
+    loveCount: integer('love_count').default(0).notNull(),
+    dislikeCount: integer('dislike_count').default(0).notNull(),
     replyCount: integer('reply_count').default(0).notNull(),
+    hotScore: real('hot_score').default(0).notNull(),
     createdAt: timestamp('created_at').notNull(),
     indexedAt: timestamp('indexed_at').defaultNow().notNull(),
   },
@@ -115,6 +118,31 @@ export const comments = pgTable(
     parentIdx: index('comments_parent_idx').on(table.parentUri),
     authorIdx: index('comments_author_idx').on(table.authorDid),
     createdIdx: index('comments_created_idx').on(table.createdAt),
+    hotScoreIdx: index('comments_hot_score_idx').on(table.hotScore),
+  })
+);
+
+// Comment reactions (like/love/dislike)
+export const commentReactions = pgTable(
+  'comment_reactions',
+  {
+    id: text('id').primaryKey(),
+    commentUri: text('comment_uri')
+      .notNull()
+      .references(() => comments.uri, { onDelete: 'cascade' }),
+    authorDid: text('author_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    reactionType: text('reaction_type').notNull(), // 'like' | 'love' | 'dislike'
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    commentIdx: index('comment_reactions_comment_idx').on(table.commentUri),
+    authorIdx: index('comment_reactions_author_idx').on(table.authorDid),
+    uniqueReaction: uniqueIndex('comment_reactions_unique_idx').on(
+      table.commentUri,
+      table.authorDid
+    ),
   })
 );
 
@@ -413,6 +441,8 @@ export type Like = typeof likes.$inferSelect;
 export type NewLike = typeof likes.$inferInsert;
 export type Comment = typeof comments.$inferSelect;
 export type NewComment = typeof comments.$inferInsert;
+export type CommentReaction = typeof commentReactions.$inferSelect;
+export type NewCommentReaction = typeof commentReactions.$inferInsert;
 export type Follow = typeof follows.$inferSelect;
 export type NewFollow = typeof follows.$inferInsert;
 export type Sound = typeof sounds.$inferSelect;

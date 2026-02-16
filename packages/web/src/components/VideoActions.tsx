@@ -5,6 +5,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { api, type VideoView } from '@/lib/api';
 import { formatCount } from '@/lib/utils';
 import { useAuth } from '@/lib/auth-context';
+import { CommentThread } from './comments/CommentThread';
 
 interface VideoActionsProps {
   video: VideoView;
@@ -137,44 +138,14 @@ export function VideoActions({ video }: VideoActionsProps) {
         )}
       </div>
 
-      {/* Comments modal - placeholder */}
+      {/* Comments modal */}
       {showComments && (
-        <CommentsModal
+        <CommentThread
           videoUri={video.uri}
           onClose={() => setShowComments(false)}
         />
       )}
     </>
-  );
-}
-
-function CommentsModal({
-  videoUri,
-  onClose,
-}: {
-  videoUri: string;
-  onClose: () => void;
-}) {
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-end justify-center"
-      onClick={onClose}
-    >
-      <div
-        className="w-full max-w-lg h-[70vh] bg-zinc-900 rounded-t-2xl p-4"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-semibold text-white">Comments</h2>
-          <button onClick={onClose} className="text-gray-400 hover:text-white">
-            <CloseIcon className="w-6 h-6" />
-          </button>
-        </div>
-        <div className="text-gray-400 text-center py-8">
-          Comments coming soon...
-        </div>
-      </div>
-    </div>
   );
 }
 

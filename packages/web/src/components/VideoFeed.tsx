@@ -150,16 +150,18 @@ const VideoItem = ({
   isActive,
   ref,
 }: VideoItemProps & { ref: (el: HTMLDivElement | null) => void }) => {
-  const src = video.hlsPlaylist || video.cdnUrl || '';
+  // Video data is nested under video.video from the API
+  const videoEmbed = video.video;
+  const src = videoEmbed?.hlsPlaylist || videoEmbed?.cdnUrl || '';
 
   return (
     <div ref={ref} className="relative h-screen w-full snap-start">
       <VideoPlayer
         src={src}
-        poster={video.thumbnailUrl}
+        poster={videoEmbed?.thumbnail || video.thumbnailUrl}
         autoPlay={isActive}
         loop
-        muted={!isActive}
+        muted  // Must be muted for autoplay to work in browsers
         className="h-full w-full"
       />
       <VideoOverlay video={video} />

@@ -51,15 +51,34 @@ export interface SoundRef {
   originalPostUri?: string;
 }
 
+// Comment reaction types
+export type ReactionType = 'like' | 'love' | 'dislike';
+export type CommentSortType = 'top' | 'recent' | 'hot';
+
 export interface CommentView {
   uri: string;
   cid: string;
   author: AuthorView;
   text: string;
+  parentUri?: string;
   likeCount: number;
+  loveCount: number;
+  dislikeCount: number;
   replyCount: number;
+  hotScore: number;
   createdAt: string;
+  viewer?: {
+    reaction?: ReactionType;
+  };
   replies?: CommentView[];
+}
+
+export interface CommentReactionView {
+  id: string;
+  commentUri: string;
+  authorDid: string;
+  reactionType: ReactionType;
+  createdAt: string;
 }
 
 export interface FeedResult {

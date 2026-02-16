@@ -8,9 +8,18 @@ export interface VideoView {
     handle: string;
     displayName?: string;
     avatar?: string;
+    verified?: boolean;
+  };
+  video: {
+    thumbnail?: string;
+    aspectRatio: { width: number; height: number };
+    duration: number;
+    cdnUrl?: string;
+    hlsPlaylist?: string;
   };
   caption?: string;
   tags?: string[];
+  // Legacy flat fields for backwards compatibility
   cdnUrl?: string;
   hlsPlaylist?: string;
   thumbnailUrl?: string;
@@ -21,6 +30,8 @@ export interface VideoView {
   commentCount: number;
   shareCount: number;
   createdAt: string;
+  indexedAt: string;
+  viewerLike?: string;
   viewer?: {
     liked?: boolean;
     likeUri?: string;
@@ -32,8 +43,12 @@ export interface FeedResponse {
   cursor?: string;
 }
 
+export type ReactionType = 'like' | 'love' | 'dislike';
+export type CommentSortType = 'top' | 'recent' | 'hot';
+
 export interface CommentView {
   uri: string;
+  cid: string;
   author: {
     did: string;
     handle: string;
@@ -41,12 +56,17 @@ export interface CommentView {
     avatar?: string;
   };
   text: string;
+  parentUri?: string;
   likeCount: number;
+  loveCount: number;
+  dislikeCount: number;
   replyCount: number;
+  hotScore: number;
   createdAt: string;
   viewer?: {
-    liked?: boolean;
+    reaction?: ReactionType;
   };
+  replies?: CommentView[];
 }
 
 export interface CommentsResponse {
@@ -110,12 +130,57 @@ class ApiClient {
 
   async getComments(
     uri: string,
-    cursor?: string,
-    limit: number = 50
+    options: { cursor?: string; limit?: number; sort?: CommentSortType } = {}
   ): Promise<CommentsResponse> {
-    const params = new URLSearchParams({ uri, limit: String(limit) });
+    const { cursor, limit = 50, sort = 'top' } = options;
+    const params = new URLSearchParams({ uri, limit: String(limit), sort });
     if (cursor) params.set('cursor', cursor);
     return this.fetch(`/xrpc/io.exprsn.video.getComments?${params}`);
+  }
+
+  async getCommentReplies(
+    parentUri: string,
+    options: { cursor?: string; limit?: number } = {}
+  ): Promise<CommentsResponse> {
+    const { cursor, limit = 20 } = options;
+    const params = new URLSearchParams({ parentUri, limit: String(limit) });
+    if (cursor) params.set('cursor', cursor);
+    return this.fetch(`/xrpc/io.exprsn.video.getCommentReplies?${params}`);
+  }
+
+  async createComment(
+    videoUri: string,
+    text: string,
+    parentUri?: string
+  ): Promise<{ uri: string; cid: string }> {
+    return this.fetch('/xrpc/io.exprsn.video.createComment', {
+      method: 'POST',
+      body: JSON.stringify({ videoUri, text, parentUri }),
+    });
+  }
+
+  async deleteComment(uri: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.video.deleteComment', {
+      method: 'POST',
+      body: JSON.stringify({ uri }),
+    });
+  }
+
+  async reactToComment(
+    commentUri: string,
+    reactionType: ReactionType
+  ): Promise<{ success: boolean; reactionType: ReactionType }> {
+    return this.fetch('/xrpc/io.exprsn.video.reactToComment', {
+      method: 'POST',
+      body: JSON.stringify({ commentUri, reactionType }),
+    });
+  }
+
+  async unreactToComment(commentUri: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.video.unreactToComment', {
+      method: 'POST',
+      body: JSON.stringify({ commentUri }),
+    });
   }
 
   async like(uri: string, cid: string): Promise<{ uri: string }> {
@@ -139,10 +204,10 @@ class ApiClient {
     });
   }
 
-  async trackView(uri: string): Promise<void> {
+  async trackView(videoUri: string): Promise<void> {
     return this.fetch('/xrpc/io.exprsn.video.trackView', {
       method: 'POST',
-      body: JSON.stringify({ uri }),
+      body: JSON.stringify({ videoUri }),
     });
   }
 

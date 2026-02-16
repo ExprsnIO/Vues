@@ -21,7 +21,9 @@ const app = new Hono();
 app.use('*', cors());
 app.use('*', logger());
 app.use('*', prettyJSON());
-app.use('*', secureHeaders());
+app.use('*', secureHeaders({
+  crossOriginResourcePolicy: false, // Disable CORP to allow cross-origin video loading
+}));
 
 // Health check
 app.get('/health', (c) => {
@@ -99,6 +101,8 @@ app.get('/videos/:filename', async (c) => {
           'Accept-Ranges': 'bytes',
           'Content-Length': chunkSize.toString(),
           'Content-Type': contentType,
+          'Cross-Origin-Resource-Policy': 'cross-origin',
+          'Access-Control-Allow-Origin': '*',
         },
       });
     }
@@ -111,6 +115,8 @@ app.get('/videos/:filename', async (c) => {
         'Content-Length': stat.size.toString(),
         'Content-Type': contentType,
         'Accept-Ranges': 'bytes',
+        'Cross-Origin-Resource-Policy': 'cross-origin',
+        'Access-Control-Allow-Origin': '*',
       },
     });
   } catch (err) {
