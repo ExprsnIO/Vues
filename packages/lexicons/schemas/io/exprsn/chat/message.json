@@ -1,0 +1,113 @@
+{
+  "lexicon": 1,
+  "id": "io.exprsn.chat.message",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A direct message within a conversation",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["conversationId", "text", "createdAt"],
+        "properties": {
+          "conversationId": {
+            "type": "string",
+            "description": "ID of the conversation this message belongs to"
+          },
+          "text": {
+            "type": "string",
+            "maxLength": 2000,
+            "maxGraphemes": 2000,
+            "description": "Message content"
+          },
+          "replyTo": {
+            "type": "string",
+            "format": "at-uri",
+            "description": "URI of message being replied to"
+          },
+          "embed": {
+            "type": "union",
+            "refs": ["#videoEmbed", "#imageEmbed"]
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime",
+            "description": "When the message was sent"
+          }
+        }
+      }
+    },
+    "messageView": {
+      "type": "object",
+      "required": ["id", "sender", "text", "createdAt"],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "sender": {
+          "type": "object",
+          "required": ["did", "handle"],
+          "properties": {
+            "did": {
+              "type": "string",
+              "format": "did"
+            },
+            "handle": {
+              "type": "string"
+            },
+            "displayName": {
+              "type": "string"
+            },
+            "avatar": {
+              "type": "string"
+            }
+          }
+        },
+        "text": {
+          "type": "string"
+        },
+        "replyTo": {
+          "type": "ref",
+          "ref": "#messageView"
+        },
+        "embed": {
+          "type": "union",
+          "refs": ["#videoEmbed", "#imageEmbed"]
+        },
+        "read": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "datetime"
+        }
+      }
+    },
+    "videoEmbed": {
+      "type": "object",
+      "required": ["uri"],
+      "properties": {
+        "uri": {
+          "type": "string",
+          "format": "at-uri",
+          "description": "Reference to a video post"
+        }
+      }
+    },
+    "imageEmbed": {
+      "type": "object",
+      "required": ["image"],
+      "properties": {
+        "image": {
+          "type": "blob",
+          "accept": ["image/jpeg", "image/png", "image/gif", "image/webp"],
+          "maxSize": 5000000
+        },
+        "alt": {
+          "type": "string",
+          "maxLength": 500
+        }
+      }
+    }
+  }
+}

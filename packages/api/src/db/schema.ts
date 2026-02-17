@@ -58,6 +58,8 @@ export const videos = pgTable(
     likeCount: integer('like_count').default(0).notNull(),
     commentCount: integer('comment_count').default(0).notNull(),
     shareCount: integer('share_count').default(0).notNull(),
+    repostCount: integer('repost_count').default(0).notNull(),
+    bookmarkCount: integer('bookmark_count').default(0).notNull(),
     indexedAt: timestamp('indexed_at').defaultNow().notNull(),
     createdAt: timestamp('created_at').notNull(),
   },
@@ -432,6 +434,390 @@ export const sessions = pgTable(
   })
 );
 
+// ============================================
+// Admin Tables
+// ============================================
+
+// Admin users with role-based permissions
+export const adminUsers = pgTable(
+  'admin_users',
+  {
+    id: text('id').primaryKey(),
+    userDid: text('user_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    role: text('role').notNull(), // 'super_admin' | 'admin' | 'moderator' | 'support'
+    permissions: jsonb('permissions').$type<string[]>().default([]),
+    invitedBy: text('invited_by'),
+    lastLoginAt: timestamp('last_login_at'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    userDidIdx: uniqueIndex('admin_users_user_did_idx').on(table.userDid),
+    roleIdx: index('admin_users_role_idx').on(table.role),
+  })
+);
+
+// Content reports
+export const contentReports = pgTable(
+  'content_reports',
+  {
+    id: text('id').primaryKey(),
+    reporterDid: text('reporter_did')
+      .notNull()
+      .references(() => users.did),
+    contentType: text('content_type').notNull(), // 'video' | 'comment' | 'user' | 'sound'
+    contentUri: text('content_uri').notNull(),
+    reason: text('reason').notNull(), // 'spam' | 'harassment' | 'violence' | 'nudity' | 'copyright' | 'other'
+    description: text('description'),
+    status: text('status').default('pending').notNull(), // 'pending' | 'reviewed' | 'actioned' | 'dismissed'
+    reviewedBy: text('reviewed_by'),
+    reviewedAt: timestamp('reviewed_at'),
+    actionTaken: text('action_taken'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    reporterIdx: index('content_reports_reporter_idx').on(table.reporterDid),
+    contentTypeIdx: index('content_reports_content_type_idx').on(table.contentType),
+    statusIdx: index('content_reports_status_idx').on(table.status),
+    createdIdx: index('content_reports_created_idx').on(table.createdAt),
+  })
+);
+
+// Moderation actions
+export const moderationActions = pgTable(
+  'moderation_actions',
+  {
+    id: text('id').primaryKey(),
+    adminId: text('admin_id')
+      .notNull()
+      .references(() => adminUsers.id),
+    contentType: text('content_type').notNull(),
+    contentUri: text('content_uri').notNull(),
+    actionType: text('action_type').notNull(), // 'remove' | 'warn' | 'restrict' | 'restore'
+    reason: text('reason').notNull(),
+    notes: text('notes'),
+    reportId: text('report_id').references(() => contentReports.id),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    adminIdx: index('moderation_actions_admin_idx').on(table.adminId),
+    contentTypeIdx: index('moderation_actions_content_type_idx').on(table.contentType),
+    createdIdx: index('moderation_actions_created_idx').on(table.createdAt),
+  })
+);
+
+// User sanctions
+export const userSanctions = pgTable(
+  'user_sanctions',
+  {
+    id: text('id').primaryKey(),
+    userDid: text('user_did')
+      .notNull()
+      .references(() => users.did),
+    adminId: text('admin_id')
+      .notNull()
+      .references(() => adminUsers.id),
+    sanctionType: text('sanction_type').notNull(), // 'warning' | 'mute' | 'suspend' | 'ban'
+    reason: text('reason').notNull(),
+    expiresAt: timestamp('expires_at'),
+    appealStatus: text('appeal_status'), // 'pending' | 'approved' | 'denied'
+    appealNote: text('appeal_note'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    userDidIdx: index('user_sanctions_user_did_idx').on(table.userDid),
+    adminIdx: index('user_sanctions_admin_idx').on(table.adminId),
+    typeIdx: index('user_sanctions_type_idx').on(table.sanctionType),
+    expiresIdx: index('user_sanctions_expires_idx').on(table.expiresAt),
+  })
+);
+
+// Featured content
+export const featuredContent = pgTable(
+  'featured_content',
+  {
+    id: text('id').primaryKey(),
+    contentType: text('content_type').notNull(), // 'video' | 'user' | 'sound' | 'tag'
+    contentUri: text('content_uri').notNull(),
+    position: integer('position').default(0).notNull(),
+    section: text('section').notNull(), // 'hero' | 'trending' | 'discover' | 'creators'
+    startAt: timestamp('start_at'),
+    endAt: timestamp('end_at'),
+    addedBy: text('added_by')
+      .notNull()
+      .references(() => adminUsers.id),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    sectionIdx: index('featured_content_section_idx').on(table.section),
+    positionIdx: index('featured_content_position_idx').on(table.position),
+  })
+);
+
+// System config
+export const systemConfig = pgTable('system_config', {
+  key: text('key').primaryKey(),
+  value: jsonb('value').notNull(),
+  description: text('description'),
+  updatedBy: text('updated_by'),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+// Admin audit log
+export const adminAuditLog = pgTable(
+  'admin_audit_log',
+  {
+    id: text('id').primaryKey(),
+    adminId: text('admin_id')
+      .notNull()
+      .references(() => adminUsers.id),
+    action: text('action').notNull(),
+    targetType: text('target_type'),
+    targetId: text('target_id'),
+    details: jsonb('details'),
+    ipAddress: text('ip_address'),
+    userAgent: text('user_agent'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    adminIdx: index('admin_audit_log_admin_idx').on(table.adminId),
+    actionIdx: index('admin_audit_log_action_idx').on(table.action),
+    createdIdx: index('admin_audit_log_created_idx').on(table.createdAt),
+  })
+);
+
+// Analytics snapshots
+export const analyticsSnapshots = pgTable(
+  'analytics_snapshots',
+  {
+    id: text('id').primaryKey(),
+    period: text('period').notNull(), // 'hourly' | 'daily' | 'weekly' | 'monthly'
+    metrics: jsonb('metrics')
+      .$type<{
+        activeUsers: number;
+        newUsers: number;
+        totalVideos: number;
+        newVideos: number;
+        totalViews: number;
+        totalLikes: number;
+        totalComments: number;
+        avgWatchTime: number;
+        topVideos: string[];
+        topCreators: string[];
+      }>()
+      .notNull(),
+    startAt: timestamp('start_at').notNull(),
+    endAt: timestamp('end_at').notNull(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    periodIdx: index('analytics_snapshots_period_idx').on(table.period),
+    startAtIdx: index('analytics_snapshots_start_at_idx').on(table.startAt),
+  })
+);
+
+// ============================================
+// Social Features Tables
+// ============================================
+
+// Reposts - sharing videos to your profile
+export const reposts = pgTable(
+  'reposts',
+  {
+    uri: text('uri').primaryKey(),
+    cid: text('cid').notNull(),
+    videoUri: text('video_uri')
+      .notNull()
+      .references(() => videos.uri, { onDelete: 'cascade' }),
+    authorDid: text('author_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    caption: text('caption'),
+    createdAt: timestamp('created_at').notNull(),
+    indexedAt: timestamp('indexed_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    videoIdx: index('reposts_video_idx').on(table.videoUri),
+    authorIdx: index('reposts_author_idx').on(table.authorDid),
+    uniqueRepost: uniqueIndex('reposts_unique_idx').on(table.videoUri, table.authorDid),
+    createdIdx: index('reposts_created_idx').on(table.createdAt),
+  })
+);
+
+// Bookmarks - saved videos for later
+export const bookmarks = pgTable(
+  'bookmarks',
+  {
+    uri: text('uri').primaryKey(),
+    cid: text('cid').notNull(),
+    videoUri: text('video_uri')
+      .notNull()
+      .references(() => videos.uri, { onDelete: 'cascade' }),
+    authorDid: text('author_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    folder: text('folder'),
+    createdAt: timestamp('created_at').notNull(),
+    indexedAt: timestamp('indexed_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    videoIdx: index('bookmarks_video_idx').on(table.videoUri),
+    authorIdx: index('bookmarks_author_idx').on(table.authorDid),
+    folderIdx: index('bookmarks_folder_idx').on(table.authorDid, table.folder),
+    uniqueBookmark: uniqueIndex('bookmarks_unique_idx').on(table.videoUri, table.authorDid),
+    createdIdx: index('bookmarks_created_idx').on(table.createdAt),
+  })
+);
+
+// Blocks - prevent users from interacting
+export const blocks = pgTable(
+  'blocks',
+  {
+    uri: text('uri').primaryKey(),
+    cid: text('cid').notNull(),
+    blockerDid: text('blocker_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    blockedDid: text('blocked_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    createdAt: timestamp('created_at').notNull(),
+    indexedAt: timestamp('indexed_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    blockerIdx: index('blocks_blocker_idx').on(table.blockerDid),
+    blockedIdx: index('blocks_blocked_idx').on(table.blockedDid),
+    uniqueBlock: uniqueIndex('blocks_unique_idx').on(table.blockerDid, table.blockedDid),
+  })
+);
+
+// Mutes - hide content without blocking
+export const mutes = pgTable(
+  'mutes',
+  {
+    uri: text('uri').primaryKey(),
+    cid: text('cid').notNull(),
+    muterDid: text('muter_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    mutedDid: text('muted_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    createdAt: timestamp('created_at').notNull(),
+    indexedAt: timestamp('indexed_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    muterIdx: index('mutes_muter_idx').on(table.muterDid),
+    mutedIdx: index('mutes_muted_idx').on(table.mutedDid),
+    uniqueMute: uniqueIndex('mutes_unique_idx').on(table.muterDid, table.mutedDid),
+  })
+);
+
+// ============================================
+// Chat/DM Tables
+// ============================================
+
+// Conversations - DM threads between users
+export const conversations = pgTable(
+  'conversations',
+  {
+    id: text('id').primaryKey(),
+    participant1Did: text('participant1_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    participant2Did: text('participant2_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    lastMessageAt: timestamp('last_message_at'),
+    lastMessageText: text('last_message_text'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    participant1Idx: index('conversations_participant1_idx').on(table.participant1Did),
+    participant2Idx: index('conversations_participant2_idx').on(table.participant2Did),
+    uniqueConversation: uniqueIndex('conversations_unique_idx').on(
+      table.participant1Did,
+      table.participant2Did
+    ),
+    lastMessageIdx: index('conversations_last_message_idx').on(table.lastMessageAt),
+  })
+);
+
+// Messages - individual DMs
+export const messages = pgTable(
+  'messages',
+  {
+    id: text('id').primaryKey(),
+    conversationId: text('conversation_id')
+      .notNull()
+      .references(() => conversations.id, { onDelete: 'cascade' }),
+    senderDid: text('sender_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    text: text('text').notNull(),
+    replyToId: text('reply_to_id'),
+    embedType: text('embed_type'), // 'video' | 'image' | null
+    embedUri: text('embed_uri'),
+    readAt: timestamp('read_at'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    conversationIdx: index('messages_conversation_idx').on(table.conversationId),
+    senderIdx: index('messages_sender_idx').on(table.senderDid),
+    createdIdx: index('messages_created_idx').on(table.createdAt),
+    readIdx: index('messages_read_idx').on(table.readAt),
+  })
+);
+
+// Conversation participants state (for muting, read status per user)
+export const conversationParticipants = pgTable(
+  'conversation_participants',
+  {
+    id: text('id').primaryKey(),
+    conversationId: text('conversation_id')
+      .notNull()
+      .references(() => conversations.id, { onDelete: 'cascade' }),
+    participantDid: text('participant_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    lastReadAt: timestamp('last_read_at'),
+    muted: boolean('muted').default(false).notNull(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    conversationIdx: index('conversation_participants_conversation_idx').on(table.conversationId),
+    participantIdx: index('conversation_participants_participant_idx').on(table.participantDid),
+    uniqueParticipant: uniqueIndex('conversation_participants_unique_idx').on(
+      table.conversationId,
+      table.participantDid
+    ),
+  })
+);
+
+// Notification subscriptions/preferences
+export const notificationSubscriptions = pgTable(
+  'notification_subscriptions',
+  {
+    userDid: text('user_did')
+      .primaryKey()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    likes: boolean('likes').default(true).notNull(),
+    comments: boolean('comments').default(true).notNull(),
+    follows: boolean('follows').default(true).notNull(),
+    mentions: boolean('mentions').default(true).notNull(),
+    reposts: boolean('reposts').default(true).notNull(),
+    messages: boolean('messages').default(true).notNull(),
+    fromFollowingOnly: boolean('from_following_only').default(false).notNull(),
+    pushEnabled: boolean('push_enabled').default(true).notNull(),
+    emailEnabled: boolean('email_enabled').default(false).notNull(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  }
+);
+
 // Type exports
 export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
@@ -469,3 +855,41 @@ export type RepoBlock = typeof repoBlocks.$inferSelect;
 export type NewRepoBlock = typeof repoBlocks.$inferInsert;
 export type Session = typeof sessions.$inferSelect;
 export type NewSession = typeof sessions.$inferInsert;
+
+// Admin type exports
+export type AdminUser = typeof adminUsers.$inferSelect;
+export type NewAdminUser = typeof adminUsers.$inferInsert;
+export type ContentReport = typeof contentReports.$inferSelect;
+export type NewContentReport = typeof contentReports.$inferInsert;
+export type ModerationAction = typeof moderationActions.$inferSelect;
+export type NewModerationAction = typeof moderationActions.$inferInsert;
+export type UserSanction = typeof userSanctions.$inferSelect;
+export type NewUserSanction = typeof userSanctions.$inferInsert;
+export type FeaturedContent = typeof featuredContent.$inferSelect;
+export type NewFeaturedContent = typeof featuredContent.$inferInsert;
+export type SystemConfig = typeof systemConfig.$inferSelect;
+export type NewSystemConfig = typeof systemConfig.$inferInsert;
+export type AdminAuditLogEntry = typeof adminAuditLog.$inferSelect;
+export type NewAdminAuditLogEntry = typeof adminAuditLog.$inferInsert;
+export type AnalyticsSnapshot = typeof analyticsSnapshots.$inferSelect;
+export type NewAnalyticsSnapshot = typeof analyticsSnapshots.$inferInsert;
+
+// Social features type exports
+export type Repost = typeof reposts.$inferSelect;
+export type NewRepost = typeof reposts.$inferInsert;
+export type Bookmark = typeof bookmarks.$inferSelect;
+export type NewBookmark = typeof bookmarks.$inferInsert;
+export type Block = typeof blocks.$inferSelect;
+export type NewBlock = typeof blocks.$inferInsert;
+export type Mute = typeof mutes.$inferSelect;
+export type NewMute = typeof mutes.$inferInsert;
+
+// Chat type exports
+export type Conversation = typeof conversations.$inferSelect;
+export type NewConversation = typeof conversations.$inferInsert;
+export type Message = typeof messages.$inferSelect;
+export type NewMessage = typeof messages.$inferInsert;
+export type ConversationParticipant = typeof conversationParticipants.$inferSelect;
+export type NewConversationParticipant = typeof conversationParticipants.$inferInsert;
+export type NotificationSubscriptionRow = typeof notificationSubscriptions.$inferSelect;
+export type NewNotificationSubscriptionRow = typeof notificationSubscriptions.$inferInsert;

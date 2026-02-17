@@ -1,0 +1,67 @@
+{
+  "lexicon": 1,
+  "id": "io.exprsn.notification.subscription",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "Notification preferences for a user",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["createdAt"],
+        "properties": {
+          "likes": {
+            "type": "boolean",
+            "default": true,
+            "description": "Notify when someone likes your videos"
+          },
+          "comments": {
+            "type": "boolean",
+            "default": true,
+            "description": "Notify when someone comments on your videos"
+          },
+          "follows": {
+            "type": "boolean",
+            "default": true,
+            "description": "Notify when someone follows you"
+          },
+          "mentions": {
+            "type": "boolean",
+            "default": true,
+            "description": "Notify when someone mentions you"
+          },
+          "reposts": {
+            "type": "boolean",
+            "default": true,
+            "description": "Notify when someone reposts your videos"
+          },
+          "messages": {
+            "type": "boolean",
+            "default": true,
+            "description": "Notify for direct messages"
+          },
+          "fromFollowingOnly": {
+            "type": "boolean",
+            "default": false,
+            "description": "Only receive notifications from accounts you follow"
+          },
+          "pushEnabled": {
+            "type": "boolean",
+            "default": true,
+            "description": "Enable push notifications"
+          },
+          "emailEnabled": {
+            "type": "boolean",
+            "default": false,
+            "description": "Enable email notifications"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime",
+            "description": "When the subscription was created"
+          }
+        }
+      }
+    }
+  }
+}

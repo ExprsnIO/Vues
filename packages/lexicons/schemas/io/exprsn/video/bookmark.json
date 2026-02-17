@@ -1,0 +1,32 @@
+{
+  "lexicon": 1,
+  "id": "io.exprsn.video.bookmark",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A saved/bookmarked video for later viewing",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["subject", "createdAt"],
+        "properties": {
+          "subject": {
+            "type": "ref",
+            "ref": "com.atproto.repo.strongRef",
+            "description": "Reference to the bookmarked video"
+          },
+          "folder": {
+            "type": "string",
+            "maxLength": 100,
+            "description": "Optional folder/collection name for organization"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime",
+            "description": "When the bookmark was created"
+          }
+        }
+      }
+    }
+  }
+}

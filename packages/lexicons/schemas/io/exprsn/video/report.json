@@ -1,0 +1,48 @@
+{
+  "lexicon": 1,
+  "id": "io.exprsn.video.report",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A report of inappropriate content",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["subject", "reason", "createdAt"],
+        "properties": {
+          "subject": {
+            "type": "ref",
+            "ref": "com.atproto.repo.strongRef",
+            "description": "Reference to the content being reported (video or comment)"
+          },
+          "reason": {
+            "type": "string",
+            "knownValues": [
+              "spam",
+              "harassment",
+              "hate_speech",
+              "violence",
+              "nudity",
+              "misinformation",
+              "copyright",
+              "self_harm",
+              "other"
+            ],
+            "description": "Category of the report"
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 1000,
+            "maxGraphemes": 1000,
+            "description": "Additional details about the report"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime",
+            "description": "When the report was created"
+          }
+        }
+      }
+    }
+  }
+}

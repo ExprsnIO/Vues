@@ -15,6 +15,20 @@
       "when": 1771285131485,
       "tag": "0001_glorious_boomerang",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1771289495066,
+      "tag": "0002_greedy_exodus",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1771342356291,
+      "tag": "0003_crazy_nicolaos",
+      "breakpoints": true
     }
   ]
 }

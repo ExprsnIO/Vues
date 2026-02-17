@@ -145,6 +145,8 @@ interface VideoItemProps {
   isActive: boolean;
 }
 
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3002';
+
 const VideoItem = ({
   video,
   isActive,
@@ -152,13 +154,17 @@ const VideoItem = ({
 }: VideoItemProps & { ref: (el: HTMLDivElement | null) => void }) => {
   // Video data is nested under video.video from the API
   const videoEmbed = video.video;
-  const src = videoEmbed?.hlsPlaylist || videoEmbed?.cdnUrl || '';
+  const rawSrc = videoEmbed?.hlsPlaylist || videoEmbed?.cdnUrl || '';
+  const src = rawSrc.startsWith('/') ? `${API_BASE}${rawSrc}` : rawSrc;
+
+  const rawPoster = videoEmbed?.thumbnail || video.thumbnailUrl || '';
+  const poster = rawPoster.startsWith('/') ? `${API_BASE}${rawPoster}` : rawPoster;
 
   return (
     <div ref={ref} className="relative h-screen w-full snap-start">
       <VideoPlayer
         src={src}
-        poster={videoEmbed?.thumbnail || video.thumbnailUrl}
+        poster={poster}
         autoPlay={isActive}
         loop
         muted  // Must be muted for autoplay to work in browsers

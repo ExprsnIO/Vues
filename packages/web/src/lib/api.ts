@@ -77,6 +77,7 @@ export interface CommentsResponse {
 class ApiClient {
   private baseUrl: string;
   private sessionToken: string | null = null;
+  private devAdminMode: boolean = false;
 
   constructor(baseUrl: string) {
     this.baseUrl = baseUrl;
@@ -84,6 +85,10 @@ class ApiClient {
 
   setSession(token: string | null) {
     this.sessionToken = token;
+  }
+
+  setDevAdminMode(enabled: boolean) {
+    this.devAdminMode = enabled;
   }
 
   private async fetch<T>(
@@ -98,6 +103,11 @@ class ApiClient {
     if (this.sessionToken) {
       (headers as Record<string, string>)['Authorization'] =
         `Bearer ${this.sessionToken}`;
+    }
+
+    // Dev admin bypass header
+    if (this.devAdminMode) {
+      (headers as Record<string, string>)['X-Dev-Admin'] = 'true';
     }
 
     const response = await fetch(`${this.baseUrl}${endpoint}`, {
@@ -340,6 +350,419 @@ class ApiClient {
     if (cursor) params.set('cursor', cursor);
     return this.fetch(`/xrpc/io.exprsn.graph.getFollowing?${params}`);
   }
+
+  // Admin API
+  async getAdminSession(): Promise<AdminSession> {
+    return this.fetch('/xrpc/io.exprsn.admin.getSession');
+  }
+
+  async getAdminDashboard(): Promise<AdminDashboard> {
+    return this.fetch('/xrpc/io.exprsn.admin.analytics.dashboard');
+  }
+
+  async getAdminUsers(options: {
+    q?: string;
+    verified?: string;
+    sort?: string;
+    limit?: number;
+    cursor?: string;
+  } = {}): Promise<AdminUsersResponse> {
+    const params = new URLSearchParams();
+    if (options.q) params.set('q', options.q);
+    if (options.verified) params.set('verified', options.verified);
+    if (options.sort) params.set('sort', options.sort);
+    if (options.limit) params.set('limit', String(options.limit));
+    if (options.cursor) params.set('cursor', options.cursor);
+    return this.fetch(`/xrpc/io.exprsn.admin.users.list?${params}`);
+  }
+
+  async getAdminUser(did: string): Promise<AdminUserDetail> {
+    const params = new URLSearchParams({ did });
+    return this.fetch(`/xrpc/io.exprsn.admin.users.get?${params}`);
+  }
+
+  async updateAdminUser(data: {
+    did: string;
+    verified?: boolean;
+    displayName?: string;
+    bio?: string;
+  }): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.users.update', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async sanctionUser(data: {
+    userDid: string;
+    sanctionType: 'warning' | 'mute' | 'suspend' | 'ban';
+    reason: string;
+    expiresAt?: string;
+  }): Promise<{ success: boolean; sanctionId: string }> {
+    return this.fetch('/xrpc/io.exprsn.admin.users.sanction', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async getAdminReports(options: {
+    status?: string;
+    contentType?: string;
+    reason?: string;
+    limit?: number;
+  } = {}): Promise<AdminReportsResponse> {
+    const params = new URLSearchParams();
+    if (options.status) params.set('status', options.status);
+    if (options.contentType) params.set('contentType', options.contentType);
+    if (options.reason) params.set('reason', options.reason);
+    if (options.limit) params.set('limit', String(options.limit));
+    return this.fetch(`/xrpc/io.exprsn.admin.reports.list?${params}`);
+  }
+
+  async actionAdminReport(data: {
+    reportId: string;
+    action: string;
+    reason: string;
+  }): Promise<{ success: boolean; actionId: string }> {
+    return this.fetch('/xrpc/io.exprsn.admin.reports.action', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async dismissAdminReport(data: { reportId: string; reason?: string }): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.reports.dismiss', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  // Admin team management
+  async getAdminTeam(): Promise<{ admins: AdminTeamMember[] }> {
+    return this.fetch('/xrpc/io.exprsn.admin.admins.list');
+  }
+
+  async addAdmin(data: {
+    userDid: string;
+    role: 'admin' | 'moderator' | 'support';
+  }): Promise<{ success: boolean; adminId: string }> {
+    return this.fetch('/xrpc/io.exprsn.admin.admins.add', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async updateAdmin(data: {
+    adminId: string;
+    role?: 'admin' | 'moderator' | 'support';
+  }): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.admins.update', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async removeAdmin(adminId: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.admins.remove', {
+      method: 'POST',
+      body: JSON.stringify({ adminId }),
+    });
+  }
+
+  // Audit log
+  async getAuditLog(options: {
+    adminId?: string;
+    adminDid?: string;
+    action?: string;
+    limit?: number;
+    offset?: number;
+  } = {}): Promise<{ logs: AuditLogEntry[] }> {
+    const params = new URLSearchParams();
+    if (options.adminId) params.set('adminId', options.adminId);
+    if (options.adminDid) params.set('adminDid', options.adminDid);
+    if (options.action) params.set('action', options.action);
+    if (options.limit) params.set('limit', String(options.limit));
+    if (options.offset) params.set('offset', String(options.offset));
+    return this.fetch(`/xrpc/io.exprsn.admin.audit.list?${params}`);
+  }
+
+  // System config
+  async getSystemConfig(): Promise<{ configs: SystemConfigItem[] }> {
+    return this.fetch('/xrpc/io.exprsn.admin.config.list');
+  }
+
+  async updateSystemConfig(data: {
+    key: string;
+    value: unknown;
+    description?: string;
+  }): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.config.set', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  // Featured content
+  async getFeaturedContent(): Promise<{ featured: FeaturedContentItem[] }> {
+    return this.fetch('/xrpc/io.exprsn.admin.featured.list');
+  }
+
+  async addFeaturedContent(data: {
+    contentUri: string;
+    featureType: 'hero' | 'trending' | 'recommended' | 'spotlight';
+    expiresAt?: string;
+  }): Promise<{ success: boolean; featuredId: string }> {
+    return this.fetch('/xrpc/io.exprsn.admin.featured.add', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async updateFeaturedContent(data: {
+    contentUri: string;
+    position?: number;
+    featureType?: 'hero' | 'trending' | 'recommended' | 'spotlight';
+    expiresAt?: string;
+  }): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.featured.update', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async removeFeaturedContent(contentUri: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.featured.remove', {
+      method: 'POST',
+      body: JSON.stringify({ contentUri }),
+    });
+  }
+
+  // =============================================================================
+  // Social API - Reposts
+  // =============================================================================
+
+  async repost(
+    videoUri: string,
+    videoCid: string,
+    caption?: string
+  ): Promise<{ uri: string; cid: string }> {
+    return this.fetch('/xrpc/io.exprsn.video.repost', {
+      method: 'POST',
+      body: JSON.stringify({ videoUri, videoCid, caption }),
+    });
+  }
+
+  async unrepost(repostUri: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.video.unrepost', {
+      method: 'POST',
+      body: JSON.stringify({ uri: repostUri }),
+    });
+  }
+
+  async getReposts(
+    videoUri: string,
+    options: { cursor?: string; limit?: number } = {}
+  ): Promise<{ reposts: RepostView[]; cursor?: string }> {
+    const { cursor, limit = 50 } = options;
+    const params = new URLSearchParams({ uri: videoUri, limit: String(limit) });
+    if (cursor) params.set('cursor', cursor);
+    return this.fetch(`/xrpc/io.exprsn.video.getReposts?${params}`);
+  }
+
+  // =============================================================================
+  // Social API - Bookmarks
+  // =============================================================================
+
+  async bookmark(
+    videoUri: string,
+    videoCid: string,
+    folder?: string
+  ): Promise<{ uri: string; cid: string }> {
+    return this.fetch('/xrpc/io.exprsn.video.bookmark', {
+      method: 'POST',
+      body: JSON.stringify({ videoUri, videoCid, folder }),
+    });
+  }
+
+  async unbookmark(bookmarkUri: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.video.unbookmark', {
+      method: 'POST',
+      body: JSON.stringify({ uri: bookmarkUri }),
+    });
+  }
+
+  async getBookmarks(
+    options: { folder?: string; cursor?: string; limit?: number } = {}
+  ): Promise<{ bookmarks: BookmarkView[]; cursor?: string }> {
+    const { folder, cursor, limit = 50 } = options;
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (folder) params.set('folder', folder);
+    if (cursor) params.set('cursor', cursor);
+    return this.fetch(`/xrpc/io.exprsn.video.getBookmarks?${params}`);
+  }
+
+  // =============================================================================
+  // Social API - Blocks
+  // =============================================================================
+
+  async block(did: string): Promise<{ uri: string; cid: string }> {
+    return this.fetch('/xrpc/io.exprsn.graph.block', {
+      method: 'POST',
+      body: JSON.stringify({ did }),
+    });
+  }
+
+  async unblock(blockUri: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.graph.unblock', {
+      method: 'POST',
+      body: JSON.stringify({ uri: blockUri }),
+    });
+  }
+
+  async getBlocks(
+    options: { cursor?: string; limit?: number } = {}
+  ): Promise<{ blocks: BlockedUser[]; cursor?: string }> {
+    const { cursor, limit = 50 } = options;
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (cursor) params.set('cursor', cursor);
+    return this.fetch(`/xrpc/io.exprsn.graph.getBlocks?${params}`);
+  }
+
+  // =============================================================================
+  // Social API - Mutes
+  // =============================================================================
+
+  async mute(did: string): Promise<{ uri: string; cid: string }> {
+    return this.fetch('/xrpc/io.exprsn.graph.mute', {
+      method: 'POST',
+      body: JSON.stringify({ did }),
+    });
+  }
+
+  async unmute(muteUri: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.graph.unmute', {
+      method: 'POST',
+      body: JSON.stringify({ uri: muteUri }),
+    });
+  }
+
+  async getMutes(
+    options: { cursor?: string; limit?: number } = {}
+  ): Promise<{ mutes: MutedUser[]; cursor?: string }> {
+    const { cursor, limit = 50 } = options;
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (cursor) params.set('cursor', cursor);
+    return this.fetch(`/xrpc/io.exprsn.graph.getMutes?${params}`);
+  }
+
+  // =============================================================================
+  // Social API - Reports
+  // =============================================================================
+
+  async report(data: {
+    subjectUri: string;
+    subjectCid: string;
+    reason:
+      | 'spam'
+      | 'harassment'
+      | 'hate_speech'
+      | 'violence'
+      | 'nudity'
+      | 'misinformation'
+      | 'copyright'
+      | 'self_harm'
+      | 'other';
+    description?: string;
+  }): Promise<{ success: boolean; reportId: string }> {
+    return this.fetch('/xrpc/io.exprsn.video.report', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  // =============================================================================
+  // Notification Subscription API
+  // =============================================================================
+
+  async getNotificationSubscription(): Promise<{
+    subscription: NotificationSubscription;
+  }> {
+    return this.fetch('/xrpc/io.exprsn.notification.getSubscription');
+  }
+
+  async updateNotificationSubscription(
+    update: Partial<NotificationSubscription>
+  ): Promise<{ subscription: NotificationSubscription }> {
+    return this.fetch('/xrpc/io.exprsn.notification.updateSubscription', {
+      method: 'POST',
+      body: JSON.stringify(update),
+    });
+  }
+
+  // =============================================================================
+  // Chat/DM API
+  // =============================================================================
+
+  async getOrCreateConversation(did: string): Promise<{
+    conversation: ConversationView;
+  }> {
+    return this.fetch('/xrpc/io.exprsn.chat.getOrCreateConversation', {
+      method: 'POST',
+      body: JSON.stringify({ did }),
+    });
+  }
+
+  async getConversations(
+    options: { cursor?: string; limit?: number } = {}
+  ): Promise<{ conversations: ConversationView[]; cursor?: string }> {
+    const { cursor, limit = 50 } = options;
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (cursor) params.set('cursor', cursor);
+    return this.fetch(`/xrpc/io.exprsn.chat.getConversations?${params}`);
+  }
+
+  async sendMessage(data: {
+    conversationId: string;
+    text: string;
+    replyToId?: string;
+    embedType?: string;
+    embedUri?: string;
+  }): Promise<{ message: MessageView }> {
+    return this.fetch('/xrpc/io.exprsn.chat.sendMessage', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async getMessages(
+    conversationId: string,
+    options: { cursor?: string; limit?: number } = {}
+  ): Promise<{ messages: MessageView[]; cursor?: string }> {
+    const { cursor, limit = 50 } = options;
+    const params = new URLSearchParams({
+      conversationId,
+      limit: String(limit),
+    });
+    if (cursor) params.set('cursor', cursor);
+    return this.fetch(`/xrpc/io.exprsn.chat.getMessages?${params}`);
+  }
+
+  async markConversationRead(conversationId: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.chat.markRead', {
+      method: 'POST',
+      body: JSON.stringify({ conversationId }),
+    });
+  }
+
+  async muteConversation(
+    conversationId: string,
+    muted: boolean
+  ): Promise<{ success: boolean; muted: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.chat.muteConversation', {
+      method: 'POST',
+      body: JSON.stringify({ conversationId, muted }),
+    });
+  }
 }
 
 // Profile types
@@ -385,6 +808,251 @@ export interface FollowersResponse {
 export interface FollowingResponse {
   following: UserListItem[];
   cursor?: string;
+}
+
+// Admin types
+export interface AdminSession {
+  admin: {
+    id: string;
+    role: string;
+    permissions: string[];
+    lastLoginAt?: string;
+  };
+  user: {
+    did: string;
+    handle: string;
+    displayName?: string;
+    avatar?: string;
+  } | null;
+}
+
+export interface AdminDashboard {
+  stats: {
+    totalUsers: number;
+    totalVideos: number;
+    pendingReports: number;
+  };
+  recentActivity: {
+    users: Array<{
+      did: string;
+      handle: string;
+      createdAt: string;
+    }>;
+    videos: Array<{
+      uri: string;
+      caption?: string;
+      authorDid: string;
+      createdAt: string;
+    }>;
+  };
+}
+
+export interface AdminUserItem {
+  did: string;
+  handle: string;
+  displayName?: string;
+  avatar?: string;
+  followerCount: number;
+  videoCount: number;
+  verified: boolean;
+  status: string;
+  createdAt: string;
+}
+
+export interface AdminUsersResponse {
+  users: AdminUserItem[];
+  cursor?: string;
+}
+
+export interface AdminUserDetail {
+  user: {
+    did: string;
+    handle: string;
+    displayName?: string;
+    avatar?: string;
+    bio?: string;
+    followerCount: number;
+    followingCount: number;
+    videoCount: number;
+    verified: boolean;
+    createdAt: string;
+  };
+  sanctions: Array<{
+    id: string;
+    sanctionType: string;
+    reason: string;
+    expiresAt?: string;
+    createdAt: string;
+  }>;
+  recentVideos: Array<{
+    uri: string;
+    caption?: string;
+    thumbnailUrl?: string;
+    viewCount: number;
+    createdAt: string;
+  }>;
+  reportCount: number;
+}
+
+export interface AdminReport {
+  id: string;
+  reporterDid: string;
+  contentType: string;
+  contentUri: string;
+  reason: string;
+  description?: string;
+  status: string;
+  createdAt: string;
+  reporter?: {
+    did: string;
+    handle: string;
+    displayName?: string;
+    avatar?: string;
+  };
+}
+
+export interface AdminReportsResponse {
+  reports: AdminReport[];
+}
+
+export interface AdminTeamMember {
+  id: string;
+  userDid: string;
+  role: string;
+  permissions: string[];
+  createdAt: string;
+  user?: {
+    did: string;
+    handle: string;
+    displayName?: string;
+    avatar?: string;
+  };
+}
+
+export interface AuditLogEntry {
+  id: string;
+  adminId: string;
+  action: string;
+  targetType?: string;
+  targetId?: string;
+  details?: Record<string, unknown>;
+  createdAt: string;
+  admin?: {
+    id: string;
+    userDid: string;
+    role: string;
+  };
+}
+
+export interface SystemConfigItem {
+  id: string;
+  key: string;
+  value: unknown;
+  description?: string;
+  updatedAt: string;
+  updatedBy?: {
+    handle: string;
+    avatar?: string;
+  };
+}
+
+export interface FeaturedContentItem {
+  id: string;
+  contentUri: string;
+  featureType: 'hero' | 'trending' | 'recommended' | 'spotlight';
+  position: number;
+  expiresAt?: string;
+  createdAt: string;
+  video?: {
+    uri: string;
+    caption?: string;
+    thumbnailUrl?: string;
+    viewCount: number;
+    likeCount: number;
+    author?: {
+      did: string;
+      handle: string;
+      displayName?: string;
+      avatar?: string;
+    };
+  };
+}
+
+// Social types
+export interface RepostView {
+  uri: string;
+  cid: string;
+  video: VideoView;
+  caption?: string;
+  createdAt: string;
+}
+
+export interface BookmarkView {
+  uri: string;
+  cid: string;
+  video: VideoView;
+  folder?: string;
+  createdAt: string;
+}
+
+export interface BlockedUser {
+  did: string;
+  handle: string;
+  displayName?: string;
+  avatar?: string;
+  blockedAt: string;
+}
+
+export interface MutedUser {
+  did: string;
+  handle: string;
+  displayName?: string;
+  avatar?: string;
+  mutedAt: string;
+}
+
+export interface NotificationSubscription {
+  likes: boolean;
+  comments: boolean;
+  follows: boolean;
+  mentions: boolean;
+  reposts: boolean;
+  messages: boolean;
+  fromFollowingOnly: boolean;
+  pushEnabled: boolean;
+  emailEnabled: boolean;
+}
+
+// Chat types
+export interface ConversationMember {
+  did: string;
+  handle: string;
+  displayName?: string;
+  avatar?: string;
+}
+
+export interface ConversationView {
+  id: string;
+  members: ConversationMember[];
+  lastMessage?: {
+    text: string;
+    createdAt: string;
+  };
+  unreadCount: number;
+  muted: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface MessageView {
+  id: string;
+  sender: ConversationMember;
+  text: string;
+  replyToId?: string;
+  embedType?: string;
+  embedUri?: string;
+  read: boolean;
+  createdAt: string;
 }
 
 export const api = new ApiClient(API_BASE);

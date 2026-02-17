@@ -1,12 +1,67 @@
 import { Context, Next } from 'hono';
 import { HTTPException } from 'hono/http-exception';
+import { eq } from 'drizzle-orm';
 import { getOAuthClient, OAuthSession } from './oauth-client.js';
+import { db } from '../db/index.js';
+import { adminUsers, type AdminUser } from '../db/schema.js';
+
+// Admin role types
+export type AdminRole = 'super_admin' | 'admin' | 'moderator' | 'support';
+
+// Permission keys
+export const ADMIN_PERMISSIONS = {
+  USERS_VIEW: 'admin.users.view',
+  USERS_EDIT: 'admin.users.edit',
+  USERS_SANCTION: 'admin.users.sanction',
+  USERS_BAN: 'admin.users.ban',
+  CONTENT_VIEW: 'admin.content.view',
+  CONTENT_MODERATE: 'admin.content.moderate',
+  REPORTS_VIEW: 'admin.reports.view',
+  REPORTS_ACTION: 'admin.reports.action',
+  FEATURED_MANAGE: 'admin.featured.manage',
+  ANALYTICS_VIEW: 'admin.analytics.view',
+  CONFIG_VIEW: 'admin.config.view',
+  CONFIG_EDIT: 'admin.config.edit',
+  ADMINS_MANAGE: 'admin.admins.manage',
+} as const;
+
+// Role-based default permissions
+const ROLE_PERMISSIONS: Record<AdminRole, string[]> = {
+  super_admin: Object.values(ADMIN_PERMISSIONS),
+  admin: [
+    ADMIN_PERMISSIONS.USERS_VIEW,
+    ADMIN_PERMISSIONS.USERS_EDIT,
+    ADMIN_PERMISSIONS.USERS_SANCTION,
+    ADMIN_PERMISSIONS.CONTENT_VIEW,
+    ADMIN_PERMISSIONS.CONTENT_MODERATE,
+    ADMIN_PERMISSIONS.REPORTS_VIEW,
+    ADMIN_PERMISSIONS.REPORTS_ACTION,
+    ADMIN_PERMISSIONS.FEATURED_MANAGE,
+    ADMIN_PERMISSIONS.ANALYTICS_VIEW,
+    ADMIN_PERMISSIONS.CONFIG_VIEW,
+  ],
+  moderator: [
+    ADMIN_PERMISSIONS.USERS_VIEW,
+    ADMIN_PERMISSIONS.USERS_SANCTION,
+    ADMIN_PERMISSIONS.CONTENT_VIEW,
+    ADMIN_PERMISSIONS.CONTENT_MODERATE,
+    ADMIN_PERMISSIONS.REPORTS_VIEW,
+    ADMIN_PERMISSIONS.REPORTS_ACTION,
+  ],
+  support: [
+    ADMIN_PERMISSIONS.USERS_VIEW,
+    ADMIN_PERMISSIONS.CONTENT_VIEW,
+    ADMIN_PERMISSIONS.REPORTS_VIEW,
+  ],
+};
 
 // Extend Hono context with our custom variables
 declare module 'hono' {
   interface ContextVariableMap {
     session: OAuthSession;
     did: string;
+    adminUser: AdminUser;
+    adminPermissions: string[];
   }
 }
 
@@ -102,4 +157,127 @@ export function rateLimitMiddleware(options: { maxRequests: number; windowSecond
 
     await next();
   };
+}
+
+/**
+ * Get effective permissions for an admin user (role defaults + custom permissions)
+ */
+export function getAdminPermissions(adminUser: AdminUser): string[] {
+  const rolePerms = ROLE_PERMISSIONS[adminUser.role as AdminRole] || [];
+  const customPerms = adminUser.permissions || [];
+  return [...new Set([...rolePerms, ...customPerms])];
+}
+
+/**
+ * Check if admin has a specific permission
+ */
+export function hasPermission(permissions: string[], permission: string): boolean {
+  return permissions.includes(permission);
+}
+
+/**
+ * Admin authentication middleware - requires valid OAuth session AND admin role
+ * In development mode with DEV_ADMIN_BYPASS=true, allows bypass with X-Dev-Admin header
+ */
+export async function adminAuthMiddleware(c: Context, next: Next) {
+  const isDev = process.env.NODE_ENV !== 'production';
+  const devBypass = process.env.DEV_ADMIN_BYPASS === 'true';
+  const devAdminHeader = c.req.header('X-Dev-Admin');
+
+  // Development bypass for testing
+  if (isDev && devBypass && devAdminHeader) {
+    const [adminUser] = await db
+      .select()
+      .from(adminUsers)
+      .limit(1);
+
+    if (adminUser) {
+      const permissions = getAdminPermissions(adminUser);
+      c.set('did', adminUser.userDid);
+      c.set('adminUser', adminUser);
+      c.set('adminPermissions', permissions);
+      await next();
+      return;
+    }
+  }
+
+  const authHeader = c.req.header('Authorization');
+
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    throw new HTTPException(401, { message: 'Missing or invalid authorization header' });
+  }
+
+  const sessionId = authHeader.replace('Bearer ', '');
+
+  try {
+    const oauthClient = getOAuthClient();
+    const session = await oauthClient.restore(sessionId);
+
+    if (!session) {
+      throw new HTTPException(401, { message: 'Invalid or expired session' });
+    }
+
+    // Check if user has admin access
+    const [adminUser] = await db
+      .select()
+      .from(adminUsers)
+      .where(eq(adminUsers.userDid, session.did))
+      .limit(1);
+
+    if (!adminUser) {
+      throw new HTTPException(403, { message: 'Admin access required' });
+    }
+
+    // Get effective permissions
+    const permissions = getAdminPermissions(adminUser);
+
+    c.set('session', session);
+    c.set('did', session.did);
+    c.set('adminUser', adminUser);
+    c.set('adminPermissions', permissions);
+
+    await next();
+  } catch (error) {
+    if (error instanceof HTTPException) {
+      throw error;
+    }
+    console.error('Admin auth middleware error:', error);
+    throw new HTTPException(401, { message: 'Authentication failed' });
+  }
+}
+
+/**
+ * Permission check middleware factory - requires specific permission(s)
+ */
+export function requirePermission(...requiredPermissions: string[]) {
+  return async (c: Context, next: Next) => {
+    const permissions = c.get('adminPermissions');
+
+    if (!permissions) {
+      throw new HTTPException(403, { message: 'Admin access required' });
+    }
+
+    const hasAll = requiredPermissions.every((perm) => permissions.includes(perm));
+
+    if (!hasAll) {
+      throw new HTTPException(403, {
+        message: `Insufficient permissions. Required: ${requiredPermissions.join(', ')}`,
+      });
+    }
+
+    await next();
+  };
+}
+
+/**
+ * Super admin only middleware
+ */
+export async function superAdminMiddleware(c: Context, next: Next) {
+  const adminUser = c.get('adminUser');
+
+  if (!adminUser || adminUser.role !== 'super_admin') {
+    throw new HTTPException(403, { message: 'Super admin access required' });
+  }
+
+  await next();
 }

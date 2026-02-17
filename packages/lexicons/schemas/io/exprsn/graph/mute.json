@@ -1,0 +1,27 @@
+{
+  "lexicon": 1,
+  "id": "io.exprsn.graph.mute",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A mute relationship - hides content from the muted user without blocking",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["subject", "createdAt"],
+        "properties": {
+          "subject": {
+            "type": "string",
+            "format": "did",
+            "description": "DID of the account being muted"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime",
+            "description": "When the mute was created"
+          }
+        }
+      }
+    }
+  }
+}
