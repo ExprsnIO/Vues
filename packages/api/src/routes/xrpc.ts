@@ -3,7 +3,7 @@ import { HTTPException } from 'hono/http-exception';
 import { authMiddleware, optionalAuthMiddleware } from '../auth/middleware.js';
 import { db, videos, users, likes, comments, commentReactions, sounds, follows, trendingVideos, userInteractions } from '../db/index.js';
 import { cacheService, CacheKeys, CACHE_TTL } from '../cache/redis.js';
-import { eq, desc, inArray, and, sql, lt, asc } from 'drizzle-orm';
+import { eq, desc, inArray, and, sql, lt, asc, or, ilike } from 'drizzle-orm';
 import type { VideoView, AuthorView, FeedResult, CommentView, ReactionType, CommentSortType } from '@exprsn/shared';
 import { nanoid } from 'nanoid';
 
@@ -888,6 +888,386 @@ xrpcRouter.post('/io.exprsn.video.unreactToComment', authMiddleware, async (c) =
   await updateCommentHotScore(commentUri);
 
   return c.json({ success: true });
+});
+
+// =============================================================================
+// Profile & Graph Endpoints
+// =============================================================================
+
+/**
+ * Get user profile
+ * GET /xrpc/io.exprsn.actor.getProfile
+ */
+xrpcRouter.get('/io.exprsn.actor.getProfile', optionalAuthMiddleware, async (c) => {
+  const handle = c.req.query('handle');
+  const did = c.req.query('did');
+  const viewerDid = c.get('did');
+
+  if (!handle && !did) {
+    throw new HTTPException(400, { message: 'Handle or DID is required' });
+  }
+
+  const user = await db.query.users.findFirst({
+    where: handle ? eq(users.handle, handle) : eq(users.did, did!),
+  });
+
+  if (!user) {
+    throw new HTTPException(404, { message: 'User not found' });
+  }
+
+  // Get viewer's follow relationship
+  let viewerFollowing = false;
+  let followUri: string | undefined;
+  if (viewerDid && viewerDid !== user.did) {
+    const follow = await db.query.follows.findFirst({
+      where: and(eq(follows.followerDid, viewerDid), eq(follows.followeeDid, user.did)),
+    });
+    if (follow) {
+      viewerFollowing = true;
+      followUri = follow.uri;
+    }
+  }
+
+  // Get user's videos
+  const userVideos = await db
+    .select()
+    .from(videos)
+    .where(and(eq(videos.authorDid, user.did), eq(videos.visibility, 'public')))
+    .orderBy(desc(videos.createdAt))
+    .limit(30);
+
+  const hydratedVideos = await hydrateVideos(
+    userVideos.map((v) => v.uri),
+    viewerDid
+  );
+
+  return c.json({
+    profile: {
+      did: user.did,
+      handle: user.handle,
+      displayName: user.displayName,
+      avatar: user.avatar,
+      bio: user.bio,
+      followerCount: user.followerCount,
+      followingCount: user.followingCount,
+      videoCount: user.videoCount,
+      verified: user.verified,
+      createdAt: user.createdAt.toISOString(),
+      viewer: viewerDid
+        ? {
+            following: viewerFollowing,
+            followUri,
+          }
+        : undefined,
+    },
+    videos: hydratedVideos,
+  });
+});
+
+/**
+ * Get user's videos (paginated)
+ * GET /xrpc/io.exprsn.actor.getVideos
+ */
+xrpcRouter.get('/io.exprsn.actor.getVideos', optionalAuthMiddleware, async (c) => {
+  const handle = c.req.query('handle');
+  const did = c.req.query('did');
+  const cursor = c.req.query('cursor');
+  const limit = Math.min(parseInt(c.req.query('limit') || '30', 10), 100);
+  const viewerDid = c.get('did');
+
+  if (!handle && !did) {
+    throw new HTTPException(400, { message: 'Handle or DID is required' });
+  }
+
+  const user = await db.query.users.findFirst({
+    where: handle ? eq(users.handle, handle) : eq(users.did, did!),
+  });
+
+  if (!user) {
+    throw new HTTPException(404, { message: 'User not found' });
+  }
+
+  const whereConditions = cursor
+    ? and(
+        eq(videos.authorDid, user.did),
+        eq(videos.visibility, 'public'),
+        lt(videos.createdAt, new Date(parseInt(cursor, 10)))
+      )
+    : and(eq(videos.authorDid, user.did), eq(videos.visibility, 'public'));
+
+  const userVideos = await db
+    .select()
+    .from(videos)
+    .where(whereConditions)
+    .orderBy(desc(videos.createdAt))
+    .limit(limit);
+
+  const hydratedVideos = await hydrateVideos(
+    userVideos.map((v) => v.uri),
+    viewerDid
+  );
+
+  return c.json({
+    videos: hydratedVideos,
+    cursor:
+      userVideos.length > 0
+        ? userVideos[userVideos.length - 1]!.createdAt.getTime().toString()
+        : undefined,
+  });
+});
+
+/**
+ * Follow a user
+ * POST /xrpc/io.exprsn.graph.follow
+ */
+xrpcRouter.post('/io.exprsn.graph.follow', authMiddleware, async (c) => {
+  const followerDid = c.get('did');
+  const { did: followeeDid } = await c.req.json<{ did: string }>();
+
+  if (!followeeDid) {
+    throw new HTTPException(400, { message: 'Target DID is required' });
+  }
+
+  if (followerDid === followeeDid) {
+    throw new HTTPException(400, { message: 'Cannot follow yourself' });
+  }
+
+  // Verify followee exists
+  const followee = await db.query.users.findFirst({
+    where: eq(users.did, followeeDid),
+  });
+
+  if (!followee) {
+    throw new HTTPException(404, { message: 'User not found' });
+  }
+
+  // Check if already following
+  const existingFollow = await db.query.follows.findFirst({
+    where: and(eq(follows.followerDid, followerDid), eq(follows.followeeDid, followeeDid)),
+  });
+
+  if (existingFollow) {
+    return c.json({ uri: existingFollow.uri });
+  }
+
+  const followUri = `at://${followerDid}/io.exprsn.graph.follow/${nanoid()}`;
+  const followCid = nanoid();
+  const now = new Date();
+
+  await db.insert(follows).values({
+    uri: followUri,
+    cid: followCid,
+    followerDid,
+    followeeDid,
+    createdAt: now,
+    indexedAt: now,
+  });
+
+  // Update counts
+  await db
+    .update(users)
+    .set({ followingCount: sql`${users.followingCount} + 1` })
+    .where(eq(users.did, followerDid));
+  await db
+    .update(users)
+    .set({ followerCount: sql`${users.followerCount} + 1` })
+    .where(eq(users.did, followeeDid));
+
+  return c.json({ uri: followUri });
+});
+
+/**
+ * Unfollow a user
+ * POST /xrpc/io.exprsn.graph.unfollow
+ */
+xrpcRouter.post('/io.exprsn.graph.unfollow', authMiddleware, async (c) => {
+  const followerDid = c.get('did');
+  const { uri, did: followeeDid } = await c.req.json<{ uri?: string; did?: string }>();
+
+  if (!uri && !followeeDid) {
+    throw new HTTPException(400, { message: 'Follow URI or target DID is required' });
+  }
+
+  let follow;
+  if (uri) {
+    follow = await db.query.follows.findFirst({
+      where: and(eq(follows.uri, uri), eq(follows.followerDid, followerDid)),
+    });
+  } else {
+    follow = await db.query.follows.findFirst({
+      where: and(eq(follows.followerDid, followerDid), eq(follows.followeeDid, followeeDid!)),
+    });
+  }
+
+  if (!follow) {
+    return c.json({ success: true });
+  }
+
+  await db.delete(follows).where(eq(follows.uri, follow.uri));
+
+  // Update counts
+  await db
+    .update(users)
+    .set({ followingCount: sql`${users.followingCount} - 1` })
+    .where(eq(users.did, followerDid));
+  await db
+    .update(users)
+    .set({ followerCount: sql`${users.followerCount} - 1` })
+    .where(eq(users.did, follow.followeeDid));
+
+  return c.json({ success: true });
+});
+
+/**
+ * Get followers of a user
+ * GET /xrpc/io.exprsn.graph.getFollowers
+ */
+xrpcRouter.get('/io.exprsn.graph.getFollowers', optionalAuthMiddleware, async (c) => {
+  const handle = c.req.query('handle');
+  const did = c.req.query('did');
+  const cursor = c.req.query('cursor');
+  const limit = Math.min(parseInt(c.req.query('limit') || '50', 10), 100);
+  const viewerDid = c.get('did');
+
+  if (!handle && !did) {
+    throw new HTTPException(400, { message: 'Handle or DID is required' });
+  }
+
+  const user = await db.query.users.findFirst({
+    where: handle ? eq(users.handle, handle) : eq(users.did, did!),
+  });
+
+  if (!user) {
+    throw new HTTPException(404, { message: 'User not found' });
+  }
+
+  const whereConditions = cursor
+    ? and(eq(follows.followeeDid, user.did), lt(follows.createdAt, new Date(parseInt(cursor, 10))))
+    : eq(follows.followeeDid, user.did);
+
+  const followerRecords = await db
+    .select()
+    .from(follows)
+    .where(whereConditions)
+    .orderBy(desc(follows.createdAt))
+    .limit(limit);
+
+  const followerDids = followerRecords.map((f) => f.followerDid);
+  const followerUsers =
+    followerDids.length > 0 ? await db.select().from(users).where(inArray(users.did, followerDids)) : [];
+  const userMap = new Map(followerUsers.map((u) => [u.did, u]));
+
+  // Get viewer's follow relationships
+  let viewerFollows = new Map<string, string>();
+  if (viewerDid && followerDids.length > 0) {
+    const viewerFollowRecords = await db
+      .select()
+      .from(follows)
+      .where(and(eq(follows.followerDid, viewerDid), inArray(follows.followeeDid, followerDids)));
+    viewerFollows = new Map(viewerFollowRecords.map((f) => [f.followeeDid, f.uri]));
+  }
+
+  const followers = followerRecords.map((f) => {
+    const user = userMap.get(f.followerDid);
+    return {
+      did: f.followerDid,
+      handle: user?.handle || 'unknown',
+      displayName: user?.displayName,
+      avatar: user?.avatar,
+      verified: user?.verified,
+      viewer: viewerDid
+        ? {
+            following: viewerFollows.has(f.followerDid),
+            followUri: viewerFollows.get(f.followerDid),
+          }
+        : undefined,
+    };
+  });
+
+  return c.json({
+    followers,
+    cursor:
+      followerRecords.length > 0
+        ? followerRecords[followerRecords.length - 1]!.createdAt.getTime().toString()
+        : undefined,
+  });
+});
+
+/**
+ * Get users that a user is following
+ * GET /xrpc/io.exprsn.graph.getFollowing
+ */
+xrpcRouter.get('/io.exprsn.graph.getFollowing', optionalAuthMiddleware, async (c) => {
+  const handle = c.req.query('handle');
+  const did = c.req.query('did');
+  const cursor = c.req.query('cursor');
+  const limit = Math.min(parseInt(c.req.query('limit') || '50', 10), 100);
+  const viewerDid = c.get('did');
+
+  if (!handle && !did) {
+    throw new HTTPException(400, { message: 'Handle or DID is required' });
+  }
+
+  const user = await db.query.users.findFirst({
+    where: handle ? eq(users.handle, handle) : eq(users.did, did!),
+  });
+
+  if (!user) {
+    throw new HTTPException(404, { message: 'User not found' });
+  }
+
+  const whereConditions = cursor
+    ? and(eq(follows.followerDid, user.did), lt(follows.createdAt, new Date(parseInt(cursor, 10))))
+    : eq(follows.followerDid, user.did);
+
+  const followingRecords = await db
+    .select()
+    .from(follows)
+    .where(whereConditions)
+    .orderBy(desc(follows.createdAt))
+    .limit(limit);
+
+  const followingDids = followingRecords.map((f) => f.followeeDid);
+  const followingUsers =
+    followingDids.length > 0
+      ? await db.select().from(users).where(inArray(users.did, followingDids))
+      : [];
+  const userMap = new Map(followingUsers.map((u) => [u.did, u]));
+
+  // Get viewer's follow relationships
+  let viewerFollows = new Map<string, string>();
+  if (viewerDid && followingDids.length > 0) {
+    const viewerFollowRecords = await db
+      .select()
+      .from(follows)
+      .where(and(eq(follows.followerDid, viewerDid), inArray(follows.followeeDid, followingDids)));
+    viewerFollows = new Map(viewerFollowRecords.map((f) => [f.followeeDid, f.uri]));
+  }
+
+  const following = followingRecords.map((f) => {
+    const user = userMap.get(f.followeeDid);
+    return {
+      did: f.followeeDid,
+      handle: user?.handle || 'unknown',
+      displayName: user?.displayName,
+      avatar: user?.avatar,
+      verified: user?.verified,
+      viewer: viewerDid
+        ? {
+            following: viewerFollows.has(f.followeeDid),
+            followUri: viewerFollows.get(f.followeeDid),
+          }
+        : undefined,
+    };
+  });
+
+  return c.json({
+    following,
+    cursor:
+      followingRecords.length > 0
+        ? followingRecords[followingRecords.length - 1]!.createdAt.getTime().toString()
+        : undefined,
+  });
 });
 
 /**

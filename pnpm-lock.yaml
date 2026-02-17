@@ -388,6 +388,9 @@ importers:
       react-dom:
         specifier: ^19.0.0
         version: 19.2.4(react@19.2.4)
+      react-hot-toast:
+        specifier: ^2.6.0
+        version: 2.6.0(react-dom@19.2.4)(react@19.2.4)
       react-intersection-observer:
         specifier: ^9.13.1
         version: 9.16.0(react-dom@19.2.4)(react@19.2.4)
@@ -7764,6 +7767,14 @@ packages:
       slash: 3.0.0
     dev: false
 
+  /goober@2.1.18(csstype@3.2.3):
+    resolution: {integrity: sha512-2vFqsaDVIT9Gz7N6kAL++pLpp41l3PfDuusHcjnGLfR6+huZkl6ziX+zgVC3ZxpqWhzH6pyDdGrCeDhMIvwaxw==}
+    peerDependencies:
+      csstype: ^3.0.10
+    dependencies:
+      csstype: 3.2.3
+    dev: false
+
   /gopd@1.2.0:
     resolution: {integrity: sha512-ZUKRh6/kUFoAiTAtTYPZJ3hw9wNxx+BIBOijnlG9PnrJsCcSjs1wyyD6vJpaYtgnzDrKYRSqf3OO6Rfa93xsRg==}
     engines: {node: '>= 0.4'}
@@ -9707,6 +9718,19 @@ packages:
       react-dom: 18.3.1(react@18.3.1)
       react-fast-compare: 3.2.2
       shallowequal: 1.1.0
+    dev: false
+
+  /react-hot-toast@2.6.0(react-dom@19.2.4)(react@19.2.4):
+    resolution: {integrity: sha512-bH+2EBMZ4sdyou/DPrfgIouFpcRLCJ+HoCA32UoAYHn6T3Ur5yfcDCeSr5mwldl6pFOsiocmrXMuoCJ1vV8bWg==}
+    engines: {node: '>=10'}
+    peerDependencies:
+      react: '>=16'
+      react-dom: '>=16'
+    dependencies:
+      csstype: 3.2.3
+      goober: 2.1.18(csstype@3.2.3)
+      react: 19.2.4
+      react-dom: 19.2.4(react@19.2.4)
     dev: false
 
   /react-intersection-observer@9.16.0(react-dom@19.2.4)(react@19.2.4):

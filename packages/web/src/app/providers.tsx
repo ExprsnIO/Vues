@@ -4,6 +4,9 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { useState, type FC, type PropsWithChildren } from 'react';
 import { AuthProvider } from '@/lib/auth-context';
 import { ThemeProvider } from '@/components/ThemeProvider';
+import { SidebarProvider, MobileHeader, MobileBottomNav } from '@/components/Sidebar';
+import { LoginModalProvider } from '@/components/LoginModal';
+import { Toaster } from 'react-hot-toast';
 
 export const Providers: FC<PropsWithChildren> = ({ children }) => {
   const [queryClient] = useState(
@@ -23,7 +26,22 @@ export const Providers: FC<PropsWithChildren> = ({ children }) => {
   return (
     <QueryClientProvider client={queryClient}>
       <AuthProvider>
-        <ThemeProvider>{children}</ThemeProvider>
+        <ThemeProvider>
+          <SidebarProvider>
+            <LoginModalProvider>
+              <MobileHeader />
+              {children}
+              <MobileBottomNav />
+              <Toaster
+                position="bottom-center"
+                toastOptions={{
+                  className: 'bg-surface text-text-primary border border-border',
+                  duration: 3000,
+                }}
+              />
+            </LoginModalProvider>
+          </SidebarProvider>
+        </ThemeProvider>
       </AuthProvider>
     </QueryClientProvider>
   );

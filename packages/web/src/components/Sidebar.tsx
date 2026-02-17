@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { useState, useEffect, createContext, useContext } from 'react';
 import { cn } from '@/lib/utils';
 import { useAuth } from '@/lib/auth-context';
 import { ThemeSwitcher } from './ThemeSwitcher';
@@ -13,95 +14,244 @@ const NAV_ITEMS = [
   { href: '/settings', label: 'Settings', icon: SettingsIcon },
 ];
 
+// Context for sidebar state
+const SidebarContext = createContext<{
+  isOpen: boolean;
+  toggle: () => void;
+  close: () => void;
+}>({
+  isOpen: false,
+  toggle: () => {},
+  close: () => {},
+});
+
+export function useSidebar() {
+  return useContext(SidebarContext);
+}
+
+export function SidebarProvider({ children }: { children: React.ReactNode }) {
+  const [isOpen, setIsOpen] = useState(false);
+
+  const toggle = () => setIsOpen(!isOpen);
+  const close = () => setIsOpen(false);
+
+  // Close sidebar on route change
+  const pathname = usePathname();
+  useEffect(() => {
+    setIsOpen(false);
+  }, [pathname]);
+
+  // Prevent body scroll when sidebar is open on mobile
+  useEffect(() => {
+    if (isOpen) {
+      document.body.style.overflow = 'hidden';
+    } else {
+      document.body.style.overflow = '';
+    }
+    return () => {
+      document.body.style.overflow = '';
+    };
+  }, [isOpen]);
+
+  return (
+    <SidebarContext.Provider value={{ isOpen, toggle, close }}>
+      {children}
+    </SidebarContext.Provider>
+  );
+}
+
 export function Sidebar() {
   const pathname = usePathname();
   const { user, isLoading, signOut } = useAuth();
+  const { isOpen, close } = useSidebar();
 
   return (
-    <aside className="fixed left-0 top-0 h-screen w-60 bg-background-alt border-r border-border flex flex-col z-40">
-      {/* Logo */}
-      <div className="p-4">
-        <Link href="/" className="flex items-center gap-2">
-          <div className="w-8 h-8 bg-gradient-to-br from-accent to-accent-hover rounded-lg flex items-center justify-center">
-            <span className="text-text-inverse font-bold text-lg">E</span>
-          </div>
-          <span className="text-xl font-bold text-text-primary">exprsn</span>
-        </Link>
-      </div>
+    <>
+      {/* Mobile overlay */}
+      {isOpen && (
+        <div
+          className="fixed inset-0 bg-black/60 z-40 lg:hidden"
+          onClick={close}
+        />
+      )}
 
-      {/* Navigation */}
-      <nav className="flex-1 px-2 py-4 space-y-1">
-        {NAV_ITEMS.map((item) => {
-          const isActive =
-            pathname === item.href ||
-            (item.href !== '/' && pathname.startsWith(item.href));
-          const Icon = item.icon;
-
-          return (
-            <Link
-              key={item.href}
-              href={item.href}
-              className={cn(
-                'flex items-center gap-3 px-4 py-3 rounded-lg transition-colors',
-                isActive
-                  ? 'bg-surface text-text-primary'
-                  : 'text-text-muted hover:bg-surface-hover hover:text-text-primary'
-              )}
-            >
-              <Icon className="w-6 h-6" filled={isActive} />
-              <span className="font-medium">{item.label}</span>
-            </Link>
-          );
-        })}
-
-        {/* Upload button */}
-        <Link
-          href="/upload"
-          className="flex items-center gap-3 px-4 py-3 rounded-lg bg-gradient-to-r from-primary-500 to-primary-600 text-white hover:from-primary-600 hover:to-primary-700 transition-colors mt-4"
-        >
-          <PlusIcon className="w-6 h-6" />
-          <span className="font-medium">Upload</span>
-        </Link>
-      </nav>
-
-      {/* Theme Switcher */}
-      <div className="px-2 py-2">
-        <ThemeSwitcher />
-      </div>
-
-      {/* User section */}
-      <div className="p-4 border-t border-border">
-        {isLoading ? (
-          <div className="h-10 bg-surface rounded-lg animate-pulse" />
-        ) : user ? (
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-full bg-surface flex items-center justify-center">
-              <span className="text-text-primary font-medium">
-                {user.handle[0]?.toUpperCase()}
-              </span>
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-text-primary text-sm font-medium truncate">
-                @{user.handle}
-              </p>
-            </div>
-            <button
-              onClick={() => signOut()}
-              className="text-text-muted hover:text-text-primary p-2"
-            >
-              <LogoutIcon className="w-5 h-5" />
-            </button>
-          </div>
-        ) : (
-          <Link
-            href="/login"
-            className="block w-full text-center py-2.5 bg-surface hover:bg-surface-hover text-text-primary rounded-lg font-medium transition-colors"
-          >
-            Log in
-          </Link>
+      {/* Sidebar */}
+      <aside
+        className={cn(
+          'fixed left-0 top-0 h-screen w-60 bg-background-alt border-r border-border flex flex-col z-50',
+          'transition-transform duration-300 ease-in-out',
+          'lg:translate-x-0',
+          isOpen ? 'translate-x-0' : '-translate-x-full'
         )}
-      </div>
-    </aside>
+      >
+        {/* Logo */}
+        <div className="p-4 flex items-center justify-between">
+          <Link href="/" className="flex items-center gap-2">
+            <div className="w-8 h-8 bg-gradient-to-br from-accent to-accent-hover rounded-lg flex items-center justify-center">
+              <span className="text-text-inverse font-bold text-lg">E</span>
+            </div>
+            <span className="text-xl font-bold text-text-primary">exprsn</span>
+          </Link>
+          {/* Close button on mobile */}
+          <button
+            onClick={close}
+            className="lg:hidden p-2 text-text-muted hover:text-text-primary"
+          >
+            <CloseIcon className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* Navigation */}
+        <nav className="flex-1 px-2 py-4 space-y-1">
+          {NAV_ITEMS.map((item) => {
+            const isActive =
+              pathname === item.href ||
+              (item.href !== '/' && pathname.startsWith(item.href));
+            const Icon = item.icon;
+
+            return (
+              <Link
+                key={item.href}
+                href={item.href}
+                className={cn(
+                  'flex items-center gap-3 px-4 py-3 rounded-lg transition-colors',
+                  isActive
+                    ? 'bg-surface text-text-primary'
+                    : 'text-text-muted hover:bg-surface-hover hover:text-text-primary'
+                )}
+              >
+                <Icon className="w-6 h-6" filled={isActive} />
+                <span className="font-medium">{item.label}</span>
+              </Link>
+            );
+          })}
+
+          {/* Upload button */}
+          <Link
+            href="/upload"
+            className="flex items-center gap-3 px-4 py-3 rounded-lg bg-gradient-to-r from-primary-500 to-primary-600 text-white hover:from-primary-600 hover:to-primary-700 transition-colors mt-4"
+          >
+            <PlusIcon className="w-6 h-6" />
+            <span className="font-medium">Upload</span>
+          </Link>
+        </nav>
+
+        {/* Theme Switcher */}
+        <div className="px-2 py-2">
+          <ThemeSwitcher />
+        </div>
+
+        {/* User section */}
+        <div className="p-4 border-t border-border">
+          {isLoading ? (
+            <div className="h-10 bg-surface rounded-lg animate-pulse" />
+          ) : user ? (
+            <div className="flex items-center gap-3">
+              <Link href={`/profile/${user.handle}`} className="w-10 h-10 rounded-full bg-surface flex items-center justify-center hover:ring-2 hover:ring-accent transition-all">
+                <span className="text-text-primary font-medium">
+                  {user.handle[0]?.toUpperCase()}
+                </span>
+              </Link>
+              <div className="flex-1 min-w-0">
+                <Link href={`/profile/${user.handle}`} className="text-text-primary text-sm font-medium truncate block hover:underline">
+                  @{user.handle}
+                </Link>
+              </div>
+              <button
+                onClick={() => signOut()}
+                className="text-text-muted hover:text-text-primary p-2"
+              >
+                <LogoutIcon className="w-5 h-5" />
+              </button>
+            </div>
+          ) : (
+            <Link
+              href="/login"
+              className="block w-full text-center py-2.5 bg-surface hover:bg-surface-hover text-text-primary rounded-lg font-medium transition-colors"
+            >
+              Log in
+            </Link>
+          )}
+        </div>
+      </aside>
+    </>
+  );
+}
+
+// Mobile header with hamburger menu
+export function MobileHeader() {
+  const { toggle } = useSidebar();
+
+  return (
+    <header className="lg:hidden fixed top-0 left-0 right-0 h-14 bg-background-alt border-b border-border z-30 flex items-center px-4">
+      <button
+        onClick={toggle}
+        className="p-2 -ml-2 text-text-muted hover:text-text-primary"
+        aria-label="Open menu"
+      >
+        <MenuIcon className="w-6 h-6" />
+      </button>
+      <Link href="/" className="flex items-center gap-2 ml-2">
+        <div className="w-7 h-7 bg-gradient-to-br from-accent to-accent-hover rounded-lg flex items-center justify-center">
+          <span className="text-text-inverse font-bold text-sm">E</span>
+        </div>
+        <span className="text-lg font-bold text-text-primary">exprsn</span>
+      </Link>
+    </header>
+  );
+}
+
+// Bottom navigation for mobile
+export function MobileBottomNav() {
+  const pathname = usePathname();
+
+  return (
+    <nav className="lg:hidden fixed bottom-0 left-0 right-0 h-16 bg-background-alt border-t border-border z-30 flex items-center justify-around px-2">
+      {NAV_ITEMS.slice(0, 4).map((item) => {
+        const isActive =
+          pathname === item.href ||
+          (item.href !== '/' && pathname.startsWith(item.href));
+        const Icon = item.icon;
+
+        return (
+          <Link
+            key={item.href}
+            href={item.href}
+            className={cn(
+              'flex flex-col items-center gap-1 p-2',
+              isActive ? 'text-text-primary' : 'text-text-muted'
+            )}
+          >
+            <Icon className="w-6 h-6" filled={isActive} />
+            <span className="text-xs">{item.label}</span>
+          </Link>
+        );
+      })}
+      <Link
+        href="/upload"
+        className="flex flex-col items-center gap-1 p-2 text-accent"
+      >
+        <div className="w-8 h-8 bg-gradient-to-r from-primary-500 to-primary-600 rounded-lg flex items-center justify-center">
+          <PlusIcon className="w-5 h-5 text-white" />
+        </div>
+      </Link>
+    </nav>
+  );
+}
+
+function MenuIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
+    </svg>
+  );
+}
+
+function CloseIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+    </svg>
   );
 }
 

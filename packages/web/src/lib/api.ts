@@ -286,6 +286,105 @@ class ApiClient {
       method: 'POST',
     });
   }
+
+  // Profile & Graph API
+  async getProfile(handleOrDid: string): Promise<ProfileResponse> {
+    const param = handleOrDid.startsWith('did:') ? 'did' : 'handle';
+    const params = new URLSearchParams({ [param]: handleOrDid });
+    return this.fetch(`/xrpc/io.exprsn.actor.getProfile?${params}`);
+  }
+
+  async getProfileVideos(
+    handleOrDid: string,
+    options: { cursor?: string; limit?: number } = {}
+  ): Promise<{ videos: VideoView[]; cursor?: string }> {
+    const param = handleOrDid.startsWith('did:') ? 'did' : 'handle';
+    const { cursor, limit = 30 } = options;
+    const params = new URLSearchParams({ [param]: handleOrDid, limit: String(limit) });
+    if (cursor) params.set('cursor', cursor);
+    return this.fetch(`/xrpc/io.exprsn.actor.getVideos?${params}`);
+  }
+
+  async follow(did: string): Promise<{ uri: string }> {
+    return this.fetch('/xrpc/io.exprsn.graph.follow', {
+      method: 'POST',
+      body: JSON.stringify({ did }),
+    });
+  }
+
+  async unfollow(options: { uri?: string; did?: string }): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.graph.unfollow', {
+      method: 'POST',
+      body: JSON.stringify(options),
+    });
+  }
+
+  async getFollowers(
+    handleOrDid: string,
+    options: { cursor?: string; limit?: number } = {}
+  ): Promise<FollowersResponse> {
+    const param = handleOrDid.startsWith('did:') ? 'did' : 'handle';
+    const { cursor, limit = 50 } = options;
+    const params = new URLSearchParams({ [param]: handleOrDid, limit: String(limit) });
+    if (cursor) params.set('cursor', cursor);
+    return this.fetch(`/xrpc/io.exprsn.graph.getFollowers?${params}`);
+  }
+
+  async getFollowing(
+    handleOrDid: string,
+    options: { cursor?: string; limit?: number } = {}
+  ): Promise<FollowingResponse> {
+    const param = handleOrDid.startsWith('did:') ? 'did' : 'handle';
+    const { cursor, limit = 50 } = options;
+    const params = new URLSearchParams({ [param]: handleOrDid, limit: String(limit) });
+    if (cursor) params.set('cursor', cursor);
+    return this.fetch(`/xrpc/io.exprsn.graph.getFollowing?${params}`);
+  }
+}
+
+// Profile types
+export interface ProfileView {
+  did: string;
+  handle: string;
+  displayName?: string;
+  avatar?: string;
+  bio?: string;
+  followerCount: number;
+  followingCount: number;
+  videoCount: number;
+  verified: boolean;
+  createdAt: string;
+  viewer?: {
+    following: boolean;
+    followUri?: string;
+  };
+}
+
+export interface ProfileResponse {
+  profile: ProfileView;
+  videos: VideoView[];
+}
+
+export interface UserListItem {
+  did: string;
+  handle: string;
+  displayName?: string;
+  avatar?: string;
+  verified?: boolean;
+  viewer?: {
+    following: boolean;
+    followUri?: string;
+  };
+}
+
+export interface FollowersResponse {
+  followers: UserListItem[];
+  cursor?: string;
+}
+
+export interface FollowingResponse {
+  following: UserListItem[];
+  cursor?: string;
 }
 
 export const api = new ApiClient(API_BASE);

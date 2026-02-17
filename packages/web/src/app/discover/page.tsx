@@ -1,11 +1,12 @@
 'use client';
 
 import { useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import Link from 'next/link';
 import { Sidebar } from '@/components/Sidebar';
-import { api } from '@/lib/api';
+import { api, VideoView } from '@/lib/api';
 import { formatCount } from '@/lib/utils';
+import { useAuth } from '@/lib/auth-context';
 
 const TRENDING_TAGS = [
   'fyp',
@@ -35,7 +36,7 @@ export default function DiscoverPage() {
   return (
     <div className="flex min-h-screen bg-black">
       <Sidebar />
-      <main className="flex-1 ml-60 p-6">
+      <main className="flex-1 ml-0 lg:ml-60 pt-14 lg:pt-0 pb-16 lg:pb-0 p-4 lg:p-6">
         <div className="max-w-3xl mx-auto">
           <h1 className="text-2xl font-bold text-white mb-6">Discover</h1>
 
@@ -74,7 +75,7 @@ export default function DiscoverPage() {
           {searchQuery.length >= 2 ? (
             isLoading ? (
               <div className="flex justify-center py-12">
-                <div className="w-8 h-8 border-3 border-primary-500 border-t-transparent rounded-full loading-spinner" />
+                <div className="w-8 h-8 border-3 border-primary-500 border-t-transparent rounded-full animate-spin" />
               </div>
             ) : searchResults?.results.length === 0 ? (
               <div className="text-center py-12">
@@ -84,10 +85,15 @@ export default function DiscoverPage() {
               </div>
             ) : (
               <div className="space-y-3">
-                {/* Results would be rendered here based on type */}
-                <p className="text-gray-400">
-                  {searchResults?.results.length} results
-                </p>
+                {searchType === 'videos' && (
+                  <VideoResults results={searchResults?.results as VideoView[]} />
+                )}
+                {searchType === 'users' && (
+                  <UserResults results={searchResults?.results as UserResult[]} />
+                )}
+                {searchType === 'sounds' && (
+                  <SoundResults results={searchResults?.results as SoundResult[]} />
+                )}
               </div>
             )
           ) : (
@@ -166,6 +172,173 @@ function SearchIcon({ className }: { className?: string }) {
         strokeLinejoin="round"
         d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z"
       />
+    </svg>
+  );
+}
+
+// Search Result Types
+interface UserResult {
+  did: string;
+  handle: string;
+  displayName?: string;
+  avatar?: string;
+  followerCount: number;
+  verified?: boolean;
+}
+
+interface SoundResult {
+  id: string;
+  title: string;
+  artist?: string;
+  useCount: number;
+  coverUrl?: string;
+}
+
+// Video Results Component
+function VideoResults({ results }: { results: VideoView[] }) {
+  if (!results?.length) return null;
+
+  return (
+    <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+      {results.map((video) => {
+        const videoUrl = video.video?.cdnUrl || video.cdnUrl;
+        return (
+          <Link
+            key={video.uri}
+            href={`/video/${encodeURIComponent(video.uri)}`}
+            className="relative aspect-[9/16] bg-zinc-900 rounded-lg overflow-hidden group"
+          >
+            {video.video?.thumbnail || video.thumbnailUrl ? (
+              <img
+                src={video.video?.thumbnail || video.thumbnailUrl}
+                alt={video.caption || 'Video'}
+                className="w-full h-full object-cover"
+              />
+            ) : videoUrl ? (
+              <video
+                src={videoUrl.startsWith('/') ? `http://localhost:3002${videoUrl}` : videoUrl}
+                className="w-full h-full object-cover"
+                muted
+                preload="metadata"
+              />
+            ) : null}
+            <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
+            <div className="absolute bottom-2 left-2 right-2 flex items-center gap-2 text-white text-xs">
+              <PlayIcon className="w-3 h-3" />
+              <span>{formatCount(video.viewCount)}</span>
+            </div>
+          </Link>
+        );
+      })}
+    </div>
+  );
+}
+
+// User Results Component
+function UserResults({ results }: { results: UserResult[] }) {
+  const { user } = useAuth();
+  const queryClient = useQueryClient();
+
+  const followMutation = useMutation({
+    mutationFn: (did: string) => api.follow(did),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['search'] });
+    },
+  });
+
+  if (!results?.length) return null;
+
+  return (
+    <div className="space-y-3">
+      {results.map((result) => (
+        <div key={result.did} className="flex items-center gap-4 p-3 bg-zinc-900 rounded-lg">
+          <Link href={`/profile/${result.handle}`} className="flex-shrink-0">
+            <div className="w-12 h-12 rounded-full bg-zinc-800 overflow-hidden">
+              {result.avatar ? (
+                <img src={result.avatar} alt={result.handle} className="w-full h-full object-cover" />
+              ) : (
+                <div className="w-full h-full flex items-center justify-center text-white font-semibold">
+                  {result.handle[0]?.toUpperCase()}
+                </div>
+              )}
+            </div>
+          </Link>
+          <Link href={`/profile/${result.handle}`} className="flex-1 min-w-0">
+            <p className="text-white font-medium truncate">
+              {result.displayName || `@${result.handle}`}
+              {result.verified && <VerifiedBadge />}
+            </p>
+            <p className="text-gray-400 text-sm truncate">@{result.handle}</p>
+            <p className="text-gray-500 text-xs">{formatCount(result.followerCount)} followers</p>
+          </Link>
+          {user && user.did !== result.did && (
+            <button
+              onClick={() => followMutation.mutate(result.did)}
+              disabled={followMutation.isPending}
+              className="px-4 py-1.5 bg-accent text-white text-sm font-medium rounded-lg hover:bg-accent-hover transition-colors"
+            >
+              Follow
+            </button>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Sound Results Component
+function SoundResults({ results }: { results: SoundResult[] }) {
+  if (!results?.length) return null;
+
+  return (
+    <div className="space-y-3">
+      {results.map((sound) => (
+        <Link
+          key={sound.id}
+          href={`/?feed=sound:${sound.id}`}
+          className="flex items-center gap-4 p-3 bg-zinc-900 rounded-lg hover:bg-zinc-800 transition-colors"
+        >
+          <div className="w-12 h-12 rounded-lg bg-zinc-800 overflow-hidden flex-shrink-0">
+            {sound.coverUrl ? (
+              <img src={sound.coverUrl} alt={sound.title} className="w-full h-full object-cover" />
+            ) : (
+              <div className="w-full h-full flex items-center justify-center">
+                <MusicIcon className="w-6 h-6 text-gray-400" />
+              </div>
+            )}
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-white font-medium truncate">{sound.title}</p>
+            <p className="text-gray-400 text-sm truncate">{sound.artist || 'Original Sound'}</p>
+            <p className="text-gray-500 text-xs">{formatCount(sound.useCount)} videos</p>
+          </div>
+          <PlayIcon className="w-6 h-6 text-white flex-shrink-0" />
+        </Link>
+      ))}
+    </div>
+  );
+}
+
+function PlayIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="currentColor" viewBox="0 0 24 24">
+      <path d="M8 5v14l11-7z" />
+    </svg>
+  );
+}
+
+function MusicIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="currentColor" viewBox="0 0 24 24">
+      <path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z" />
+    </svg>
+  );
+}
+
+function VerifiedBadge() {
+  return (
+    <svg className="w-4 h-4 text-accent inline ml-1" viewBox="0 0 24 24" fill="currentColor">
+      <path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
     </svg>
   );
 }

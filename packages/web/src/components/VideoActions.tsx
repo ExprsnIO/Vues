@@ -5,7 +5,9 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { api, type VideoView } from '@/lib/api';
 import { formatCount } from '@/lib/utils';
 import { useAuth } from '@/lib/auth-context';
+import { useLoginModal } from './LoginModal';
 import { CommentThread } from './comments/CommentThread';
+import toast from 'react-hot-toast';
 
 interface VideoActionsProps {
   video: VideoView;
@@ -13,6 +15,7 @@ interface VideoActionsProps {
 
 export function VideoActions({ video }: VideoActionsProps) {
   const { user } = useAuth();
+  const { open: openLoginModal } = useLoginModal();
   const queryClient = useQueryClient();
   const [isLiked, setIsLiked] = useState(video.viewer?.liked ?? false);
   const [likeCount, setLikeCount] = useState(video.likeCount);
@@ -43,11 +46,11 @@ export function VideoActions({ video }: VideoActionsProps) {
 
   const handleLike = useCallback(() => {
     if (!user) {
-      // TODO: Show login modal
+      openLoginModal('Log in to like this video');
       return;
     }
     likeMutation.mutate();
-  }, [user, likeMutation]);
+  }, [user, likeMutation, openLoginModal]);
 
   const handleComment = useCallback(() => {
     setShowComments(true);
@@ -67,7 +70,7 @@ export function VideoActions({ video }: VideoActionsProps) {
       }
     } else {
       await navigator.clipboard.writeText(shareUrl);
-      // TODO: Show toast
+      toast.success('Link copied to clipboard');
     }
   }, [video]);
 

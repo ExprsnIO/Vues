@@ -3,6 +3,7 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api';
 import { useAuth } from '@/lib/auth-context';
+import { Sidebar } from '@/components/Sidebar';
 import { SettingsSection } from '@/components/settings/SettingsSection';
 import { ThemeSettings } from '@/components/settings/ThemeSettings';
 import { PlaybackSettings } from '@/components/settings/PlaybackSettings';
@@ -40,56 +41,54 @@ export default function SettingsPage() {
     updateMutation.mutate(update);
   };
 
-  if (authLoading || isLoading) {
+  const renderContent = () => {
+    if (authLoading || isLoading) {
+      return (
+        <div className="flex items-center justify-center min-h-[60vh]">
+          <div className="w-8 h-8 border-3 border-accent border-t-transparent rounded-full animate-spin" />
+        </div>
+      );
+    }
+
+    if (!user) {
+      return (
+        <div className="flex flex-col items-center justify-center min-h-[60vh] text-center px-4">
+          <h1 className="text-2xl font-bold text-text-primary mb-4">Settings</h1>
+          <p className="text-text-muted mb-6">
+            Please log in to access your settings.
+          </p>
+          <a
+            href="/login"
+            className="px-6 py-2 bg-accent hover:bg-accent-hover text-text-inverse rounded-lg font-medium transition-colors"
+          >
+            Log in
+          </a>
+        </div>
+      );
+    }
+
+    if (isError) {
+      return (
+        <div className="flex flex-col items-center justify-center min-h-[60vh] text-center px-4">
+          <h1 className="text-2xl font-bold text-text-primary mb-4">Settings</h1>
+          <p className="text-text-muted mb-6">
+            Failed to load settings. Please try again.
+          </p>
+          <button
+            onClick={() => queryClient.invalidateQueries({ queryKey: ['settings'] })}
+            className="px-6 py-2 bg-accent hover:bg-accent-hover text-text-inverse rounded-lg font-medium transition-colors"
+          >
+            Retry
+          </button>
+        </div>
+      );
+    }
+
+    const settings = data?.settings;
+    if (!settings) return null;
+
     return (
-      <div className="flex items-center justify-center min-h-screen">
-        <div className="w-8 h-8 border-3 border-accent border-t-transparent rounded-full animate-spin" />
-      </div>
-    );
-  }
-
-  if (!user) {
-    return (
-      <div className="flex flex-col items-center justify-center min-h-screen text-center px-4">
-        <h1 className="text-2xl font-bold text-text-primary mb-4">Settings</h1>
-        <p className="text-text-muted mb-6">
-          Please log in to access your settings.
-        </p>
-        <a
-          href="/login"
-          className="px-6 py-2 bg-accent hover:bg-accent-hover text-text-inverse rounded-lg font-medium transition-colors"
-        >
-          Log in
-        </a>
-      </div>
-    );
-  }
-
-  if (isError) {
-    return (
-      <div className="flex flex-col items-center justify-center min-h-screen text-center px-4">
-        <h1 className="text-2xl font-bold text-text-primary mb-4">Settings</h1>
-        <p className="text-text-muted mb-6">
-          Failed to load settings. Please try again.
-        </p>
-        <button
-          onClick={() => queryClient.invalidateQueries({ queryKey: ['settings'] })}
-          className="px-6 py-2 bg-accent hover:bg-accent-hover text-text-inverse rounded-lg font-medium transition-colors"
-        >
-          Retry
-        </button>
-      </div>
-    );
-  }
-
-  const settings = data?.settings;
-
-  if (!settings) {
-    return null;
-  }
-
-  return (
-    <div className="max-w-2xl mx-auto px-4 py-8">
+      <div className="max-w-2xl mx-auto px-4 py-8">
       <div className="flex items-center justify-between mb-8">
         <h1 className="text-2xl font-bold text-text-primary">Settings</h1>
         <button
@@ -170,10 +169,20 @@ export default function SettingsPage() {
         </SettingsSection>
       </div>
 
-      {/* Last updated */}
-      <p className="text-center text-text-muted text-sm mt-8">
-        Last updated: {new Date(settings.updatedAt).toLocaleDateString()}
-      </p>
+        {/* Last updated */}
+        <p className="text-center text-text-muted text-sm mt-8">
+          Last updated: {new Date(settings.updatedAt).toLocaleDateString()}
+        </p>
+      </div>
+    );
+  };
+
+  return (
+    <div className="flex min-h-screen bg-background">
+      <Sidebar />
+      <main className="flex-1 ml-0 lg:ml-60 pt-14 lg:pt-0 pb-16 lg:pb-0">
+        {renderContent()}
+      </main>
     </div>
   );
 }
