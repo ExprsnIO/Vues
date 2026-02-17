@@ -1,0 +1,40 @@
+{
+  "lexicon": 1,
+  "id": "io.exprsn.graph.list",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A custom user list",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["name", "purpose", "createdAt"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 64,
+            "description": "Display name for the list"
+          },
+          "purpose": {
+            "type": "string",
+            "knownValues": ["curatelist", "modlist"],
+            "description": "Purpose of the list (curatelist for following, modlist for muting/blocking)"
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 300
+          },
+          "avatar": {
+            "type": "blob",
+            "accept": ["image/png", "image/jpeg"],
+            "maxSize": 1000000
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime"
+          }
+        }
+      }
+    }
+  }
+}

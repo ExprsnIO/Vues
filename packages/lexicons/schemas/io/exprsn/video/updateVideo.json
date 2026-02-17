@@ -1,0 +1,54 @@
+{
+  "lexicon": 1,
+  "id": "io.exprsn.video.updateVideo",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Update video metadata (must be the author)",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["uri"],
+          "properties": {
+            "uri": {
+              "type": "string",
+              "format": "at-uri",
+              "description": "The URI of the video to update"
+            },
+            "caption": {
+              "type": "string",
+              "maxLength": 300
+            },
+            "tags": {
+              "type": "array",
+              "maxLength": 10,
+              "items": { "type": "string", "maxLength": 64 }
+            },
+            "visibility": {
+              "type": "string",
+              "knownValues": ["public", "followers"]
+            },
+            "allowDuet": { "type": "boolean" },
+            "allowStitch": { "type": "boolean" },
+            "allowComments": { "type": "boolean" }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["success"],
+          "properties": {
+            "success": { "type": "boolean" },
+            "video": {
+              "type": "ref",
+              "ref": "io.exprsn.video.getVideo#videoView"
+            }
+          }
+        }
+      }
+    }
+  }
+}

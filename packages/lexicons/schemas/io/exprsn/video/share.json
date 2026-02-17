@@ -1,0 +1,31 @@
+{
+  "lexicon": 1,
+  "id": "io.exprsn.video.share",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A share action tracking when a user shares a video",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["subject", "createdAt"],
+        "properties": {
+          "subject": {
+            "type": "ref",
+            "ref": "io.exprsn.video.post#strongRef",
+            "description": "The video being shared"
+          },
+          "platform": {
+            "type": "string",
+            "knownValues": ["copy_link", "twitter", "facebook", "instagram", "whatsapp", "telegram", "email", "other"],
+            "description": "Platform the video was shared to"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime"
+          }
+        }
+      }
+    }
+  }
+}

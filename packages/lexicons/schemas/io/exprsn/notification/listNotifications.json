@@ -1,0 +1,64 @@
+{
+  "lexicon": 1,
+  "id": "io.exprsn.notification.listNotifications",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Get the authenticated user's notifications",
+      "parameters": {
+        "type": "params",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 50
+          },
+          "cursor": { "type": "string" },
+          "filter": {
+            "type": "string",
+            "knownValues": ["all", "likes", "comments", "follows", "mentions", "reposts", "messages"]
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["notifications"],
+          "properties": {
+            "notifications": {
+              "type": "array",
+              "items": {
+                "type": "ref",
+                "ref": "#notification"
+              }
+            },
+            "cursor": { "type": "string" },
+            "seenAt": { "type": "string", "format": "datetime" }
+          }
+        }
+      }
+    },
+    "notification": {
+      "type": "object",
+      "required": ["uri", "cid", "author", "reason", "isRead", "indexedAt"],
+      "properties": {
+        "uri": { "type": "string", "format": "at-uri" },
+        "cid": { "type": "string", "format": "cid" },
+        "author": {
+          "type": "ref",
+          "ref": "io.exprsn.actor.getProfile#profileView"
+        },
+        "reason": {
+          "type": "string",
+          "knownValues": ["like", "comment", "follow", "mention", "repost", "reply", "quote"]
+        },
+        "reasonSubject": { "type": "string", "format": "at-uri" },
+        "record": { "type": "unknown" },
+        "isRead": { "type": "boolean" },
+        "indexedAt": { "type": "string", "format": "datetime" }
+      }
+    }
+  }
+}

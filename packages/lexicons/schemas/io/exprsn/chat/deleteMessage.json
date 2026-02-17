@@ -1,0 +1,37 @@
+{
+  "lexicon": 1,
+  "id": "io.exprsn.chat.deleteMessage",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Delete a message (must be the sender)",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["conversationId", "messageId"],
+          "properties": {
+            "conversationId": {
+              "type": "string",
+              "description": "The ID of the conversation"
+            },
+            "messageId": {
+              "type": "string",
+              "description": "The ID of the message to delete"
+            }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["success"],
+          "properties": {
+            "success": { "type": "boolean" }
+          }
+        }
+      }
+    }
+  }
+}

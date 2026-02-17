@@ -1,0 +1,62 @@
+{
+  "lexicon": 1,
+  "id": "io.exprsn.video.getVideosByTag",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Get videos with a specific hashtag/tag",
+      "parameters": {
+        "type": "params",
+        "required": ["tag"],
+        "properties": {
+          "tag": {
+            "type": "string",
+            "description": "The tag/hashtag (without #)"
+          },
+          "sort": {
+            "type": "string",
+            "knownValues": ["recent", "popular", "trending"],
+            "default": "recent"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 50
+          },
+          "cursor": { "type": "string" }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["videos", "tag"],
+          "properties": {
+            "tag": {
+              "type": "ref",
+              "ref": "#tagView"
+            },
+            "videos": {
+              "type": "array",
+              "items": {
+                "type": "ref",
+                "ref": "io.exprsn.video.getVideo#videoView"
+              }
+            },
+            "cursor": { "type": "string" }
+          }
+        }
+      }
+    },
+    "tagView": {
+      "type": "object",
+      "required": ["name", "videoCount"],
+      "properties": {
+        "name": { "type": "string" },
+        "videoCount": { "type": "integer" },
+        "viewCount": { "type": "integer" }
+      }
+    }
+  }
+}

@@ -1,0 +1,63 @@
+{
+  "lexicon": 1,
+  "id": "io.exprsn.video.getReposts",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Get users who reposted a video",
+      "parameters": {
+        "type": "params",
+        "required": ["uri"],
+        "properties": {
+          "uri": {
+            "type": "string",
+            "format": "at-uri",
+            "description": "The URI of the video"
+          },
+          "cid": {
+            "type": "string",
+            "format": "cid",
+            "description": "The CID of the video (optional, for version specificity)"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 50
+          },
+          "cursor": { "type": "string" }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["reposts"],
+          "properties": {
+            "reposts": {
+              "type": "array",
+              "items": {
+                "type": "ref",
+                "ref": "#repostView"
+              }
+            },
+            "cursor": { "type": "string" }
+          }
+        }
+      }
+    },
+    "repostView": {
+      "type": "object",
+      "required": ["uri", "author", "indexedAt"],
+      "properties": {
+        "uri": { "type": "string", "format": "at-uri" },
+        "author": {
+          "type": "ref",
+          "ref": "io.exprsn.actor.getProfile#profileView"
+        },
+        "caption": { "type": "string" },
+        "indexedAt": { "type": "string", "format": "datetime" }
+      }
+    }
+  }
+}

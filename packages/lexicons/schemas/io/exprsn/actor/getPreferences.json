@@ -1,0 +1,128 @@
+{
+  "lexicon": 1,
+  "id": "io.exprsn.actor.getPreferences",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Get the authenticated user's preferences",
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["preferences"],
+          "properties": {
+            "preferences": {
+              "type": "array",
+              "items": {
+                "type": "union",
+                "refs": [
+                  "#adultContentPref",
+                  "#contentLabelPref",
+                  "#feedViewPref",
+                  "#threadViewPref",
+                  "#interestsPref",
+                  "#mutedWordsPref",
+                  "#hiddenPostsPref"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "adultContentPref": {
+      "type": "object",
+      "required": ["$type", "enabled"],
+      "properties": {
+        "$type": { "type": "string", "const": "io.exprsn.actor.getPreferences#adultContentPref" },
+        "enabled": { "type": "boolean" }
+      }
+    },
+    "contentLabelPref": {
+      "type": "object",
+      "required": ["$type", "label", "visibility"],
+      "properties": {
+        "$type": { "type": "string", "const": "io.exprsn.actor.getPreferences#contentLabelPref" },
+        "label": { "type": "string" },
+        "visibility": {
+          "type": "string",
+          "knownValues": ["show", "warn", "hide"]
+        }
+      }
+    },
+    "feedViewPref": {
+      "type": "object",
+      "required": ["$type", "feed"],
+      "properties": {
+        "$type": { "type": "string", "const": "io.exprsn.actor.getPreferences#feedViewPref" },
+        "feed": { "type": "string" },
+        "hideReplies": { "type": "boolean" },
+        "hideReposts": { "type": "boolean" },
+        "hideQuotePosts": { "type": "boolean" }
+      }
+    },
+    "threadViewPref": {
+      "type": "object",
+      "required": ["$type"],
+      "properties": {
+        "$type": { "type": "string", "const": "io.exprsn.actor.getPreferences#threadViewPref" },
+        "sort": {
+          "type": "string",
+          "knownValues": ["oldest", "newest", "most-likes", "random"]
+        },
+        "prioritizeFollowedUsers": { "type": "boolean" }
+      }
+    },
+    "interestsPref": {
+      "type": "object",
+      "required": ["$type", "tags"],
+      "properties": {
+        "$type": { "type": "string", "const": "io.exprsn.actor.getPreferences#interestsPref" },
+        "tags": {
+          "type": "array",
+          "maxLength": 100,
+          "items": { "type": "string", "maxLength": 64 }
+        }
+      }
+    },
+    "mutedWordsPref": {
+      "type": "object",
+      "required": ["$type", "items"],
+      "properties": {
+        "$type": { "type": "string", "const": "io.exprsn.actor.getPreferences#mutedWordsPref" },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "ref",
+            "ref": "#mutedWord"
+          }
+        }
+      }
+    },
+    "mutedWord": {
+      "type": "object",
+      "required": ["value", "targets"],
+      "properties": {
+        "value": { "type": "string", "maxLength": 1000 },
+        "targets": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "knownValues": ["content", "tag"]
+          }
+        }
+      }
+    },
+    "hiddenPostsPref": {
+      "type": "object",
+      "required": ["$type", "items"],
+      "properties": {
+        "$type": { "type": "string", "const": "io.exprsn.actor.getPreferences#hiddenPostsPref" },
+        "items": {
+          "type": "array",
+          "items": { "type": "string", "format": "at-uri" }
+        }
+      }
+    }
+  }
+}

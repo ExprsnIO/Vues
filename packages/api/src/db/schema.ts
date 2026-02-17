@@ -797,6 +797,201 @@ export const conversationParticipants = pgTable(
   })
 );
 
+// ============================================
+// Graph/Lists Tables
+// ============================================
+
+// User lists - custom curated lists
+export const lists = pgTable(
+  'lists',
+  {
+    uri: text('uri').primaryKey(),
+    cid: text('cid').notNull(),
+    authorDid: text('author_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    description: text('description'),
+    avatar: text('avatar'),
+    purpose: text('purpose').default('curatelist').notNull(), // 'curatelist' | 'modlist'
+    memberCount: integer('member_count').default(0).notNull(),
+    createdAt: timestamp('created_at').notNull(),
+    indexedAt: timestamp('indexed_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    authorIdx: index('lists_author_idx').on(table.authorDid),
+    purposeIdx: index('lists_purpose_idx').on(table.purpose),
+    createdIdx: index('lists_created_idx').on(table.createdAt),
+  })
+);
+
+// List items - users in a list
+export const listItems = pgTable(
+  'list_items',
+  {
+    uri: text('uri').primaryKey(),
+    cid: text('cid').notNull(),
+    listUri: text('list_uri')
+      .notNull()
+      .references(() => lists.uri, { onDelete: 'cascade' }),
+    subjectDid: text('subject_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    createdAt: timestamp('created_at').notNull(),
+    indexedAt: timestamp('indexed_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    listIdx: index('list_items_list_idx').on(table.listUri),
+    subjectIdx: index('list_items_subject_idx').on(table.subjectDid),
+    uniqueItem: uniqueIndex('list_items_unique_idx').on(table.listUri, table.subjectDid),
+    createdIdx: index('list_items_created_idx').on(table.createdAt),
+  })
+);
+
+// ============================================
+// Video Interaction Tables
+// ============================================
+
+// Stitches - video responses that use a clip from another video
+export const stitches = pgTable(
+  'stitches',
+  {
+    uri: text('uri').primaryKey(),
+    cid: text('cid').notNull(),
+    videoUri: text('video_uri')
+      .notNull()
+      .references(() => videos.uri, { onDelete: 'cascade' }),
+    originalVideoUri: text('original_video_uri')
+      .notNull()
+      .references(() => videos.uri, { onDelete: 'cascade' }),
+    authorDid: text('author_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    startTime: integer('start_time').default(0).notNull(), // milliseconds
+    endTime: integer('end_time').notNull(), // milliseconds
+    createdAt: timestamp('created_at').notNull(),
+    indexedAt: timestamp('indexed_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    videoIdx: index('stitches_video_idx').on(table.videoUri),
+    originalIdx: index('stitches_original_idx').on(table.originalVideoUri),
+    authorIdx: index('stitches_author_idx').on(table.authorDid),
+    createdIdx: index('stitches_created_idx').on(table.createdAt),
+  })
+);
+
+// Shares - tracking video shares
+export const shares = pgTable(
+  'shares',
+  {
+    uri: text('uri').primaryKey(),
+    cid: text('cid').notNull(),
+    videoUri: text('video_uri')
+      .notNull()
+      .references(() => videos.uri, { onDelete: 'cascade' }),
+    authorDid: text('author_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    platform: text('platform'), // 'twitter' | 'facebook' | 'copy_link' | 'dm' | etc
+    createdAt: timestamp('created_at').notNull(),
+    indexedAt: timestamp('indexed_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    videoIdx: index('shares_video_idx').on(table.videoUri),
+    authorIdx: index('shares_author_idx').on(table.authorDid),
+    platformIdx: index('shares_platform_idx').on(table.platform),
+    createdIdx: index('shares_created_idx').on(table.createdAt),
+  })
+);
+
+// Duets - side-by-side video responses (for completeness with stitches)
+export const duets = pgTable(
+  'duets',
+  {
+    uri: text('uri').primaryKey(),
+    cid: text('cid').notNull(),
+    videoUri: text('video_uri')
+      .notNull()
+      .references(() => videos.uri, { onDelete: 'cascade' }),
+    originalVideoUri: text('original_video_uri')
+      .notNull()
+      .references(() => videos.uri, { onDelete: 'cascade' }),
+    authorDid: text('author_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    layout: text('layout').default('side-by-side').notNull(), // 'side-by-side' | 'react' | 'green-screen'
+    createdAt: timestamp('created_at').notNull(),
+    indexedAt: timestamp('indexed_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    videoIdx: index('duets_video_idx').on(table.videoUri),
+    originalIdx: index('duets_original_idx').on(table.originalVideoUri),
+    authorIdx: index('duets_author_idx').on(table.authorDid),
+    createdIdx: index('duets_created_idx').on(table.createdAt),
+  })
+);
+
+// ============================================
+// User Preferences Tables
+// ============================================
+
+// User preferences - AT Protocol style preferences
+export const userPreferences = pgTable(
+  'user_preferences',
+  {
+    id: text('id').primaryKey(),
+    userDid: text('user_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    prefType: text('pref_type').notNull(), // '$type' value like 'io.exprsn.actor.getPreferences#adultContentPref'
+    prefData: jsonb('pref_data').notNull(), // The full preference object
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    userDidIdx: index('user_preferences_user_did_idx').on(table.userDid),
+    prefTypeIdx: index('user_preferences_pref_type_idx').on(table.prefType),
+    uniquePref: uniqueIndex('user_preferences_unique_idx').on(table.userDid, table.prefType),
+  })
+);
+
+// Notifications - activity notifications for users
+export const notifications = pgTable(
+  'notifications',
+  {
+    id: text('id').primaryKey(),
+    userDid: text('user_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    actorDid: text('actor_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    reason: text('reason').notNull(), // 'like' | 'comment' | 'follow' | 'mention' | 'repost' | 'reply'
+    reasonSubject: text('reason_subject'), // URI of the subject (video, comment, etc)
+    targetUri: text('target_uri'), // URI of the target record
+    targetCid: text('target_cid'),
+    isRead: boolean('is_read').default(false).notNull(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    indexedAt: timestamp('indexed_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    userDidIdx: index('notifications_user_did_idx').on(table.userDid),
+    actorDidIdx: index('notifications_actor_did_idx').on(table.actorDid),
+    reasonIdx: index('notifications_reason_idx').on(table.reason),
+    isReadIdx: index('notifications_is_read_idx').on(table.isRead),
+    createdIdx: index('notifications_created_idx').on(table.createdAt),
+    userReadIdx: index('notifications_user_read_idx').on(table.userDid, table.isRead),
+  })
+);
+
+// Notification seen timestamp - tracks when user last viewed notifications
+export const notificationSeenAt = pgTable('notification_seen_at', {
+  userDid: text('user_did')
+    .primaryKey()
+    .references(() => users.did, { onDelete: 'cascade' }),
+  seenAt: timestamp('seen_at').defaultNow().notNull(),
+});
+
 // Notification subscriptions/preferences
 export const notificationSubscriptions = pgTable(
   'notification_subscriptions',
@@ -893,3 +1088,25 @@ export type ConversationParticipant = typeof conversationParticipants.$inferSele
 export type NewConversationParticipant = typeof conversationParticipants.$inferInsert;
 export type NotificationSubscriptionRow = typeof notificationSubscriptions.$inferSelect;
 export type NewNotificationSubscriptionRow = typeof notificationSubscriptions.$inferInsert;
+export type NotificationRow = typeof notifications.$inferSelect;
+export type NewNotificationRow = typeof notifications.$inferInsert;
+export type NotificationSeenAtRow = typeof notificationSeenAt.$inferSelect;
+export type NewNotificationSeenAtRow = typeof notificationSeenAt.$inferInsert;
+
+// Graph/Lists type exports
+export type List = typeof lists.$inferSelect;
+export type NewList = typeof lists.$inferInsert;
+export type ListItem = typeof listItems.$inferSelect;
+export type NewListItem = typeof listItems.$inferInsert;
+
+// Video interaction type exports
+export type Stitch = typeof stitches.$inferSelect;
+export type NewStitch = typeof stitches.$inferInsert;
+export type Share = typeof shares.$inferSelect;
+export type NewShare = typeof shares.$inferInsert;
+export type Duet = typeof duets.$inferSelect;
+export type NewDuet = typeof duets.$inferInsert;
+
+// User preferences type exports
+export type UserPreference = typeof userPreferences.$inferSelect;
+export type NewUserPreference = typeof userPreferences.$inferInsert;

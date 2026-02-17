@@ -763,6 +763,367 @@ class ApiClient {
       body: JSON.stringify({ conversationId, muted }),
     });
   }
+
+  // =============================================================================
+  // Actor/Profile API
+  // =============================================================================
+
+  async getActorProfile(
+    identifier: string
+  ): Promise<{ profile: ActorProfileView }> {
+    const param = identifier.startsWith('did:') ? 'did' : 'handle';
+    const params = new URLSearchParams({ [param]: identifier });
+    return this.fetch(`/xrpc/io.exprsn.actor.getProfile?${params}`);
+  }
+
+  async updateActorProfile(data: {
+    displayName?: string;
+    bio?: string;
+  }): Promise<{ success: boolean; profile: ActorProfileView }> {
+    return this.fetch('/xrpc/io.exprsn.actor.updateProfile', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async getSuggestions(
+    options: { cursor?: string; limit?: number } = {}
+  ): Promise<{ actors: ActorProfileView[]; cursor?: string }> {
+    const { cursor, limit = 25 } = options;
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (cursor) params.set('cursor', cursor);
+    return this.fetch(`/xrpc/io.exprsn.actor.getSuggestions?${params}`);
+  }
+
+  async searchActors(
+    query: string,
+    options: { cursor?: string; limit?: number } = {}
+  ): Promise<{ actors: ActorProfileView[]; cursor?: string }> {
+    const { cursor, limit = 25 } = options;
+    const params = new URLSearchParams({ q: query, limit: String(limit) });
+    if (cursor) params.set('cursor', cursor);
+    return this.fetch(`/xrpc/io.exprsn.actor.searchActors?${params}`);
+  }
+
+  async getActorVideos(
+    identifier: string,
+    options: { cursor?: string; limit?: number } = {}
+  ): Promise<{ videos: VideoView[]; cursor?: string }> {
+    const param = identifier.startsWith('did:') ? 'did' : 'handle';
+    const { cursor, limit = 30 } = options;
+    const params = new URLSearchParams({ [param]: identifier, limit: String(limit) });
+    if (cursor) params.set('cursor', cursor);
+    return this.fetch(`/xrpc/io.exprsn.actor.getVideos?${params}`);
+  }
+
+  // =============================================================================
+  // Notification API
+  // =============================================================================
+
+  async listNotifications(
+    options: { cursor?: string; limit?: number; filter?: string } = {}
+  ): Promise<{ notifications: NotificationView[]; cursor?: string; seenAt?: string }> {
+    const { cursor, limit = 50, filter } = options;
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (cursor) params.set('cursor', cursor);
+    if (filter) params.set('filter', filter);
+    return this.fetch(`/xrpc/io.exprsn.notification.listNotifications?${params}`);
+  }
+
+  async updateNotificationSeen(seenAt: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.notification.updateSeen', {
+      method: 'POST',
+      body: JSON.stringify({ seenAt }),
+    });
+  }
+
+  async getUnreadNotificationCount(): Promise<{ count: number }> {
+    return this.fetch('/xrpc/io.exprsn.notification.getUnreadCount');
+  }
+
+  // =============================================================================
+  // Feed API
+  // =============================================================================
+
+  async getTimeline(
+    options: { cursor?: string; limit?: number } = {}
+  ): Promise<{ feed: FeedViewPost[]; cursor?: string }> {
+    const { cursor, limit = 50 } = options;
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (cursor) params.set('cursor', cursor);
+    return this.fetch(`/xrpc/io.exprsn.feed.getTimeline?${params}`);
+  }
+
+  async getActorLikes(
+    identifier: string,
+    options: { cursor?: string; limit?: number } = {}
+  ): Promise<{ feed: VideoView[]; cursor?: string }> {
+    const param = identifier.startsWith('did:') ? 'did' : 'handle';
+    const { cursor, limit = 50 } = options;
+    const params = new URLSearchParams({ [param]: identifier, limit: String(limit) });
+    if (cursor) params.set('cursor', cursor);
+    return this.fetch(`/xrpc/io.exprsn.feed.getActorLikes?${params}`);
+  }
+
+  async getSuggestedFeed(
+    options: { cursor?: string; limit?: number } = {}
+  ): Promise<{ feed: VideoView[]; cursor?: string }> {
+    const { cursor, limit = 20 } = options;
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (cursor) params.set('cursor', cursor);
+    return this.fetch(`/xrpc/io.exprsn.feed.getSuggestedFeed?${params}`);
+  }
+
+  async getActorFeed(
+    identifier: string,
+    options: { cursor?: string; limit?: number; filter?: string } = {}
+  ): Promise<{ feed: FeedViewPost[]; cursor?: string }> {
+    const param = identifier.startsWith('did:') ? 'did' : 'handle';
+    const { cursor, limit = 50, filter = 'posts_and_reposts' } = options;
+    const params = new URLSearchParams({
+      [param]: identifier,
+      limit: String(limit),
+      filter,
+    });
+    if (cursor) params.set('cursor', cursor);
+    return this.fetch(`/xrpc/io.exprsn.feed.getActorFeed?${params}`);
+  }
+
+  // =============================================================================
+  // Video Management API
+  // =============================================================================
+
+  async deleteVideo(uri: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.video.deleteVideo', {
+      method: 'POST',
+      body: JSON.stringify({ uri }),
+    });
+  }
+
+  async updateVideo(data: {
+    uri: string;
+    caption?: string;
+    tags?: string[];
+    visibility?: 'public' | 'followers';
+    allowDuet?: boolean;
+    allowStitch?: boolean;
+    allowComments?: boolean;
+  }): Promise<{ success: boolean; video?: VideoView }> {
+    return this.fetch('/xrpc/io.exprsn.video.updateVideo', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async getVideoLikes(
+    uri: string,
+    options: { cursor?: string; limit?: number } = {}
+  ): Promise<{ likes: LikeView[]; cursor?: string }> {
+    const { cursor, limit = 50 } = options;
+    const params = new URLSearchParams({ uri, limit: String(limit) });
+    if (cursor) params.set('cursor', cursor);
+    return this.fetch(`/xrpc/io.exprsn.video.getLikes?${params}`);
+  }
+
+  async getVideoReposts(
+    uri: string,
+    options: { cursor?: string; limit?: number } = {}
+  ): Promise<{ reposts: RepostUserView[]; cursor?: string }> {
+    const { cursor, limit = 50 } = options;
+    const params = new URLSearchParams({ uri, limit: String(limit) });
+    if (cursor) params.set('cursor', cursor);
+    return this.fetch(`/xrpc/io.exprsn.video.getReposts?${params}`);
+  }
+
+  // =============================================================================
+  // Lists API
+  // =============================================================================
+
+  async createList(data: {
+    name: string;
+    description?: string;
+    avatar?: string;
+    purpose?: 'curatelist' | 'modlist';
+  }): Promise<{ uri: string }> {
+    return this.fetch('/xrpc/io.exprsn.graph.createList', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async updateList(data: {
+    uri: string;
+    name?: string;
+    description?: string;
+    avatar?: string;
+  }): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.graph.updateList', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async deleteList(uri: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.graph.deleteList', {
+      method: 'POST',
+      body: JSON.stringify({ uri }),
+    });
+  }
+
+  async getLists(
+    did: string,
+    options: { cursor?: string; limit?: number } = {}
+  ): Promise<{ lists: ListView[]; cursor?: string }> {
+    const { cursor, limit = 50 } = options;
+    const params = new URLSearchParams({ did, limit: String(limit) });
+    if (cursor) params.set('cursor', cursor);
+    return this.fetch(`/xrpc/io.exprsn.graph.getLists?${params}`);
+  }
+
+  async getList(
+    uri: string,
+    options: { cursor?: string; limit?: number } = {}
+  ): Promise<{ list: ListView; items: ListItemView[]; cursor?: string }> {
+    const { cursor, limit = 50 } = options;
+    const params = new URLSearchParams({ uri, limit: String(limit) });
+    if (cursor) params.set('cursor', cursor);
+    return this.fetch(`/xrpc/io.exprsn.graph.getList?${params}`);
+  }
+
+  async addListItem(listUri: string, subjectDid: string): Promise<{ uri: string }> {
+    return this.fetch('/xrpc/io.exprsn.graph.addListItem', {
+      method: 'POST',
+      body: JSON.stringify({ listUri, subjectDid }),
+    });
+  }
+
+  async removeListItem(listUri: string, subjectDid: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.graph.removeListItem', {
+      method: 'POST',
+      body: JSON.stringify({ listUri, subjectDid }),
+    });
+  }
+
+  // =============================================================================
+  // Stitch & Duet API
+  // =============================================================================
+
+  async createStitch(data: {
+    videoUri: string;
+    originalVideoUri: string;
+    startTime?: number;
+    endTime: number;
+  }): Promise<{ uri: string }> {
+    return this.fetch('/xrpc/io.exprsn.video.stitch', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async getStitches(
+    uri: string,
+    options: { cursor?: string; limit?: number } = {}
+  ): Promise<{ stitches: StitchView[]; cursor?: string }> {
+    const { cursor, limit = 30 } = options;
+    const params = new URLSearchParams({ uri, limit: String(limit) });
+    if (cursor) params.set('cursor', cursor);
+    return this.fetch(`/xrpc/io.exprsn.video.getStitches?${params}`);
+  }
+
+  async createDuet(data: {
+    videoUri: string;
+    originalVideoUri: string;
+    layout?: 'side-by-side' | 'react' | 'green-screen';
+  }): Promise<{ uri: string }> {
+    return this.fetch('/xrpc/io.exprsn.video.duet', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async getDuets(
+    uri: string,
+    options: { cursor?: string; limit?: number } = {}
+  ): Promise<{ duets: DuetView[]; cursor?: string }> {
+    const { cursor, limit = 30 } = options;
+    const params = new URLSearchParams({ uri, limit: String(limit) });
+    if (cursor) params.set('cursor', cursor);
+    return this.fetch(`/xrpc/io.exprsn.video.getDuets?${params}`);
+  }
+
+  // =============================================================================
+  // Sound & Tag API
+  // =============================================================================
+
+  async getVideosBySound(
+    soundId: string,
+    options: { cursor?: string; limit?: number } = {}
+  ): Promise<{ sound: SoundView; videos: VideoView[]; cursor?: string }> {
+    const { cursor, limit = 30 } = options;
+    const params = new URLSearchParams({ soundId, limit: String(limit) });
+    if (cursor) params.set('cursor', cursor);
+    return this.fetch(`/xrpc/io.exprsn.video.getVideosBySound?${params}`);
+  }
+
+  async getVideosByTag(
+    tag: string,
+    options: { cursor?: string; limit?: number } = {}
+  ): Promise<{ tag: TagView; videos: VideoView[]; cursor?: string }> {
+    const { cursor, limit = 30 } = options;
+    const params = new URLSearchParams({ tag, limit: String(limit) });
+    if (cursor) params.set('cursor', cursor);
+    return this.fetch(`/xrpc/io.exprsn.video.getVideosByTag?${params}`);
+  }
+
+  // =============================================================================
+  // Share Tracking API
+  // =============================================================================
+
+  async trackShare(
+    videoUri: string,
+    platform?: string
+  ): Promise<{ uri: string }> {
+    return this.fetch('/xrpc/io.exprsn.video.share', {
+      method: 'POST',
+      body: JSON.stringify({ videoUri, platform }),
+    });
+  }
+
+  // =============================================================================
+  // Chat Delete API
+  // =============================================================================
+
+  async deleteMessage(
+    conversationId: string,
+    messageId: string
+  ): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.chat.deleteMessage', {
+      method: 'POST',
+      body: JSON.stringify({ conversationId, messageId }),
+    });
+  }
+
+  async deleteConversation(conversationId: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.chat.deleteConversation', {
+      method: 'POST',
+      body: JSON.stringify({ conversationId }),
+    });
+  }
+
+  // =============================================================================
+  // Actor Preferences API
+  // =============================================================================
+
+  async getPreferences(): Promise<{ preferences: PreferenceItem[] }> {
+    return this.fetch('/xrpc/io.exprsn.actor.getPreferences');
+  }
+
+  async putPreferences(preferences: PreferenceItem[]): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.actor.putPreferences', {
+      method: 'POST',
+      body: JSON.stringify({ preferences }),
+    });
+  }
 }
 
 // Profile types
@@ -1053,6 +1414,186 @@ export interface MessageView {
   embedUri?: string;
   read: boolean;
   createdAt: string;
+}
+
+// Actor/Profile types
+export interface ActorProfileView {
+  did: string;
+  handle: string;
+  displayName?: string;
+  bio?: string;
+  avatar?: string;
+  banner?: string;
+  followerCount?: number;
+  followingCount?: number;
+  videoCount?: number;
+  likeCount?: number;
+  verified?: boolean;
+  createdAt?: string;
+  viewer?: {
+    following?: boolean;
+    followedBy?: boolean;
+    followUri?: string;
+    muted?: boolean;
+    blocked?: boolean;
+    blockUri?: string;
+  };
+}
+
+// Notification types
+export interface NotificationView {
+  uri: string;
+  cid: string;
+  author: {
+    did: string;
+    handle: string;
+    displayName?: string;
+    avatar?: string;
+    verified?: boolean;
+  };
+  reason: 'like' | 'comment' | 'follow' | 'mention' | 'repost' | 'reply' | 'quote';
+  reasonSubject?: string;
+  record?: unknown;
+  isRead: boolean;
+  indexedAt: string;
+}
+
+// Feed types
+export interface FeedViewPost {
+  post: VideoView;
+  reason?: {
+    $type: string;
+    by?: {
+      did: string;
+      handle: string;
+      displayName?: string;
+      avatar?: string;
+    };
+    indexedAt?: string;
+  };
+}
+
+// Video interaction types
+export interface LikeView {
+  uri: string;
+  author: ActorProfileView;
+  indexedAt: string;
+}
+
+export interface RepostUserView {
+  uri: string;
+  author: ActorProfileView;
+  caption?: string;
+  indexedAt: string;
+}
+
+// List types
+export interface ListView {
+  uri: string;
+  cid: string;
+  name: string;
+  description?: string;
+  avatar?: string;
+  purpose: 'curatelist' | 'modlist';
+  memberCount: number;
+  createdAt: string;
+  creator?: {
+    did: string;
+    handle: string;
+    displayName?: string;
+    avatar?: string;
+  };
+}
+
+export interface ListItemView {
+  uri: string;
+  subject: ActorProfileView;
+  addedAt: string;
+}
+
+// Stitch & Duet types
+export interface StitchView {
+  uri: string;
+  video: VideoView;
+  author: ActorProfileView;
+  startTime: number;
+  endTime: number;
+  createdAt: string;
+}
+
+export interface DuetView {
+  uri: string;
+  video: VideoView;
+  author: ActorProfileView;
+  layout: 'side-by-side' | 'react' | 'green-screen';
+  createdAt: string;
+}
+
+// Sound & Tag types
+export interface SoundView {
+  id: string;
+  title: string;
+  artist?: string;
+  duration?: number;
+  audioUrl?: string;
+  coverUrl?: string;
+  useCount: number;
+}
+
+export interface TagView {
+  name: string;
+  videoCount: number;
+}
+
+// Preference types
+export interface PreferenceItem {
+  $type: string;
+  [key: string]: unknown;
+}
+
+export interface AdultContentPref extends PreferenceItem {
+  $type: 'io.exprsn.actor.getPreferences#adultContentPref';
+  enabled: boolean;
+}
+
+export interface ContentLabelPref extends PreferenceItem {
+  $type: 'io.exprsn.actor.getPreferences#contentLabelPref';
+  label: string;
+  visibility: 'show' | 'warn' | 'hide';
+}
+
+export interface FeedViewPref extends PreferenceItem {
+  $type: 'io.exprsn.actor.getPreferences#feedViewPref';
+  feed: string;
+  hideReplies?: boolean;
+  hideReposts?: boolean;
+  hideQuotePosts?: boolean;
+}
+
+export interface ThreadViewPref extends PreferenceItem {
+  $type: 'io.exprsn.actor.getPreferences#threadViewPref';
+  sort?: 'oldest' | 'newest' | 'most-likes' | 'random';
+  prioritizeFollowedUsers?: boolean;
+}
+
+export interface InterestsPref extends PreferenceItem {
+  $type: 'io.exprsn.actor.getPreferences#interestsPref';
+  tags: string[];
+}
+
+export interface MutedWordsPref extends PreferenceItem {
+  $type: 'io.exprsn.actor.getPreferences#mutedWordsPref';
+  items: MutedWord[];
+}
+
+export interface MutedWord {
+  value: string;
+  targets: ('content' | 'tag')[];
+}
+
+export interface HiddenPostsPref extends PreferenceItem {
+  $type: 'io.exprsn.actor.getPreferences#hiddenPostsPref';
+  items: string[];
 }
 
 export const api = new ApiClient(API_BASE);

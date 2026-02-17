@@ -1,0 +1,31 @@
+{
+  "lexicon": 1,
+  "id": "io.exprsn.graph.listItem",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A user added to a list",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["subject", "list", "createdAt"],
+        "properties": {
+          "subject": {
+            "type": "string",
+            "format": "did",
+            "description": "The DID of the user being added"
+          },
+          "list": {
+            "type": "string",
+            "format": "at-uri",
+            "description": "Reference to the list record"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime"
+          }
+        }
+      }
+    }
+  }
+}

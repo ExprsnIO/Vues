@@ -1,0 +1,72 @@
+{
+  "lexicon": 1,
+  "id": "io.exprsn.graph.getFollowers",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Get a user's followers",
+      "parameters": {
+        "type": "params",
+        "properties": {
+          "did": {
+            "type": "string",
+            "format": "did",
+            "description": "The DID of the user"
+          },
+          "handle": {
+            "type": "string",
+            "format": "handle",
+            "description": "The handle of the user"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 50
+          },
+          "cursor": { "type": "string" }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["followers"],
+          "properties": {
+            "subject": {
+              "type": "ref",
+              "ref": "io.exprsn.actor.getProfile#profileView"
+            },
+            "followers": {
+              "type": "array",
+              "items": {
+                "type": "ref",
+                "ref": "#follower"
+              }
+            },
+            "cursor": { "type": "string" }
+          }
+        }
+      }
+    },
+    "follower": {
+      "type": "object",
+      "required": ["did", "handle", "indexedAt"],
+      "properties": {
+        "did": { "type": "string", "format": "did" },
+        "handle": { "type": "string", "format": "handle" },
+        "displayName": { "type": "string" },
+        "avatar": { "type": "string", "format": "uri" },
+        "verified": { "type": "boolean" },
+        "indexedAt": { "type": "string", "format": "datetime" },
+        "viewer": {
+          "type": "object",
+          "properties": {
+            "following": { "type": "boolean" },
+            "followedBy": { "type": "boolean" }
+          }
+        }
+      }
+    }
+  }
+}

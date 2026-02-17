@@ -1,0 +1,67 @@
+{
+  "lexicon": 1,
+  "id": "io.exprsn.actor.getProfile",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Get a user's profile",
+      "parameters": {
+        "type": "params",
+        "properties": {
+          "did": {
+            "type": "string",
+            "format": "did",
+            "description": "The DID of the user"
+          },
+          "handle": {
+            "type": "string",
+            "format": "handle",
+            "description": "The handle of the user"
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["profile"],
+          "properties": {
+            "profile": {
+              "type": "ref",
+              "ref": "#profileView"
+            }
+          }
+        }
+      }
+    },
+    "profileView": {
+      "type": "object",
+      "required": ["did", "handle"],
+      "properties": {
+        "did": { "type": "string", "format": "did" },
+        "handle": { "type": "string", "format": "handle" },
+        "displayName": { "type": "string", "maxLength": 64 },
+        "bio": { "type": "string", "maxLength": 256 },
+        "avatar": { "type": "string", "format": "uri" },
+        "banner": { "type": "string", "format": "uri" },
+        "followerCount": { "type": "integer" },
+        "followingCount": { "type": "integer" },
+        "videoCount": { "type": "integer" },
+        "likeCount": { "type": "integer" },
+        "verified": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "datetime" },
+        "viewer": {
+          "type": "object",
+          "properties": {
+            "following": { "type": "boolean" },
+            "followedBy": { "type": "boolean" },
+            "followUri": { "type": "string", "format": "at-uri" },
+            "muted": { "type": "boolean" },
+            "blocked": { "type": "boolean" },
+            "blockUri": { "type": "string", "format": "at-uri" }
+          }
+        }
+      }
+    }
+  }
+}

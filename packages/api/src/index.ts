@@ -16,6 +16,11 @@ import { settingsRouter } from './routes/settings.js';
 import { adminRouter } from './routes/admin.js';
 import { socialRouter } from './routes/social.js';
 import { chatRouter } from './routes/chat.js';
+import { actorRouter } from './routes/actor.js';
+import { notificationRouter } from './routes/notification.js';
+import { feedRouter } from './routes/feed.js';
+import { graphRouter } from './routes/graph.js';
+import { videoExtendedRouter } from './routes/video-extended.js';
 import { createPdsApp, getPdsConfig } from './pds/index.js';
 
 const app = new Hono();
@@ -134,6 +139,11 @@ app.route('/xrpc', settingsRouter);
 app.route('/xrpc', adminRouter);
 app.route('/xrpc', socialRouter);
 app.route('/xrpc', chatRouter);
+app.route('/xrpc', actorRouter);
+app.route('/xrpc', notificationRouter);
+app.route('/xrpc', feedRouter);
+app.route('/xrpc', graphRouter);
+app.route('/xrpc', videoExtendedRouter);
 app.route('/oauth', oauthRouter);
 
 // Mount PDS routes if enabled

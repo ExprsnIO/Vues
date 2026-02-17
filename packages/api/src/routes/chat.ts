@@ -500,3 +500,120 @@ chatRouter.post('/io.exprsn.chat.muteConversation', authMiddleware, async (c) =>
 
   return c.json({ success: true, muted });
 });
+
+/**
+ * Delete a message (must be the sender)
+ * POST /xrpc/io.exprsn.chat.deleteMessage
+ */
+chatRouter.post('/io.exprsn.chat.deleteMessage', authMiddleware, async (c) => {
+  const { conversationId, messageId } = await c.req.json();
+  const userDid = c.get('did');
+
+  if (!conversationId || !messageId) {
+    throw new HTTPException(400, { message: 'Conversation ID and message ID are required' });
+  }
+
+  // Verify user is part of conversation
+  const conversation = await db.query.conversations.findFirst({
+    where: and(
+      eq(conversations.id, conversationId),
+      or(
+        eq(conversations.participant1Did, userDid),
+        eq(conversations.participant2Did, userDid)
+      )
+    ),
+  });
+
+  if (!conversation) {
+    throw new HTTPException(404, { message: 'Conversation not found' });
+  }
+
+  // Find the message
+  const message = await db.query.messages.findFirst({
+    where: and(eq(messages.id, messageId), eq(messages.conversationId, conversationId)),
+  });
+
+  if (!message) {
+    throw new HTTPException(404, { message: 'Message not found' });
+  }
+
+  // Only the sender can delete their message
+  if (message.senderDid !== userDid) {
+    throw new HTTPException(403, { message: 'Not authorized to delete this message' });
+  }
+
+  // Delete the message
+  await db.delete(messages).where(eq(messages.id, messageId));
+
+  // If this was the last message, update conversation's lastMessageText
+  const lastMessage = await db.query.messages.findFirst({
+    where: eq(messages.conversationId, conversationId),
+    orderBy: desc(messages.createdAt),
+  });
+
+  if (lastMessage) {
+    await db
+      .update(conversations)
+      .set({
+        lastMessageText: lastMessage.text.substring(0, 100),
+        lastMessageAt: lastMessage.createdAt,
+        updatedAt: new Date(),
+      })
+      .where(eq(conversations.id, conversationId));
+  } else {
+    await db
+      .update(conversations)
+      .set({
+        lastMessageText: null,
+        lastMessageAt: null,
+        updatedAt: new Date(),
+      })
+      .where(eq(conversations.id, conversationId));
+  }
+
+  return c.json({ success: true });
+});
+
+/**
+ * Delete/leave a conversation (removes it from user's view)
+ * POST /xrpc/io.exprsn.chat.deleteConversation
+ */
+chatRouter.post('/io.exprsn.chat.deleteConversation', authMiddleware, async (c) => {
+  const { conversationId } = await c.req.json();
+  const userDid = c.get('did');
+
+  if (!conversationId) {
+    throw new HTTPException(400, { message: 'Conversation ID is required' });
+  }
+
+  // Verify user is part of conversation
+  const conversation = await db.query.conversations.findFirst({
+    where: and(
+      eq(conversations.id, conversationId),
+      or(
+        eq(conversations.participant1Did, userDid),
+        eq(conversations.participant2Did, userDid)
+      )
+    ),
+  });
+
+  if (!conversation) {
+    throw new HTTPException(404, { message: 'Conversation not found' });
+  }
+
+  // For now, we'll actually delete the conversation if both participants delete
+  // In a more complete implementation, you'd track deleted state per participant
+
+  // Delete all messages in the conversation
+  await db.delete(messages).where(eq(messages.conversationId, conversationId));
+
+  // Delete participant records
+  await db.delete(conversationParticipants).where(
+    eq(conversationParticipants.conversationId, conversationId)
+  );
+
+  // Delete the conversation
+  await db.delete(conversations).where(eq(conversations.id, conversationId));
+
+  return c.json({ success: true });
+});

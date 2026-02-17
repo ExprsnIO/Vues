@@ -1,0 +1,50 @@
+{
+  "lexicon": 1,
+  "id": "io.exprsn.video.stitch",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A stitch video that incorporates part of another video",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["video", "originalVideo", "createdAt"],
+        "properties": {
+          "video": {
+            "type": "ref",
+            "ref": "io.exprsn.video.post#videoEmbed",
+            "description": "The stitch video content"
+          },
+          "originalVideo": {
+            "type": "ref",
+            "ref": "io.exprsn.video.post#strongRef",
+            "description": "Reference to the original video being stitched"
+          },
+          "stitchStart": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Start time in milliseconds of the original video clip"
+          },
+          "stitchEnd": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "End time in milliseconds of the original video clip"
+          },
+          "caption": {
+            "type": "string",
+            "maxLength": 300
+          },
+          "tags": {
+            "type": "array",
+            "maxLength": 10,
+            "items": { "type": "string", "maxLength": 64 }
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime"
+          }
+        }
+      }
+    }
+  }
+}

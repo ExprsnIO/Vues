@@ -1,0 +1,49 @@
+{
+  "lexicon": 1,
+  "id": "io.exprsn.feed.getActorLikes",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Get videos liked by a specific user",
+      "parameters": {
+        "type": "params",
+        "properties": {
+          "did": {
+            "type": "string",
+            "format": "did",
+            "description": "The DID of the user"
+          },
+          "handle": {
+            "type": "string",
+            "format": "handle",
+            "description": "The handle of the user"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 50
+          },
+          "cursor": { "type": "string" }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["feed"],
+          "properties": {
+            "feed": {
+              "type": "array",
+              "items": {
+                "type": "ref",
+                "ref": "io.exprsn.video.getVideo#videoView"
+              }
+            },
+            "cursor": { "type": "string" }
+          }
+        }
+      }
+    }
+  }
+}

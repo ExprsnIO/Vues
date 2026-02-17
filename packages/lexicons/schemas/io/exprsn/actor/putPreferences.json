@@ -1,0 +1,44 @@
+{
+  "lexicon": 1,
+  "id": "io.exprsn.actor.putPreferences",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Set the authenticated user's preferences",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["preferences"],
+          "properties": {
+            "preferences": {
+              "type": "array",
+              "items": {
+                "type": "union",
+                "refs": [
+                  "io.exprsn.actor.getPreferences#adultContentPref",
+                  "io.exprsn.actor.getPreferences#contentLabelPref",
+                  "io.exprsn.actor.getPreferences#feedViewPref",
+                  "io.exprsn.actor.getPreferences#threadViewPref",
+                  "io.exprsn.actor.getPreferences#interestsPref",
+                  "io.exprsn.actor.getPreferences#mutedWordsPref",
+                  "io.exprsn.actor.getPreferences#hiddenPostsPref"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["success"],
+          "properties": {
+            "success": { "type": "boolean" }
+          }
+        }
+      }
+    }
+  }
+}

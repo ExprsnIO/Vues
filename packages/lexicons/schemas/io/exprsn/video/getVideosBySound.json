@@ -1,0 +1,65 @@
+{
+  "lexicon": 1,
+  "id": "io.exprsn.video.getVideosBySound",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Get videos using a specific sound",
+      "parameters": {
+        "type": "params",
+        "required": ["soundId"],
+        "properties": {
+          "soundId": {
+            "type": "string",
+            "description": "The ID of the sound"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 50
+          },
+          "cursor": { "type": "string" }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["videos", "sound"],
+          "properties": {
+            "sound": {
+              "type": "ref",
+              "ref": "#soundView"
+            },
+            "videos": {
+              "type": "array",
+              "items": {
+                "type": "ref",
+                "ref": "io.exprsn.video.getVideo#videoView"
+              }
+            },
+            "cursor": { "type": "string" }
+          }
+        }
+      }
+    },
+    "soundView": {
+      "type": "object",
+      "required": ["id", "title", "useCount"],
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "artist": { "type": "string" },
+        "duration": { "type": "integer" },
+        "coverUrl": { "type": "string", "format": "uri" },
+        "audioUrl": { "type": "string", "format": "uri" },
+        "useCount": { "type": "integer" },
+        "originalVideo": {
+          "type": "ref",
+          "ref": "io.exprsn.video.getVideo#videoView"
+        }
+      }
+    }
+  }
+}

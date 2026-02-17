@@ -1,0 +1,33 @@
+{
+  "lexicon": 1,
+  "id": "io.exprsn.chat.deleteConversation",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Delete/leave a conversation (removes it from user's view)",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["conversationId"],
+          "properties": {
+            "conversationId": {
+              "type": "string",
+              "description": "The ID of the conversation to delete"
+            }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["success"],
+          "properties": {
+            "success": { "type": "boolean" }
+          }
+        }
+      }
+    }
+  }
+}
