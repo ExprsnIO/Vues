@@ -117,9 +117,12 @@ export default function ProfilePage() {
                   {/* Action Buttons */}
                   <div className="flex items-center gap-3">
                     {isOwnProfile ? (
-                      <button className="px-6 py-2 border border-border rounded-lg text-text-primary hover:bg-surface transition-colors">
+                      <Link
+                        href="/profile/edit"
+                        className="inline-block px-6 py-2 border border-border rounded-lg text-text-primary hover:bg-surface transition-colors"
+                      >
                         Edit profile
-                      </button>
+                      </Link>
                     ) : (
                       <>
                         <button

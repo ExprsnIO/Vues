@@ -3,9 +3,11 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useState, useEffect, createContext, useContext } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { cn } from '@/lib/utils';
 import { useAuth } from '@/lib/auth-context';
 import { ThemeSwitcher } from './ThemeSwitcher';
+import { api } from '@/lib/api';
 
 const NAV_ITEMS = [
   { href: '/', label: 'For You', icon: HomeIcon },
@@ -64,6 +66,16 @@ export function Sidebar() {
   const pathname = usePathname();
   const { user, isLoading, signOut } = useAuth();
   const { isOpen, close } = useSidebar();
+
+  // Fetch unread notification count
+  const { data: notificationData } = useQuery({
+    queryKey: ['unread-notifications'],
+    queryFn: () => api.getUnreadNotificationCount(),
+    enabled: !!user,
+    refetchInterval: 30000, // Refresh every 30 seconds
+  });
+
+  const unreadCount = notificationData?.count || 0;
 
   return (
     <>
@@ -134,6 +146,29 @@ export function Sidebar() {
             <PlusIcon className="w-6 h-6" />
             <span className="font-medium">Upload</span>
           </Link>
+
+          {/* Notifications (only show when logged in) */}
+          {user && (
+            <Link
+              href="/notifications"
+              className={cn(
+                'flex items-center gap-3 px-4 py-3 rounded-lg transition-colors mt-2',
+                pathname === '/notifications'
+                  ? 'bg-surface text-text-primary'
+                  : 'text-text-muted hover:bg-surface-hover hover:text-text-primary'
+              )}
+            >
+              <div className="relative">
+                <NotificationIcon className="w-6 h-6" filled={pathname === '/notifications'} />
+                {unreadCount > 0 && (
+                  <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] bg-accent text-text-inverse text-xs font-bold rounded-full flex items-center justify-center px-1">
+                    {unreadCount > 99 ? '99+' : unreadCount}
+                  </span>
+                )}
+              </div>
+              <span className="font-medium">Notifications</span>
+            </Link>
+          )}
         </nav>
 
         {/* Theme Switcher */}
@@ -358,6 +393,30 @@ function LogoutIcon({ className }: { className?: string }) {
         strokeLinecap="round"
         strokeLinejoin="round"
         d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15M12 9l-3 3m0 0l3 3m-3-3h12.75"
+      />
+    </svg>
+  );
+}
+
+function NotificationIcon({
+  className,
+  filled,
+}: {
+  className?: string;
+  filled?: boolean;
+}) {
+  return (
+    <svg
+      className={className}
+      fill={filled ? 'currentColor' : 'none'}
+      stroke="currentColor"
+      strokeWidth={filled ? 0 : 2}
+      viewBox="0 0 24 24"
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75v-.7V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0"
       />
     </svg>
   );

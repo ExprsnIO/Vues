@@ -10,10 +10,11 @@ import { useAuth } from '@/lib/auth-context';
 
 interface CommentThreadProps {
   videoUri: string;
-  onClose: () => void;
+  onClose?: () => void;
+  inline?: boolean;
 }
 
-export function CommentThread({ videoUri, onClose }: CommentThreadProps) {
+export function CommentThread({ videoUri, onClose, inline = false }: CommentThreadProps) {
   const { user } = useAuth();
   const queryClient = useQueryClient();
   const [sort, setSort] = useState<CommentSortType>('top');
@@ -64,6 +65,86 @@ export function CommentThread({ videoUri, onClose }: CommentThreadProps) {
 
   const comments = data?.pages.flatMap((page) => page.comments) ?? [];
 
+  const content = (
+    <>
+      {/* Header */}
+      <div className={`flex items-center justify-between px-4 py-3 border-b border-border ${inline ? '' : ''}`}>
+        <h2 className="text-lg font-semibold text-text-primary">
+          Comments
+        </h2>
+        <div className="flex items-center gap-3">
+          <SortSelector value={sort} onChange={handleSortChange} />
+          {!inline && onClose && (
+            <button
+              onClick={onClose}
+              className="text-text-muted hover:text-text-primary p-1"
+            >
+              <CloseIcon className="w-6 h-6" />
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Comments List */}
+      <div className="flex-1 overflow-y-auto px-4 py-2">
+        {isLoading ? (
+          <div className="flex items-center justify-center py-8">
+            <div className="w-8 h-8 border-3 border-accent border-t-transparent rounded-full animate-spin" />
+          </div>
+        ) : isError ? (
+          <div className="text-center py-8 text-text-muted">
+            Failed to load comments
+          </div>
+        ) : comments.length === 0 ? (
+          <div className="text-center py-8 text-text-muted">
+            No comments yet. Be the first to comment!
+          </div>
+        ) : (
+          <>
+            {comments.map((comment) => (
+              <CommentItem
+                key={comment.uri}
+                comment={comment}
+                onReply={handleReply}
+                isReplying={replyingTo === comment.uri}
+                onSubmitReply={(text) => handleSubmitComment(text, comment.uri)}
+                onCancelReply={handleCancelReply}
+              />
+            ))}
+            {hasNextPage && (
+              <button
+                onClick={() => fetchNextPage()}
+                disabled={isFetchingNextPage}
+                className="w-full py-3 text-accent hover:text-accent-hover font-medium"
+              >
+                {isFetchingNextPage ? 'Loading...' : 'Load more comments'}
+              </button>
+            )}
+          </>
+        )}
+      </div>
+
+      {/* Comment Input */}
+      <div className="border-t border-border px-4 py-3">
+        <CommentInput
+          onSubmit={(text) => handleSubmitComment(text)}
+          isSubmitting={createCommentMutation.isPending}
+          placeholder="Add a comment..."
+        />
+      </div>
+    </>
+  );
+
+  // Inline mode: render directly without modal wrapper
+  if (inline) {
+    return (
+      <div className="h-full flex flex-col">
+        {content}
+      </div>
+    );
+  }
+
+  // Modal mode: render with overlay
   return (
     <div
       className="fixed inset-0 z-50 flex items-end justify-center bg-black/50"
@@ -73,69 +154,7 @@ export function CommentThread({ videoUri, onClose }: CommentThreadProps) {
         className="w-full max-w-lg h-[75vh] bg-background rounded-t-2xl flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Header */}
-        <div className="flex items-center justify-between px-4 py-3 border-b border-border">
-          <h2 className="text-lg font-semibold text-text-primary">
-            Comments
-          </h2>
-          <div className="flex items-center gap-3">
-            <SortSelector value={sort} onChange={handleSortChange} />
-            <button
-              onClick={onClose}
-              className="text-text-muted hover:text-text-primary p-1"
-            >
-              <CloseIcon className="w-6 h-6" />
-            </button>
-          </div>
-        </div>
-
-        {/* Comments List */}
-        <div className="flex-1 overflow-y-auto px-4 py-2">
-          {isLoading ? (
-            <div className="flex items-center justify-center py-8">
-              <div className="w-8 h-8 border-3 border-accent border-t-transparent rounded-full animate-spin" />
-            </div>
-          ) : isError ? (
-            <div className="text-center py-8 text-text-muted">
-              Failed to load comments
-            </div>
-          ) : comments.length === 0 ? (
-            <div className="text-center py-8 text-text-muted">
-              No comments yet. Be the first to comment!
-            </div>
-          ) : (
-            <>
-              {comments.map((comment) => (
-                <CommentItem
-                  key={comment.uri}
-                  comment={comment}
-                  onReply={handleReply}
-                  isReplying={replyingTo === comment.uri}
-                  onSubmitReply={(text) => handleSubmitComment(text, comment.uri)}
-                  onCancelReply={handleCancelReply}
-                />
-              ))}
-              {hasNextPage && (
-                <button
-                  onClick={() => fetchNextPage()}
-                  disabled={isFetchingNextPage}
-                  className="w-full py-3 text-accent hover:text-accent-hover font-medium"
-                >
-                  {isFetchingNextPage ? 'Loading...' : 'Load more comments'}
-                </button>
-              )}
-            </>
-          )}
-        </div>
-
-        {/* Comment Input */}
-        <div className="border-t border-border px-4 py-3">
-          <CommentInput
-            onSubmit={(text) => handleSubmitComment(text)}
-            isSubmitting={createCommentMutation.isPending}
-            placeholder="Add a comment..."
-          />
-        </div>
+        {content}
       </div>
     </div>
   );

@@ -7,6 +7,7 @@ import { api, type VideoView } from '@/lib/api';
 import { VideoPlayer } from './VideoPlayer';
 import { VideoActions } from './VideoActions';
 import { VideoOverlay } from './VideoOverlay';
+import { SuggestedUsers } from './SuggestedUsers';
 
 interface VideoFeedProps {
   feedType: string;
@@ -100,10 +101,23 @@ export function VideoFeed({ feedType }: VideoFeedProps) {
   }
 
   if (videos.length === 0) {
+    const isFollowingFeed = feedType === 'following';
     return (
-      <div className="h-screen flex flex-col items-center justify-center bg-black text-white">
-        <EmptyIcon className="w-16 h-16 text-gray-600 mb-4" />
-        <p className="text-gray-400">No videos yet</p>
+      <div className="h-screen flex flex-col items-center justify-center bg-background text-text-primary px-4 text-center">
+        <EmptyIcon className="w-16 h-16 text-text-muted mb-4" />
+        <h2 className="text-xl font-semibold mb-2">
+          {isFollowingFeed ? 'No videos from people you follow' : 'No videos yet'}
+        </h2>
+        <p className="text-text-muted max-w-md mb-8">
+          {isFollowingFeed
+            ? 'Start following creators to see their videos here.'
+            : 'Be the first to upload a video!'}
+        </p>
+        {isFollowingFeed && (
+          <div className="w-full max-w-sm bg-surface p-4 rounded-xl">
+            <SuggestedUsers limit={5} showTitle={true} />
+          </div>
+        )}
       </div>
     );
   }

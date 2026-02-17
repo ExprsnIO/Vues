@@ -21,6 +21,7 @@ import { notificationRouter } from './routes/notification.js';
 import { feedRouter } from './routes/feed.js';
 import { graphRouter } from './routes/graph.js';
 import { videoExtendedRouter } from './routes/video-extended.js';
+import { authRouter } from './routes/auth.js';
 import { createPdsApp, getPdsConfig } from './pds/index.js';
 
 const app = new Hono();
@@ -134,9 +135,10 @@ app.get('/videos/:filename', async (c) => {
 });
 
 // Mount routers
+// Auth routes first (no middleware)
+app.route('/xrpc', authRouter);
 app.route('/xrpc', xrpcRouter);
 app.route('/xrpc', settingsRouter);
-app.route('/xrpc', adminRouter);
 app.route('/xrpc', socialRouter);
 app.route('/xrpc', chatRouter);
 app.route('/xrpc', actorRouter);
@@ -144,6 +146,8 @@ app.route('/xrpc', notificationRouter);
 app.route('/xrpc', feedRouter);
 app.route('/xrpc', graphRouter);
 app.route('/xrpc', videoExtendedRouter);
+// Admin routes last (has wildcard middleware)
+app.route('/xrpc', adminRouter);
 app.route('/oauth', oauthRouter);
 
 // Mount PDS routes if enabled

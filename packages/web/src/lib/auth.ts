@@ -4,6 +4,204 @@ const CLIENT_ID =
   process.env.NEXT_PUBLIC_OAUTH_CLIENT_ID || 'https://exprsn.io/client-metadata.json';
 const REDIRECT_URI =
   process.env.NEXT_PUBLIC_OAUTH_REDIRECT_URI || 'https://exprsn.io/oauth/callback';
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3002';
+
+// Session storage keys
+const SESSION_KEY = 'exprsn_session';
+const USER_KEY = 'exprsn_user';
+
+// =============================================================================
+// Local Auth Types
+// =============================================================================
+
+export interface LocalUser {
+  did: string;
+  handle: string;
+  displayName?: string;
+  avatar?: string;
+}
+
+export interface LocalSession {
+  accessJwt: string;
+  refreshJwt: string;
+  did: string;
+  handle: string;
+  user?: LocalUser;
+}
+
+// =============================================================================
+// Local Auth Functions
+// =============================================================================
+
+/**
+ * Create a new local account
+ */
+export async function createAccount(data: {
+  handle: string;
+  email: string;
+  password: string;
+  displayName?: string;
+}): Promise<LocalSession> {
+  const response = await fetch(`${API_BASE}/xrpc/io.exprsn.auth.createAccount`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.message || 'Failed to create account');
+  }
+
+  const result = await response.json();
+  const session: LocalSession = {
+    accessJwt: result.accessJwt,
+    refreshJwt: result.refreshJwt,
+    did: result.did,
+    handle: result.handle,
+    user: result.user,
+  };
+
+  // Store session
+  localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+  if (result.user) {
+    localStorage.setItem(USER_KEY, JSON.stringify(result.user));
+  }
+
+  return session;
+}
+
+/**
+ * Sign in with local account
+ */
+export async function signInLocal(identifier: string, password: string): Promise<LocalSession> {
+  const response = await fetch(`${API_BASE}/xrpc/io.exprsn.auth.createSession`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ identifier, password }),
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.message || 'Invalid credentials');
+  }
+
+  const result = await response.json();
+  const session: LocalSession = {
+    accessJwt: result.accessJwt,
+    refreshJwt: result.refreshJwt,
+    did: result.did,
+    handle: result.handle,
+    user: result.user,
+  };
+
+  // Store session
+  localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+  if (result.user) {
+    localStorage.setItem(USER_KEY, JSON.stringify(result.user));
+  }
+
+  return session;
+}
+
+/**
+ * Get stored local session
+ */
+export function getLocalSession(): LocalSession | null {
+  if (typeof window === 'undefined') return null;
+
+  const stored = localStorage.getItem(SESSION_KEY);
+  if (!stored) return null;
+
+  try {
+    return JSON.parse(stored);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Get stored local user
+ */
+export function getLocalUser(): LocalUser | null {
+  if (typeof window === 'undefined') return null;
+
+  const stored = localStorage.getItem(USER_KEY);
+  if (!stored) return null;
+
+  try {
+    return JSON.parse(stored);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Sign out from local session
+ */
+export async function signOutLocal(): Promise<void> {
+  const session = getLocalSession();
+
+  if (session) {
+    try {
+      await fetch(`${API_BASE}/xrpc/io.exprsn.auth.deleteSession`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${session.accessJwt}`,
+        },
+      });
+    } catch {
+      // Ignore errors during sign out
+    }
+  }
+
+  localStorage.removeItem(SESSION_KEY);
+  localStorage.removeItem(USER_KEY);
+}
+
+/**
+ * Refresh local session
+ */
+export async function refreshLocalSession(): Promise<LocalSession | null> {
+  const session = getLocalSession();
+  if (!session?.refreshJwt) return null;
+
+  try {
+    const response = await fetch(`${API_BASE}/xrpc/io.exprsn.auth.refreshSession`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${session.refreshJwt}`,
+      },
+    });
+
+    if (!response.ok) {
+      localStorage.removeItem(SESSION_KEY);
+      return null;
+    }
+
+    const result = await response.json();
+    const newSession: LocalSession = {
+      accessJwt: result.accessJwt,
+      refreshJwt: result.refreshJwt,
+      did: result.did,
+      handle: result.handle,
+      user: session.user,
+    };
+
+    localStorage.setItem(SESSION_KEY, JSON.stringify(newSession));
+    return newSession;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Get access token for API calls
+ */
+export function getAccessToken(): string | null {
+  const session = getLocalSession();
+  return session?.accessJwt || null;
+}
 
 let oauthClientInstance: BrowserOAuthClient | null = null;
 
