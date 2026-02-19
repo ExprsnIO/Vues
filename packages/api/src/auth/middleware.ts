@@ -2,7 +2,7 @@ import { Context, Next } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { eq } from 'drizzle-orm';
 import { getOAuthClient, OAuthSession } from './oauth-client.js';
-import { db } from '../db/index.js';
+import { db, sessions } from '../db/index.js';
 import { adminUsers, type AdminUser } from '../db/schema.js';
 
 // Admin role types
@@ -66,7 +66,7 @@ declare module 'hono' {
 }
 
 /**
- * Authentication middleware that requires a valid OAuth session
+ * Authentication middleware that requires a valid session (local or OAuth)
  */
 export async function authMiddleware(c: Context, next: Next) {
   const authHeader = c.req.header('Authorization');
@@ -75,11 +75,27 @@ export async function authMiddleware(c: Context, next: Next) {
     throw new HTTPException(401, { message: 'Missing or invalid authorization header' });
   }
 
-  const sessionId = authHeader.replace('Bearer ', '');
+  const token = authHeader.replace('Bearer ', '');
 
   try {
+    // Check for local session token (prefixed with exp_)
+    if (token.startsWith('exp_')) {
+      const session = await db.query.sessions.findFirst({
+        where: eq(sessions.accessJwt, token),
+      });
+
+      if (!session || session.expiresAt < new Date()) {
+        throw new HTTPException(401, { message: 'Invalid or expired session' });
+      }
+
+      c.set('did', session.did);
+      await next();
+      return;
+    }
+
+    // Fall back to OAuth
     const oauthClient = getOAuthClient();
-    const session = await oauthClient.restore(sessionId);
+    const session = await oauthClient.restore(token);
 
     if (!session) {
       throw new HTTPException(401, { message: 'Invalid or expired session' });
@@ -105,15 +121,27 @@ export async function optionalAuthMiddleware(c: Context, next: Next) {
   const authHeader = c.req.header('Authorization');
 
   if (authHeader && authHeader.startsWith('Bearer ')) {
-    const sessionId = authHeader.replace('Bearer ', '');
+    const token = authHeader.replace('Bearer ', '');
 
     try {
-      const oauthClient = getOAuthClient();
-      const session = await oauthClient.restore(sessionId);
+      // Check for local session token (prefixed with exp_)
+      if (token.startsWith('exp_')) {
+        const session = await db.query.sessions.findFirst({
+          where: eq(sessions.accessJwt, token),
+        });
 
-      if (session) {
-        c.set('session', session);
-        c.set('did', session.did);
+        if (session && session.expiresAt >= new Date()) {
+          c.set('did', session.did);
+        }
+      } else {
+        // Fall back to OAuth
+        const oauthClient = getOAuthClient();
+        const session = await oauthClient.restore(token);
+
+        if (session) {
+          c.set('session', session);
+          c.set('did', session.did);
+        }
       }
     } catch (error) {
       // Continue without authentication
@@ -176,7 +204,7 @@ export function hasPermission(permissions: string[], permission: string): boolea
 }
 
 /**
- * Admin authentication middleware - requires valid OAuth session AND admin role
+ * Admin authentication middleware - requires valid session AND admin role
  * In development mode with DEV_ADMIN_BYPASS=true, allows bypass with X-Dev-Admin header
  */
 export async function adminAuthMiddleware(c: Context, next: Next) {
@@ -207,21 +235,42 @@ export async function adminAuthMiddleware(c: Context, next: Next) {
     throw new HTTPException(401, { message: 'Missing or invalid authorization header' });
   }
 
-  const sessionId = authHeader.replace('Bearer ', '');
+  const token = authHeader.replace('Bearer ', '');
 
   try {
-    const oauthClient = getOAuthClient();
-    const session = await oauthClient.restore(sessionId);
+    let userDid: string | null = null;
 
-    if (!session) {
-      throw new HTTPException(401, { message: 'Invalid or expired session' });
+    // Check for local session token (prefixed with exp_)
+    if (token.startsWith('exp_')) {
+      const session = await db.query.sessions.findFirst({
+        where: eq(sessions.accessJwt, token),
+      });
+
+      if (!session || session.expiresAt < new Date()) {
+        throw new HTTPException(401, { message: 'Invalid or expired session' });
+      }
+
+      userDid = session.did;
+      c.set('did', session.did);
+    } else {
+      // Fall back to OAuth
+      const oauthClient = getOAuthClient();
+      const session = await oauthClient.restore(token);
+
+      if (!session) {
+        throw new HTTPException(401, { message: 'Invalid or expired session' });
+      }
+
+      userDid = session.did;
+      c.set('session', session);
+      c.set('did', session.did);
     }
 
     // Check if user has admin access
     const [adminUser] = await db
       .select()
       .from(adminUsers)
-      .where(eq(adminUsers.userDid, session.did))
+      .where(eq(adminUsers.userDid, userDid))
       .limit(1);
 
     if (!adminUser) {
@@ -231,8 +280,6 @@ export async function adminAuthMiddleware(c: Context, next: Next) {
     // Get effective permissions
     const permissions = getAdminPermissions(adminUser);
 
-    c.set('session', session);
-    c.set('did', session.did);
     c.set('adminUser', adminUser);
     c.set('adminPermissions', permissions);
 
