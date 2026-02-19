@@ -10,6 +10,7 @@ import type {
   NotificationSettings,
   PrivacySettings,
   ContentSettings,
+  LayoutSettings,
 } from '@exprsn/shared';
 import { api } from '../lib/api';
 
@@ -49,6 +50,9 @@ const DEFAULT_SETTINGS: UserSettings = {
     language: 'en',
     contentWarnings: true,
     sensitiveContent: false,
+  },
+  layout: {
+    commentsPosition: 'side',
   },
   updatedAt: new Date().toISOString(),
 };

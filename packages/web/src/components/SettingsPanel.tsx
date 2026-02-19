@@ -10,6 +10,7 @@ import { PrivacySettings } from '@/components/settings/PrivacySettings';
 import { NotificationSettings } from '@/components/settings/NotificationSettings';
 import { AccessibilitySettings } from '@/components/settings/AccessibilitySettings';
 import { ContentSettings } from '@/components/settings/ContentSettings';
+import { LayoutSettings } from '@/components/settings/LayoutSettings';
 import type { UserSettings, UserSettingsUpdate } from '@exprsn/shared';
 import { cn } from '@/lib/utils';
 
@@ -54,6 +55,9 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
           content: update.content
             ? { ...previousSettings.settings.content, ...update.content }
             : previousSettings.settings.content,
+          layout: update.layout
+            ? { ...previousSettings.settings.layout, ...update.layout }
+            : previousSettings.settings.layout,
         };
         queryClient.setQueryData<{ settings: UserSettings }>(['settings'], { settings: newSettings });
       }
@@ -122,6 +126,17 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                 <ThemeSettings
                   themeId={settings.themeId}
                   colorMode={settings.colorMode}
+                  onUpdate={handleSettingsUpdate}
+                  isUpdating={updateSettingsMutation.isPending}
+                />
+              </SettingsSection>
+
+              <SettingsSection
+                title="Layout"
+                description="Customize page layouts"
+              >
+                <LayoutSettings
+                  layout={settings.layout}
                   onUpdate={handleSettingsUpdate}
                   isUpdating={updateSettingsMutation.isPending}
                 />

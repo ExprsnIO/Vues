@@ -304,6 +304,9 @@ export const userSettings = pgTable('user_settings', {
     contentWarnings: boolean;
     sensitiveContent: boolean;
   }>(),
+  layout: jsonb('layout').$type<{
+    commentsPosition: 'side' | 'bottom';
+  }>(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });

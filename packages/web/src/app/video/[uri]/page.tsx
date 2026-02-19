@@ -10,6 +10,7 @@ import { CommentThread } from '@/components/comments/CommentThread';
 import { api } from '@/lib/api';
 import { useAuth } from '@/lib/auth-context';
 import { formatCount } from '@/lib/utils';
+import type { CommentsPosition } from '@exprsn/shared';
 
 export default function VideoPage() {
   const params = useParams();
@@ -25,7 +26,14 @@ export default function VideoPage() {
     queryFn: () => api.getVideo(uri),
   });
 
+  const { data: settingsData } = useQuery({
+    queryKey: ['settings'],
+    queryFn: () => api.getSettings(),
+    enabled: !!user,
+  });
+
   const video = data?.video;
+  const commentsPosition: CommentsPosition = settingsData?.settings?.layout?.commentsPosition ?? 'side';
 
   // Update state when video data changes
   useEffect(() => {
@@ -76,13 +84,160 @@ export default function VideoPage() {
     return url.startsWith('/') ? `http://localhost:3002${url}` : url;
   };
 
+  const renderVideoContent = () => {
+    if (isLoading) {
+      return <div className="animate-pulse w-full max-w-md aspect-[9/16] bg-surface rounded-lg" />;
+    }
+
+    if (error || !video) {
+      return (
+        <div className="text-center">
+          <h2 className="text-xl font-semibold text-white mb-2">Video not found</h2>
+          <p className="text-gray-400 mb-4">This video may have been removed or is unavailable.</p>
+          <Link href="/" className="text-accent hover:underline">
+            Go back home
+          </Link>
+        </div>
+      );
+    }
+
+    return (
+      <div className="relative w-full max-w-md aspect-[9/16]">
+        <VideoPlayer
+          src={getVideoUrl()}
+          poster={video.video?.thumbnail || video.thumbnailUrl}
+          autoPlay
+          loop
+          muted={false}
+          className="w-full h-full rounded-lg"
+        />
+
+        {/* Video Overlay */}
+        <div className="absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-black/80 to-transparent">
+          {/* Author */}
+          <Link
+            href={`/profile/${video.author.handle}`}
+            className="flex items-center gap-3 mb-3"
+          >
+            <div className="w-10 h-10 rounded-full bg-surface overflow-hidden">
+              {video.author.avatar ? (
+                <img
+                  src={video.author.avatar}
+                  alt={video.author.displayName || video.author.handle}
+                  className="w-full h-full object-cover"
+                />
+              ) : (
+                <div className="w-full h-full flex items-center justify-center text-white font-semibold">
+                  {video.author.handle[0]?.toUpperCase()}
+                </div>
+              )}
+            </div>
+            <div>
+              <p className="text-white font-semibold">
+                {video.author.displayName || `@${video.author.handle}`}
+              </p>
+              <p className="text-gray-300 text-sm">@{video.author.handle}</p>
+            </div>
+          </Link>
+
+          {/* Caption */}
+          {video.caption && (
+            <p className="text-white text-sm mb-2">{video.caption}</p>
+          )}
+
+          {/* Tags */}
+          {video.tags && video.tags.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              {video.tags.map((tag) => (
+                <Link
+                  key={tag}
+                  href={`/tag/${encodeURIComponent(tag)}`}
+                  className="text-accent text-sm hover:underline"
+                >
+                  #{tag}
+                </Link>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  const renderVideoStats = () => {
+    if (!video) return null;
+
+    return (
+      <div className="p-4 border-b border-border">
+        <div className="flex items-center gap-4">
+          <button
+            onClick={handleLike}
+            disabled={likeMutation.isPending}
+            className="flex items-center gap-2 text-text-primary hover:text-accent transition-colors"
+          >
+            <HeartIcon filled={isLiked} className={`w-6 h-6 ${isLiked ? 'text-red-500' : ''}`} />
+            <span className="font-medium">{formatCount(likeCount)}</span>
+          </button>
+          <div className="flex items-center gap-2 text-text-muted">
+            <CommentIcon className="w-6 h-6" />
+            <span>{formatCount(video.commentCount ?? 0)}</span>
+          </div>
+          <div className="flex items-center gap-2 text-text-muted">
+            <ViewIcon className="w-6 h-6" />
+            <span>{formatCount(video.viewCount ?? 0)}</span>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // Side layout: video on left, comments on right
+  if (commentsPosition === 'side') {
+    return (
+      <div className="flex min-h-screen bg-black">
+        <Sidebar />
+        <main className="flex-1 ml-0 lg:ml-60 pt-14 lg:pt-0 pb-16 lg:pb-0">
+          <div className="flex h-screen">
+            {/* Video Section */}
+            <div className="flex-1 flex items-center justify-center bg-black relative">
+              {/* Back button */}
+              <button
+                onClick={() => router.back()}
+                className="absolute top-4 left-4 z-10 p-2 rounded-full bg-black/50 hover:bg-black/70 transition-colors"
+              >
+                <BackIcon className="w-6 h-6 text-white" />
+              </button>
+              {renderVideoContent()}
+            </div>
+
+            {/* Sidebar Actions & Comments */}
+            {video && (
+              <div className="w-96 border-l border-border bg-background flex flex-col hidden lg:flex">
+                {renderVideoStats()}
+                {/* Inline Comments */}
+                <div className="flex-1 overflow-hidden">
+                  <CommentThread
+                    videoUri={video.uri}
+                    inline={true}
+                    position="side"
+                  />
+                </div>
+              </div>
+            )}
+          </div>
+        </main>
+      </div>
+    );
+  }
+
+  // Bottom layout: video on top, comments on bottom
   return (
     <div className="flex min-h-screen bg-black">
       <Sidebar />
       <main className="flex-1 ml-0 lg:ml-60 pt-14 lg:pt-0 pb-16 lg:pb-0">
-        <div className="flex h-screen">
+        <div className="flex flex-col h-screen">
           {/* Video Section */}
-          <div className="flex-1 flex items-center justify-center bg-black relative">
+          <div className="flex-1 flex items-center justify-center bg-black relative min-h-0">
             {/* Back button */}
             <button
               onClick={() => router.back()}
@@ -90,110 +245,19 @@ export default function VideoPage() {
             >
               <BackIcon className="w-6 h-6 text-white" />
             </button>
-
-            {isLoading ? (
-              <div className="animate-pulse w-full max-w-md aspect-[9/16] bg-surface rounded-lg" />
-            ) : error || !video ? (
-              <div className="text-center">
-                <h2 className="text-xl font-semibold text-white mb-2">Video not found</h2>
-                <p className="text-gray-400 mb-4">This video may have been removed or is unavailable.</p>
-                <Link href="/" className="text-accent hover:underline">
-                  Go back home
-                </Link>
-              </div>
-            ) : (
-              <div className="relative w-full max-w-md aspect-[9/16]">
-                <VideoPlayer
-                  src={getVideoUrl()}
-                  poster={video.video?.thumbnail || video.thumbnailUrl}
-                  autoPlay
-                  loop
-                  muted={false}
-                  className="w-full h-full rounded-lg"
-                />
-
-                {/* Video Overlay */}
-                <div className="absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-black/80 to-transparent">
-                  {/* Author */}
-                  <Link
-                    href={`/profile/${video.author.handle}`}
-                    className="flex items-center gap-3 mb-3"
-                  >
-                    <div className="w-10 h-10 rounded-full bg-surface overflow-hidden">
-                      {video.author.avatar ? (
-                        <img
-                          src={video.author.avatar}
-                          alt={video.author.displayName || video.author.handle}
-                          className="w-full h-full object-cover"
-                        />
-                      ) : (
-                        <div className="w-full h-full flex items-center justify-center text-white font-semibold">
-                          {video.author.handle[0]?.toUpperCase()}
-                        </div>
-                      )}
-                    </div>
-                    <div>
-                      <p className="text-white font-semibold">
-                        {video.author.displayName || `@${video.author.handle}`}
-                      </p>
-                      <p className="text-gray-300 text-sm">@{video.author.handle}</p>
-                    </div>
-                  </Link>
-
-                  {/* Caption */}
-                  {video.caption && (
-                    <p className="text-white text-sm mb-2">{video.caption}</p>
-                  )}
-
-                  {/* Tags */}
-                  {video.tags && video.tags.length > 0 && (
-                    <div className="flex flex-wrap gap-2">
-                      {video.tags.map((tag) => (
-                        <Link
-                          key={tag}
-                          href={`/tag/${encodeURIComponent(tag)}`}
-                          className="text-accent text-sm hover:underline"
-                        >
-                          #{tag}
-                        </Link>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
+            {renderVideoContent()}
           </div>
 
-          {/* Sidebar Actions & Comments */}
+          {/* Bottom Actions & Comments */}
           {video && (
-            <div className="w-96 border-l border-border bg-background flex flex-col hidden lg:flex">
-              {/* Video stats and actions */}
-              <div className="p-4 border-b border-border">
-                <div className="flex items-center gap-4">
-                  <button
-                    onClick={handleLike}
-                    disabled={likeMutation.isPending}
-                    className="flex items-center gap-2 text-text-primary hover:text-accent transition-colors"
-                  >
-                    <HeartIcon filled={isLiked} className={`w-6 h-6 ${isLiked ? 'text-red-500' : ''}`} />
-                    <span className="font-medium">{formatCount(likeCount)}</span>
-                  </button>
-                  <div className="flex items-center gap-2 text-text-muted">
-                    <CommentIcon className="w-6 h-6" />
-                    <span>{formatCount(video.commentCount ?? 0)}</span>
-                  </div>
-                  <div className="flex items-center gap-2 text-text-muted">
-                    <ViewIcon className="w-6 h-6" />
-                    <span>{formatCount(video.viewCount ?? 0)}</span>
-                  </div>
-                </div>
-              </div>
-
+            <div className="border-t border-border bg-background flex flex-col hidden lg:flex max-h-[45vh]">
+              {renderVideoStats()}
               {/* Inline Comments */}
               <div className="flex-1 overflow-hidden">
                 <CommentThread
                   videoUri={video.uri}
                   inline={true}
+                  position="bottom"
                 />
               </div>
             </div>

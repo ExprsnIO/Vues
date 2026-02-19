@@ -8,13 +8,16 @@ import { CommentInput } from './CommentInput';
 import { SortSelector } from './SortSelector';
 import { useAuth } from '@/lib/auth-context';
 
+type CommentsPosition = 'side' | 'bottom';
+
 interface CommentThreadProps {
   videoUri: string;
   onClose?: () => void;
   inline?: boolean;
+  position?: CommentsPosition;
 }
 
-export function CommentThread({ videoUri, onClose, inline = false }: CommentThreadProps) {
+export function CommentThread({ videoUri, onClose, inline = false, position = 'side' }: CommentThreadProps) {
   const { user } = useAuth();
   const queryClient = useQueryClient();
   const [sort, setSort] = useState<CommentSortType>('top');
@@ -137,8 +140,12 @@ export function CommentThread({ videoUri, onClose, inline = false }: CommentThre
 
   // Inline mode: render directly without modal wrapper
   if (inline) {
+    const containerClass = position === 'bottom'
+      ? 'h-full flex flex-col max-h-[40vh]'
+      : 'h-full flex flex-col';
+
     return (
-      <div className="h-full flex flex-col">
+      <div className={containerClass}>
         {content}
       </div>
     );

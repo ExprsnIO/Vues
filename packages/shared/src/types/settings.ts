@@ -46,6 +46,13 @@ export interface ContentSettings {
   sensitiveContent: boolean;
 }
 
+// Layout settings
+export type CommentsPosition = 'side' | 'bottom';
+
+export interface LayoutSettings {
+  commentsPosition: CommentsPosition;
+}
+
 // Complete user settings
 export interface UserSettings {
   themeId: ThemeId;
@@ -55,6 +62,7 @@ export interface UserSettings {
   notifications: NotificationSettings;
   privacy: PrivacySettings;
   content: ContentSettings;
+  layout: LayoutSettings;
   updatedAt: string;
 }
 
@@ -67,6 +75,7 @@ export type UserSettingsUpdate = Partial<{
   notifications: Partial<NotificationSettings>;
   privacy: Partial<PrivacySettings>;
   content: Partial<ContentSettings>;
+  layout: Partial<LayoutSettings>;
 }>;
 
 // Default settings
@@ -106,6 +115,9 @@ export const DEFAULT_SETTINGS: UserSettings = {
     language: 'en',
     contentWarnings: true,
     sensitiveContent: false,
+  },
+  layout: {
+    commentsPosition: 'side',
   },
   updatedAt: new Date().toISOString(),
 };

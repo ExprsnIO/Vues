@@ -11,6 +11,7 @@ import type {
   NotificationSettings,
   PrivacySettings,
   ContentSettings,
+  LayoutSettings,
   DEFAULT_SETTINGS,
 } from '@exprsn/shared';
 
@@ -53,6 +54,9 @@ const defaultSettings: Omit<UserSettings, 'updatedAt'> = {
     language: 'en',
     contentWarnings: true,
     sensitiveContent: false,
+  },
+  layout: {
+    commentsPosition: 'side',
   },
 };
 
@@ -111,6 +115,10 @@ settingsRouter.get('/io.exprsn.settings.getSettings', optionalAuthMiddleware, as
       ...defaultSettings.content,
       ...(existing.content as ContentSettings | null),
     },
+    layout: {
+      ...defaultSettings.layout,
+      ...(existing.layout as LayoutSettings | null),
+    },
     updatedAt: existing.updatedAt.toISOString(),
   };
 
@@ -165,6 +173,9 @@ settingsRouter.post('/io.exprsn.settings.updateSettings', authMiddleware, async 
       content: update.content
         ? { ...defaultSettings.content, ...update.content }
         : defaultSettings.content,
+      layout: update.layout
+        ? { ...defaultSettings.layout, ...update.layout }
+        : defaultSettings.layout,
       createdAt: now,
       updatedAt: now,
     };
@@ -227,6 +238,13 @@ settingsRouter.post('/io.exprsn.settings.updateSettings', authMiddleware, async 
     };
   }
 
+  if (update.layout) {
+    updateRow.layout = {
+      ...(existing.layout as LayoutSettings | null),
+      ...update.layout,
+    };
+  }
+
   await db.update(userSettings).set(updateRow).where(eq(userSettings.userDid, userDid));
 
   // Fetch updated settings
@@ -256,6 +274,10 @@ settingsRouter.post('/io.exprsn.settings.updateSettings', authMiddleware, async 
     content: {
       ...defaultSettings.content,
       ...(updated!.content as ContentSettings | null),
+    },
+    layout: {
+      ...defaultSettings.layout,
+      ...(updated!.layout as LayoutSettings | null),
     },
     updatedAt: updated!.updatedAt.toISOString(),
   };
