@@ -7,6 +7,7 @@ import { formatCount } from '@/lib/utils';
 import { useAuth } from '@/lib/auth-context';
 import { useLoginModal } from './LoginModal';
 import { CommentThread } from './comments/CommentThread';
+import { CollabLoopModal } from './CollabLoopModal';
 import toast from 'react-hot-toast';
 
 interface VideoActionsProps {
@@ -20,6 +21,7 @@ export function VideoActions({ video }: VideoActionsProps) {
   const [isLiked, setIsLiked] = useState(video.viewer?.liked ?? false);
   const [likeCount, setLikeCount] = useState(video.likeCount);
   const [showComments, setShowComments] = useState(false);
+  const [collabLoopModal, setCollabLoopModal] = useState<'collab' | 'loop' | null>(null);
 
   const likeMutation = useMutation({
     mutationFn: async () => {
@@ -73,6 +75,22 @@ export function VideoActions({ video }: VideoActionsProps) {
       toast.success('Link copied to clipboard');
     }
   }, [video]);
+
+  const handleCollab = useCallback(() => {
+    if (!user) {
+      openLoginModal('Log in to create a collab');
+      return;
+    }
+    setCollabLoopModal('collab');
+  }, [user, openLoginModal]);
+
+  const handleLoop = useCallback(() => {
+    if (!user) {
+      openLoginModal('Log in to create a loop');
+      return;
+    }
+    setCollabLoopModal('loop');
+  }, [user, openLoginModal]);
 
   return (
     <>
@@ -133,6 +151,22 @@ export function VideoActions({ video }: VideoActionsProps) {
           </span>
         </button>
 
+        {/* Collab */}
+        <button onClick={handleCollab} className="flex flex-col items-center">
+          <div className="p-2 rounded-full text-white">
+            <CollabIcon className="w-8 h-8" />
+          </div>
+          <span className="text-xs text-white font-medium">Collab</span>
+        </button>
+
+        {/* Loop */}
+        <button onClick={handleLoop} className="flex flex-col items-center">
+          <div className="p-2 rounded-full text-white">
+            <LoopIcon className="w-8 h-8" />
+          </div>
+          <span className="text-xs text-white font-medium">Loop</span>
+        </button>
+
         {/* Sound */}
         {video.tags && video.tags.length > 0 && (
           <button className="w-10 h-10 rounded-full bg-gray-800 border-2 border-gray-600 overflow-hidden animate-spin-slow">
@@ -146,6 +180,16 @@ export function VideoActions({ video }: VideoActionsProps) {
         <CommentThread
           videoUri={video.uri}
           onClose={() => setShowComments(false)}
+        />
+      )}
+
+      {/* Collab/Loop modal */}
+      {collabLoopModal && (
+        <CollabLoopModal
+          video={video}
+          type={collabLoopModal}
+          isOpen={true}
+          onClose={() => setCollabLoopModal(null)}
         />
       )}
     </>
@@ -216,6 +260,47 @@ function MusicIcon({ className }: { className?: string }) {
   return (
     <svg className={className} fill="currentColor" viewBox="0 0 24 24">
       <path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z" />
+    </svg>
+  );
+}
+
+function CollabIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      viewBox="0 0 24 24"
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M3 6h8v12H3zM13 6h8v12h-8z"
+      />
+    </svg>
+  );
+}
+
+function LoopIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      viewBox="0 0 24 24"
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M14.121 14.121L19 19m-7-7l7-7m-7 7l-2.879 2.879M12 12L9.121 9.121m0 5.758a3 3 0 10-4.243 4.243 3 3 0 004.243-4.243zm0 0L12 12m-2.879 2.879L19 5"
+      />
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M3 7h7M3 17h7"
+      />
     </svg>
   );
 }

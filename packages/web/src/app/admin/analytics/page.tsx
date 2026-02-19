@@ -24,7 +24,21 @@ export default function AdminAnalyticsPage() {
     );
   }
 
-  const stats = data?.stats || {};
+  const rawStats = data?.stats;
+  const stats = {
+    totalUsers: rawStats?.totalUsers ?? 0,
+    totalVideos: rawStats?.totalVideos ?? 0,
+    pendingReports: rawStats?.pendingReports ?? 0,
+    newUsersToday: rawStats?.newUsersToday ?? 0,
+    newVideosToday: rawStats?.newVideosToday ?? 0,
+    totalViews: rawStats?.totalViews ?? 0,
+    totalLikes: rawStats?.totalLikes ?? 0,
+    newUsersWeek: rawStats?.newUsersWeek ?? 0,
+    newVideosWeek: rawStats?.newVideosWeek ?? 0,
+    totalComments: rawStats?.totalComments ?? 0,
+    actionedReports: rawStats?.actionedReports ?? 0,
+    dismissedReports: rawStats?.dismissedReports ?? 0,
+  };
   const topVideos = data?.topVideos || [];
   const topCreators = data?.topCreators || [];
 

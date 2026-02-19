@@ -1,9 +1,22 @@
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
+import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { authMiddleware, optionalAuthMiddleware } from '../auth/middleware.js';
 import { db, users, follows, blocks, mutes, videos, userPreferences } from '../db/index.js';
 import { eq, desc, and, or, sql, like, ne } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
+
+// S3 client for avatar uploads
+const s3 = new S3Client({
+  endpoint: process.env.DO_SPACES_ENDPOINT || `https://${process.env.DO_SPACES_REGION || 'nyc3'}.digitaloceanspaces.com`,
+  region: process.env.DO_SPACES_REGION || 'nyc3',
+  credentials: {
+    accessKeyId: process.env.DO_SPACES_KEY || '',
+    secretAccessKey: process.env.DO_SPACES_SECRET || '',
+  },
+  forcePathStyle: true,
+});
 
 export const actorRouter = new Hono();
 
@@ -135,6 +148,78 @@ actorRouter.post('/io.exprsn.actor.updateProfile', authMiddleware, async (c) => 
       verified: updatedUser!.verified,
       createdAt: updatedUser!.createdAt.toISOString(),
     },
+  });
+});
+
+/**
+ * Get a presigned URL for avatar upload
+ * POST /xrpc/io.exprsn.actor.getAvatarUploadUrl
+ */
+actorRouter.post('/io.exprsn.actor.getAvatarUploadUrl', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  const { contentType } = await c.req.json();
+
+  if (!contentType || !contentType.startsWith('image/')) {
+    throw new HTTPException(400, { message: 'Invalid content type. Must be an image.' });
+  }
+
+  // Only allow common image formats
+  const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+  if (!allowedTypes.includes(contentType)) {
+    throw new HTTPException(400, { message: 'Unsupported image format. Use JPEG, PNG, GIF, or WebP.' });
+  }
+
+  const uploadKey = nanoid();
+  const extension = contentType.split('/')[1] || 'jpg';
+  const key = `avatars/${userDid}/${uploadKey}.${extension}`;
+
+  const command = new PutObjectCommand({
+    Bucket: process.env.DO_SPACES_BUCKET,
+    Key: key,
+    ContentType: contentType,
+    ACL: 'public-read',
+  });
+
+  const uploadUrl = await getSignedUrl(s3, command, { expiresIn: 3600 });
+
+  // Construct the public URL
+  const cdnBase = process.env.CDN_BASE_URL || process.env.DO_SPACES_CDN_URL ||
+    `https://${process.env.DO_SPACES_BUCKET}.${process.env.DO_SPACES_REGION || 'nyc3'}.digitaloceanspaces.com`;
+  const avatarUrl = `${cdnBase}/${key}`;
+
+  return c.json({
+    uploadUrl,
+    key,
+    avatarUrl,
+    expiresAt: new Date(Date.now() + 3600000).toISOString(),
+  });
+});
+
+/**
+ * Complete avatar upload and update user profile
+ * POST /xrpc/io.exprsn.actor.completeAvatarUpload
+ */
+actorRouter.post('/io.exprsn.actor.completeAvatarUpload', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  const { avatarUrl } = await c.req.json();
+
+  if (!avatarUrl) {
+    throw new HTTPException(400, { message: 'Avatar URL is required' });
+  }
+
+  // Update the user's avatar
+  await db.update(users).set({
+    avatar: avatarUrl,
+    updatedAt: new Date(),
+  }).where(eq(users.did, userDid));
+
+  const updatedUser = await db.query.users.findFirst({
+    where: eq(users.did, userDid),
+  });
+
+  return c.json({
+    success: true,
+    avatarUrl: updatedUser?.avatar,
   });
 });
 

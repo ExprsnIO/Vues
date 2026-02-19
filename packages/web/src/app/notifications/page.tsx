@@ -21,7 +21,7 @@ export default function NotificationsPage() {
     isLoading,
   } = useInfiniteQuery({
     queryKey: ['notifications'],
-    queryFn: ({ pageParam }) => api.getNotifications({ cursor: pageParam }),
+    queryFn: ({ pageParam }) => api.listNotifications({ cursor: pageParam }),
     getNextPageParam: (lastPage) => lastPage.cursor,
     initialPageParam: undefined as string | undefined,
     enabled: !!user,
@@ -29,7 +29,7 @@ export default function NotificationsPage() {
 
   // Mark notifications as seen when page is viewed
   const seenMutation = useMutation({
-    mutationFn: () => api.markNotificationsSeen(),
+    mutationFn: () => api.updateNotificationSeen(new Date().toISOString()),
     onSuccess: () => {
       queryClient.setQueryData(['unread-notifications'], { count: 0 });
     },

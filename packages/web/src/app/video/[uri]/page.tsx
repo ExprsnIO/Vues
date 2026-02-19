@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import Link from 'next/link';
@@ -23,15 +23,17 @@ export default function VideoPage() {
   const { data, isLoading, error } = useQuery({
     queryKey: ['video', uri],
     queryFn: () => api.getVideo(uri),
-    onSuccess: (data) => {
-      if (data?.video) {
-        setIsLiked(data.video.viewer?.liked ?? false);
-        setLikeCount(data.video.likeCount ?? 0);
-      }
-    },
   });
 
   const video = data?.video;
+
+  // Update state when video data changes
+  useEffect(() => {
+    if (video) {
+      setIsLiked(video.viewer?.liked ?? false);
+      setLikeCount(video.likeCount ?? 0);
+    }
+  }, [video]);
 
   const likeMutation = useMutation({
     mutationFn: async () => {

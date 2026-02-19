@@ -4,6 +4,7 @@ import { useParams } from 'next/navigation';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import Link from 'next/link';
 import { Sidebar } from '@/components/Sidebar';
+import { UserActionsMenu } from '@/components/UserActionsMenu';
 import { api, VideoView } from '@/lib/api';
 import { useAuth } from '@/lib/auth-context';
 import { cn } from '@/lib/utils';
@@ -127,23 +128,45 @@ export default function ProfilePage() {
                       <>
                         <button
                           onClick={handleFollowClick}
-                          disabled={followMutation.isPending || unfollowMutation.isPending}
+                          disabled={followMutation.isPending || unfollowMutation.isPending || data?.profile.viewer?.blockedBy}
                           className={cn(
                             'px-6 py-2 rounded-lg font-medium transition-colors',
-                            isFollowing
-                              ? 'border border-border text-text-primary hover:bg-surface'
-                              : 'bg-accent text-white hover:bg-accent-hover'
+                            data?.profile.viewer?.blockedBy
+                              ? 'bg-surface text-text-muted cursor-not-allowed'
+                              : isFollowing
+                                ? 'border border-border text-text-primary hover:bg-surface'
+                                : 'bg-accent text-white hover:bg-accent-hover'
                           )}
                         >
                           {followMutation.isPending || unfollowMutation.isPending
                             ? '...'
-                            : isFollowing
-                              ? 'Following'
-                              : 'Follow'}
+                            : data?.profile.viewer?.blockedBy
+                              ? 'Blocked'
+                              : isFollowing
+                                ? 'Following'
+                                : 'Follow'}
                         </button>
-                        <button className="px-6 py-2 border border-border rounded-lg text-text-primary hover:bg-surface transition-colors">
+                        <button
+                          disabled={data?.profile.viewer?.blockedBy}
+                          className={cn(
+                            'px-6 py-2 border border-border rounded-lg transition-colors',
+                            data?.profile.viewer?.blockedBy
+                              ? 'text-text-muted cursor-not-allowed'
+                              : 'text-text-primary hover:bg-surface'
+                          )}
+                        >
                           Message
                         </button>
+                        <UserActionsMenu
+                          userDid={data.profile.did}
+                          userHandle={data.profile.handle}
+                          viewer={{
+                            blocking: data.profile.viewer?.blocking,
+                            blockUri: data.profile.viewer?.blockUri,
+                            muting: data.profile.viewer?.muting,
+                            muteUri: data.profile.viewer?.muteUri,
+                          }}
+                        />
                       </>
                     )}
                   </div>

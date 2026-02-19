@@ -8,24 +8,23 @@ import { api, VideoView } from '@/lib/api';
 import { formatCount } from '@/lib/utils';
 import { useAuth } from '@/lib/auth-context';
 
-const TRENDING_TAGS = [
-  'fyp',
-  'viral',
-  'funny',
-  'dance',
-  'music',
-  'comedy',
-  'cooking',
-  'fitness',
-  'travel',
-  'fashion',
-];
+// Fallback tags if API fails
+const FALLBACK_TAGS = ['fyp', 'viral', 'funny', 'dance', 'music'];
 
 export default function DiscoverPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchType, setSearchType] = useState<'videos' | 'users' | 'sounds'>(
     'videos'
   );
+
+  // Fetch trending tags
+  const { data: trendingTagsData } = useQuery({
+    queryKey: ['trending-tags'],
+    queryFn: () => api.getTrendingTags(15),
+    staleTime: 5 * 60 * 1000, // Cache for 5 minutes
+  });
+
+  const trendingTags = trendingTagsData?.tags ?? FALLBACK_TAGS.map(name => ({ name, videoCount: 0 }));
 
   const { data: searchResults, isLoading } = useQuery({
     queryKey: ['search', searchQuery, searchType],
@@ -104,13 +103,18 @@ export default function DiscoverPage() {
                   Trending Hashtags
                 </h2>
                 <div className="flex flex-wrap gap-2">
-                  {TRENDING_TAGS.map((tag) => (
+                  {trendingTags.map((tag) => (
                     <Link
-                      key={tag}
-                      href={`/tag/${tag}`}
-                      className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-white rounded-full text-sm transition-colors"
+                      key={tag.name}
+                      href={`/tag/${encodeURIComponent(tag.name)}`}
+                      className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-white rounded-full text-sm transition-colors flex items-center gap-2"
                     >
-                      #{tag}
+                      <span>#{tag.name}</span>
+                      {tag.videoCount > 0 && (
+                        <span className="text-gray-400 text-xs">
+                          {formatCount(tag.videoCount)}
+                        </span>
+                      )}
                     </Link>
                   ))}
                 </div>

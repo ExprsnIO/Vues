@@ -786,6 +786,28 @@ class ApiClient {
     });
   }
 
+  async getAvatarUploadUrl(contentType: string): Promise<{
+    uploadUrl: string;
+    key: string;
+    avatarUrl: string;
+    expiresAt: string;
+  }> {
+    return this.fetch('/xrpc/io.exprsn.actor.getAvatarUploadUrl', {
+      method: 'POST',
+      body: JSON.stringify({ contentType }),
+    });
+  }
+
+  async completeAvatarUpload(avatarUrl: string): Promise<{
+    success: boolean;
+    avatarUrl: string;
+  }> {
+    return this.fetch('/xrpc/io.exprsn.actor.completeAvatarUpload', {
+      method: 'POST',
+      body: JSON.stringify({ avatarUrl }),
+    });
+  }
+
   async getSuggestions(
     options: { cursor?: string; limit?: number } = {}
   ): Promise<{ actors: ActorProfileView[]; cursor?: string }> {
@@ -1041,6 +1063,54 @@ class ApiClient {
     });
   }
 
+  // =============================================================================
+  // Collab & Loop API (Rebranded Duets & Stitches)
+  // =============================================================================
+
+  async createCollab(data: {
+    videoUri: string;
+    originalVideoUri: string;
+    layout?: 'side-by-side' | 'react' | 'green-screen';
+  }): Promise<{ uri: string }> {
+    return this.fetch('/xrpc/io.exprsn.video.collab', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async getCollabs(
+    videoUri: string,
+    options: { cursor?: string; limit?: number } = {}
+  ): Promise<{ collabs: CollabView[]; cursor?: string }> {
+    const { cursor, limit = 30 } = options;
+    const params = new URLSearchParams({ uri: videoUri, limit: String(limit) });
+    if (cursor) params.set('cursor', cursor);
+    return this.fetch(`/xrpc/io.exprsn.video.getCollabs?${params}`);
+  }
+
+  async createLoop(data: {
+    videoUri: string;
+    originalVideoUri: string;
+    startTime: number;
+    endTime: number;
+  }): Promise<{ uri: string }> {
+    return this.fetch('/xrpc/io.exprsn.video.loop', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async getLoops(
+    videoUri: string,
+    options: { cursor?: string; limit?: number } = {}
+  ): Promise<{ loops: LoopView[]; cursor?: string }> {
+    const { cursor, limit = 30 } = options;
+    const params = new URLSearchParams({ uri: videoUri, limit: String(limit) });
+    if (cursor) params.set('cursor', cursor);
+    return this.fetch(`/xrpc/io.exprsn.video.getLoops?${params}`);
+  }
+
+  // Legacy duet/stitch aliases
   async getDuets(
     uri: string,
     options: { cursor?: string; limit?: number } = {}
@@ -1054,6 +1124,21 @@ class ApiClient {
   // =============================================================================
   // Sound & Tag API
   // =============================================================================
+
+  async getSounds(
+    options: { query?: string; trending?: boolean; limit?: number } = {}
+  ): Promise<{ sounds: SoundView[] }> {
+    const { query, trending, limit = 20 } = options;
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (query) params.set('query', query);
+    if (trending) params.set('trending', 'true');
+    return this.fetch(`/xrpc/io.exprsn.video.getSounds?${params}`);
+  }
+
+  async getSound(soundId: string): Promise<{ sound: SoundView }> {
+    const params = new URLSearchParams({ id: soundId });
+    return this.fetch(`/xrpc/io.exprsn.video.getSound?${params}`);
+  }
 
   async getVideosBySound(
     soundId: string,
@@ -1073,6 +1158,11 @@ class ApiClient {
     const params = new URLSearchParams({ tag, limit: String(limit) });
     if (cursor) params.set('cursor', cursor);
     return this.fetch(`/xrpc/io.exprsn.video.getVideosByTag?${params}`);
+  }
+
+  async getTrendingTags(limit = 20): Promise<{ tags: TagView[] }> {
+    const params = new URLSearchParams({ limit: String(limit) });
+    return this.fetch(`/xrpc/io.exprsn.video.getTrendingTags?${params}`);
   }
 
   // =============================================================================
@@ -1141,6 +1231,11 @@ export interface ProfileView {
   viewer?: {
     following: boolean;
     followUri?: string;
+    blocking?: boolean;
+    blockUri?: string;
+    muting?: boolean;
+    muteUri?: string;
+    blockedBy?: boolean;
   };
 }
 
@@ -1192,6 +1287,15 @@ export interface AdminDashboard {
     totalUsers: number;
     totalVideos: number;
     pendingReports: number;
+    newUsersToday?: number;
+    newVideosToday?: number;
+    totalViews?: number;
+    totalLikes?: number;
+    newUsersWeek?: number;
+    newVideosWeek?: number;
+    totalComments?: number;
+    actionedReports?: number;
+    dismissedReports?: number;
   };
   recentActivity: {
     users: Array<{
@@ -1206,6 +1310,20 @@ export interface AdminDashboard {
       createdAt: string;
     }>;
   };
+  topVideos?: Array<{
+    uri: string;
+    caption?: string;
+    thumbnailUrl?: string;
+    viewCount: number;
+  }>;
+  topCreators?: Array<{
+    did: string;
+    handle: string;
+    displayName?: string;
+    avatar?: string;
+    verified?: boolean;
+    followerCount: number;
+  }>;
 }
 
 export interface AdminUserItem {
@@ -1453,7 +1571,11 @@ export interface NotificationView {
   };
   reason: 'like' | 'comment' | 'follow' | 'mention' | 'repost' | 'reply' | 'quote';
   reasonSubject?: string;
-  record?: unknown;
+  record?: {
+    uri?: string;
+    text?: string;
+    [key: string]: unknown;
+  };
   isRead: boolean;
   indexedAt: string;
 }
@@ -1511,7 +1633,25 @@ export interface ListItemView {
   addedAt: string;
 }
 
-// Stitch & Duet types
+// Collab & Loop types (Rebranded Duets & Stitches)
+export interface CollabView {
+  uri: string;
+  video: VideoView;
+  author: ActorProfileView;
+  layout: 'side-by-side' | 'react' | 'green-screen';
+  createdAt: string;
+}
+
+export interface LoopView {
+  uri: string;
+  video: VideoView;
+  author: ActorProfileView;
+  startTime: number;
+  endTime: number;
+  createdAt: string;
+}
+
+// Legacy Stitch & Duet types (for backward compatibility)
 export interface StitchView {
   uri: string;
   video: VideoView;

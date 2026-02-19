@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { authMiddleware, optionalAuthMiddleware } from '../auth/middleware.js';
-import { db, videos, users, likes, comments, commentReactions, sounds, follows, trendingVideos, userInteractions } from '../db/index.js';
+import { db, videos, users, likes, comments, commentReactions, sounds, follows, trendingVideos, userInteractions, blocks, mutes } from '../db/index.js';
 import { cacheService, CacheKeys, CACHE_TTL } from '../cache/redis.js';
 import { eq, desc, inArray, and, sql, lt, asc, or, ilike } from 'drizzle-orm';
 import type { VideoView, AuthorView, FeedResult, CommentView, ReactionType, CommentSortType } from '@exprsn/shared';
@@ -33,7 +33,7 @@ xrpcRouter.get('/io.exprsn.video.getFeed', optionalAuthMiddleware, async (c) => 
       result = await getFollowingFeed(userDid, cursor, limit);
       break;
     case 'trending':
-      result = await getTrendingFeed(cursor, limit);
+      result = await getTrendingFeed(userDid, cursor, limit);
       break;
     case 'foryou':
       result = await getForYouFeed(userDid, cursor, limit);
@@ -100,6 +100,13 @@ xrpcRouter.get('/io.exprsn.video.getComments', optionalAuthMiddleware, async (c)
     throw new HTTPException(400, { message: 'Video URI is required' });
   }
 
+  // Get blocked/muted users if viewer is authenticated
+  let excludedDids = new Set<string>();
+  if (viewerDid) {
+    const { blocked, muted } = await getBlockedAndMutedDids(viewerDid);
+    excludedDids = new Set([...blocked, ...muted]);
+  }
+
   // Build query with conditional orderBy based on sort type
   let orderByClause;
   switch (sort) {
@@ -118,12 +125,20 @@ xrpcRouter.get('/io.exprsn.video.getComments', optionalAuthMiddleware, async (c)
     ? and(eq(comments.videoUri, uri), sql`${comments.parentUri} IS NULL`, lt(comments.createdAt, new Date(parseInt(cursor, 10))))
     : and(eq(comments.videoUri, uri), sql`${comments.parentUri} IS NULL`);
 
-  const results = await db
+  // Fetch extra to compensate for filtering
+  const fetchLimit = excludedDids.size > 0 ? limit + excludedDids.size * 2 : limit;
+
+  let results = await db
     .select()
     .from(comments)
     .where(whereConditions)
     .orderBy(...orderByClause)
-    .limit(limit);
+    .limit(fetchLimit);
+
+  // Filter out comments from blocked/muted users
+  if (excludedDids.size > 0) {
+    results = results.filter((c) => !excludedDids.has(c.authorDid)).slice(0, limit);
+  }
 
   // Get authors for comments
   const authorDids = [...new Set(results.map((c) => c.authorDid))];
@@ -145,13 +160,18 @@ xrpcRouter.get('/io.exprsn.video.getComments', optionalAuthMiddleware, async (c)
 
   // Get first 3 replies for each comment
   const commentUris = results.map((c) => c.uri);
-  const allReplies = commentUris.length > 0
+  let allReplies = commentUris.length > 0
     ? await db
         .select()
         .from(comments)
         .where(inArray(comments.parentUri, commentUris))
         .orderBy(desc(comments.likeCount), desc(comments.createdAt))
     : [];
+
+  // Filter out replies from blocked/muted users
+  if (excludedDids.size > 0) {
+    allReplies = allReplies.filter((r) => !excludedDids.has(r.authorDid));
+  }
 
   // Group replies by parent
   const repliesByParent = new Map<string, typeof allReplies>();
@@ -341,6 +361,70 @@ xrpcRouter.get('/io.exprsn.video.getSounds', async (c) => {
       originalVideoUri: s.originalVideoUri,
     })),
   });
+});
+
+/**
+ * Get a single sound by ID
+ * GET /xrpc/io.exprsn.video.getSound
+ */
+xrpcRouter.get('/io.exprsn.video.getSound', async (c) => {
+  const id = c.req.query('id');
+
+  if (!id) {
+    throw new HTTPException(400, { message: 'Sound ID is required' });
+  }
+
+  const sound = await db.query.sounds.findFirst({
+    where: eq(sounds.id, id),
+  });
+
+  if (!sound) {
+    throw new HTTPException(404, { message: 'Sound not found' });
+  }
+
+  return c.json({
+    sound: {
+      id: sound.id,
+      title: sound.title,
+      artist: sound.artist,
+      duration: sound.duration,
+      audioUrl: sound.audioUrl,
+      coverUrl: sound.coverUrl,
+      useCount: sound.useCount,
+      originalVideoUri: sound.originalVideoUri,
+    },
+  });
+});
+
+/**
+ * Get trending tags
+ * GET /xrpc/io.exprsn.video.getTrendingTags
+ */
+xrpcRouter.get('/io.exprsn.video.getTrendingTags', async (c) => {
+  const limit = Math.min(parseInt(c.req.query('limit') || '20', 10), 50);
+
+  // Aggregate tags from videos and count occurrences
+  // This query unnests the tags array and counts occurrences
+  const results = await db.execute(
+    sql`
+      SELECT tag, COUNT(*) as video_count
+      FROM (
+        SELECT unnest(tags::text[]) as tag
+        FROM videos
+        WHERE visibility = 'public'
+      ) AS tag_list
+      GROUP BY tag
+      ORDER BY video_count DESC
+      LIMIT ${limit}
+    `
+  );
+
+  const tags = (results.rows as { tag: string; video_count: string }[]).map((row) => ({
+    name: row.tag,
+    videoCount: parseInt(row.video_count, 10),
+  }));
+
+  return c.json({ tags });
 });
 
 /**
@@ -915,16 +999,45 @@ xrpcRouter.get('/io.exprsn.actor.getProfile', optionalAuthMiddleware, async (c) 
     throw new HTTPException(404, { message: 'User not found' });
   }
 
-  // Get viewer's follow relationship
+  // Get viewer's relationships (follow, block, mute)
   let viewerFollowing = false;
   let followUri: string | undefined;
+  let viewerBlocking = false;
+  let blockUri: string | undefined;
+  let viewerMuting = false;
+  let muteUri: string | undefined;
+  let blockedByViewer = false;
+
   if (viewerDid && viewerDid !== user.did) {
-    const follow = await db.query.follows.findFirst({
-      where: and(eq(follows.followerDid, viewerDid), eq(follows.followeeDid, user.did)),
-    });
+    const [follow, block, mute, blockedBy] = await Promise.all([
+      db.query.follows.findFirst({
+        where: and(eq(follows.followerDid, viewerDid), eq(follows.followeeDid, user.did)),
+      }),
+      db.query.blocks.findFirst({
+        where: and(eq(blocks.blockerDid, viewerDid), eq(blocks.blockedDid, user.did)),
+      }),
+      db.query.mutes.findFirst({
+        where: and(eq(mutes.muterDid, viewerDid), eq(mutes.mutedDid, user.did)),
+      }),
+      // Check if this user has blocked the viewer
+      db.query.blocks.findFirst({
+        where: and(eq(blocks.blockerDid, user.did), eq(blocks.blockedDid, viewerDid)),
+      }),
+    ]);
     if (follow) {
       viewerFollowing = true;
       followUri = follow.uri;
+    }
+    if (block) {
+      viewerBlocking = true;
+      blockUri = block.uri;
+    }
+    if (mute) {
+      viewerMuting = true;
+      muteUri = mute.uri;
+    }
+    if (blockedBy) {
+      blockedByViewer = true;
     }
   }
 
@@ -957,6 +1070,11 @@ xrpcRouter.get('/io.exprsn.actor.getProfile', optionalAuthMiddleware, async (c) 
         ? {
             following: viewerFollowing,
             followUri,
+            blocking: viewerBlocking,
+            blockUri,
+            muting: viewerMuting,
+            muteUri,
+            blockedBy: blockedByViewer,
           }
         : undefined,
     },
@@ -1311,18 +1429,46 @@ async function updateCommentHotScore(commentUri: string): Promise<void> {
 // Helper Functions
 // =============================================================================
 
+/**
+ * Get DIDs that the user has blocked or muted
+ */
+async function getBlockedAndMutedDids(userDid: string): Promise<{ blocked: string[]; muted: string[] }> {
+  const [blockedResults, mutedResults] = await Promise.all([
+    db.select({ did: blocks.blockedDid }).from(blocks).where(eq(blocks.blockerDid, userDid)),
+    db.select({ did: mutes.mutedDid }).from(mutes).where(eq(mutes.muterDid, userDid)),
+  ]);
+
+  return {
+    blocked: blockedResults.map((r) => r.did),
+    muted: mutedResults.map((r) => r.did),
+  };
+}
+
+/**
+ * Get DIDs that have blocked the user (reverse blocks)
+ */
+async function getBlockedByDids(userDid: string): Promise<string[]> {
+  const results = await db
+    .select({ did: blocks.blockerDid })
+    .from(blocks)
+    .where(eq(blocks.blockedDid, userDid));
+  return results.map((r) => r.did);
+}
+
 async function getFollowingFeed(
   userDid: string,
   cursor?: string,
   limit = 30
 ): Promise<FeedResult> {
-  // Get list of followed DIDs
-  const followingResult = await db
-    .select({ did: follows.followeeDid })
-    .from(follows)
-    .where(eq(follows.followerDid, userDid));
+  // Get list of followed DIDs and blocked/muted DIDs in parallel
+  const [followingResult, { blocked }] = await Promise.all([
+    db.select({ did: follows.followeeDid }).from(follows).where(eq(follows.followerDid, userDid)),
+    getBlockedAndMutedDids(userDid),
+  ]);
 
-  const followingDids = followingResult.map((f) => f.did);
+  // Filter out blocked users from following list
+  const blockedSet = new Set(blocked);
+  const followingDids = followingResult.map((f) => f.did).filter((did) => !blockedSet.has(did));
 
   if (followingDids.length === 0) {
     return { feed: [] };
@@ -1347,13 +1493,26 @@ async function getFollowingFeed(
   };
 }
 
-async function getTrendingFeed(cursor?: string, limit = 30): Promise<FeedResult> {
+async function getTrendingFeed(userDid?: string, cursor?: string, limit = 30): Promise<FeedResult> {
   const offset = cursor ? parseInt(cursor, 10) : 0;
 
-  const results = await db
-    .select()
-    .from(trendingVideos)
-    .innerJoin(videos, eq(trendingVideos.videoUri, videos.uri))
+  // Get blocked users if authenticated
+  let blockedDids: string[] = [];
+  if (userDid) {
+    const { blocked } = await getBlockedAndMutedDids(userDid);
+    blockedDids = blocked;
+  }
+
+  // Build query with optional block filter
+  const whereCondition = blockedDids.length > 0
+    ? sql`${videos.authorDid} NOT IN (${sql.join(blockedDids.map(d => sql`${d}`), sql`, `)})`
+    : undefined;
+
+  const query = whereCondition
+    ? db.select().from(trendingVideos).innerJoin(videos, eq(trendingVideos.videoUri, videos.uri)).where(whereCondition)
+    : db.select().from(trendingVideos).innerJoin(videos, eq(trendingVideos.videoUri, videos.uri));
+
+  const results = await query
     .orderBy(desc(trendingVideos.score))
     .limit(limit)
     .offset(offset);
@@ -1369,8 +1528,33 @@ async function getForYouFeed(
   cursor?: string,
   limit = 30
 ): Promise<FeedResult> {
-  // For now, return trending - ML-powered feed will be added later
-  return getTrendingFeed(cursor, limit);
+  // Get blocked and muted users if authenticated
+  let excludedDids: string[] = [];
+  if (userDid) {
+    const { blocked, muted } = await getBlockedAndMutedDids(userDid);
+    excludedDids = [...blocked, ...muted];
+  }
+
+  const offset = cursor ? parseInt(cursor, 10) : 0;
+
+  // Build query with optional block/mute filter
+  const whereCondition = excludedDids.length > 0
+    ? sql`${videos.authorDid} NOT IN (${sql.join(excludedDids.map(d => sql`${d}`), sql`, `)})`
+    : undefined;
+
+  const query = whereCondition
+    ? db.select().from(trendingVideos).innerJoin(videos, eq(trendingVideos.videoUri, videos.uri)).where(whereCondition)
+    : db.select().from(trendingVideos).innerJoin(videos, eq(trendingVideos.videoUri, videos.uri));
+
+  const results = await query
+    .orderBy(desc(trendingVideos.score))
+    .limit(limit)
+    .offset(offset);
+
+  return {
+    feed: results.map((r) => ({ post: r.videos.uri })),
+    cursor: results.length === limit ? (offset + limit).toString() : undefined,
+  };
 }
 
 async function getSoundFeed(

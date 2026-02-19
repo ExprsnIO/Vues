@@ -169,6 +169,22 @@ export function Sidebar() {
               <span className="font-medium">Notifications</span>
             </Link>
           )}
+
+          {/* Bookmarks (only show when logged in) */}
+          {user && (
+            <Link
+              href="/bookmarks"
+              className={cn(
+                'flex items-center gap-3 px-4 py-3 rounded-lg transition-colors',
+                pathname === '/bookmarks'
+                  ? 'bg-surface text-text-primary'
+                  : 'text-text-muted hover:bg-surface-hover hover:text-text-primary'
+              )}
+            >
+              <BookmarkIcon className="w-6 h-6" filled={pathname === '/bookmarks'} />
+              <span className="font-medium">Bookmarks</span>
+            </Link>
+          )}
         </nav>
 
         {/* Theme Switcher */}
@@ -446,6 +462,30 @@ function SettingsIcon({
         strokeLinecap="round"
         strokeLinejoin="round"
         d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
+      />
+    </svg>
+  );
+}
+
+function BookmarkIcon({
+  className,
+  filled,
+}: {
+  className?: string;
+  filled?: boolean;
+}) {
+  return (
+    <svg
+      className={className}
+      fill={filled ? 'currentColor' : 'none'}
+      stroke="currentColor"
+      strokeWidth={filled ? 0 : 2}
+      viewBox="0 0 24 24"
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M17.593 3.322c1.1.128 1.907 1.077 1.907 2.185V21L12 17.25 4.5 21V5.507c0-1.108.806-2.057 1.907-2.185a48.507 48.507 0 0111.186 0z"
       />
     </svg>
   );

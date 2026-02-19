@@ -501,3 +501,245 @@ videoExtendedRouter.post('/io.exprsn.video.deleteComment', authMiddleware, async
 
   return c.json({ success: true });
 });
+
+// =============================================================================
+// Collab Endpoints (Rebranded Duets)
+// =============================================================================
+
+/**
+ * Create a collab (side-by-side video response) - alias for duet
+ * POST /xrpc/io.exprsn.video.collab
+ */
+videoExtendedRouter.post('/io.exprsn.video.collab', authMiddleware, async (c) => {
+  const { videoUri, originalVideoUri, layout } = await c.req.json();
+  const userDid = c.get('did');
+
+  if (!videoUri || !originalVideoUri) {
+    throw new HTTPException(400, { message: 'Video URI and original video URI are required' });
+  }
+
+  // Verify both videos exist
+  const video = await db.query.videos.findFirst({
+    where: eq(videos.uri, videoUri),
+  });
+
+  const originalVideo = await db.query.videos.findFirst({
+    where: eq(videos.uri, originalVideoUri),
+  });
+
+  if (!video) {
+    throw new HTTPException(404, { message: 'Video not found' });
+  }
+
+  if (!originalVideo) {
+    throw new HTTPException(404, { message: 'Original video not found' });
+  }
+
+  // Check if original video allows duets (collabs)
+  if (!originalVideo.allowDuet) {
+    throw new HTTPException(403, { message: 'Original video does not allow collabs' });
+  }
+
+  const collabId = nanoid();
+  const collabUri = `at://${userDid}/io.exprsn.video.collab/${collabId}`;
+
+  // Store in duets table (same underlying data structure)
+  await db.insert(duets).values({
+    uri: collabUri,
+    cid: nanoid(),
+    videoUri,
+    originalVideoUri,
+    authorDid: userDid,
+    layout: layout || 'side-by-side',
+    createdAt: new Date(),
+  });
+
+  return c.json({ uri: collabUri });
+});
+
+/**
+ * Get collabs of a video - alias for getDuets
+ * GET /xrpc/io.exprsn.video.getCollabs
+ */
+videoExtendedRouter.get('/io.exprsn.video.getCollabs', optionalAuthMiddleware, async (c) => {
+  const uri = c.req.query('uri');
+  const limit = Math.min(parseInt(c.req.query('limit') || '30', 10), 100);
+  const cursor = c.req.query('cursor');
+
+  if (!uri) {
+    throw new HTTPException(400, { message: 'Video URI is required' });
+  }
+
+  let query = db
+    .select({
+      collab: duets,
+      video: videos,
+      author: users,
+    })
+    .from(duets)
+    .innerJoin(videos, eq(duets.videoUri, videos.uri))
+    .innerJoin(users, eq(videos.authorDid, users.did))
+    .where(eq(duets.originalVideoUri, uri))
+    .orderBy(desc(duets.createdAt))
+    .limit(limit);
+
+  if (cursor) {
+    const cursorDate = new Date(cursor);
+    query = query.where(sql`${duets.createdAt} < ${cursorDate}`) as typeof query;
+  }
+
+  const results = await query;
+
+  const nextCursor =
+    results.length === limit ? results[results.length - 1].collab.createdAt.toISOString() : undefined;
+
+  return c.json({
+    collabs: results.map((r) => ({
+      uri: r.collab.uri,
+      video: {
+        uri: r.video.uri,
+        cid: r.video.cid,
+        caption: r.video.caption,
+        cdnUrl: r.video.cdnUrl,
+        thumbnailUrl: r.video.thumbnailUrl,
+        viewCount: r.video.viewCount,
+        likeCount: r.video.likeCount,
+        createdAt: r.video.createdAt.toISOString(),
+      },
+      author: {
+        did: r.author.did,
+        handle: r.author.handle,
+        displayName: r.author.displayName,
+        avatar: r.author.avatar,
+      },
+      layout: r.collab.layout,
+      createdAt: r.collab.createdAt.toISOString(),
+    })),
+    cursor: nextCursor,
+  });
+});
+
+// =============================================================================
+// Loop Endpoints (Rebranded Stitches)
+// =============================================================================
+
+/**
+ * Create a loop (video using clip from another video) - alias for stitch
+ * POST /xrpc/io.exprsn.video.loop
+ */
+videoExtendedRouter.post('/io.exprsn.video.loop', authMiddleware, async (c) => {
+  const { videoUri, originalVideoUri, startTime, endTime } = await c.req.json();
+  const userDid = c.get('did');
+
+  if (!videoUri || !originalVideoUri) {
+    throw new HTTPException(400, { message: 'Video URI and original video URI are required' });
+  }
+
+  if (endTime === undefined || endTime <= 0) {
+    throw new HTTPException(400, { message: 'End time is required and must be positive' });
+  }
+
+  // Verify both videos exist
+  const video = await db.query.videos.findFirst({
+    where: eq(videos.uri, videoUri),
+  });
+
+  const originalVideo = await db.query.videos.findFirst({
+    where: eq(videos.uri, originalVideoUri),
+  });
+
+  if (!video) {
+    throw new HTTPException(404, { message: 'Video not found' });
+  }
+
+  if (!originalVideo) {
+    throw new HTTPException(404, { message: 'Original video not found' });
+  }
+
+  // Check if original video allows stitching (loops)
+  if (!originalVideo.allowStitch) {
+    throw new HTTPException(403, { message: 'Original video does not allow loops' });
+  }
+
+  const loopId = nanoid();
+  const loopUri = `at://${userDid}/io.exprsn.video.loop/${loopId}`;
+
+  // Store in stitches table (same underlying data structure)
+  await db.insert(stitches).values({
+    uri: loopUri,
+    cid: nanoid(),
+    videoUri,
+    originalVideoUri,
+    authorDid: userDid,
+    startTime: startTime || 0,
+    endTime,
+    createdAt: new Date(),
+  });
+
+  return c.json({ uri: loopUri });
+});
+
+/**
+ * Get loops of a video - alias for getStitches
+ * GET /xrpc/io.exprsn.video.getLoops
+ */
+videoExtendedRouter.get('/io.exprsn.video.getLoops', optionalAuthMiddleware, async (c) => {
+  const uri = c.req.query('uri');
+  const limit = Math.min(parseInt(c.req.query('limit') || '30', 10), 100);
+  const cursor = c.req.query('cursor');
+
+  if (!uri) {
+    throw new HTTPException(400, { message: 'Video URI is required' });
+  }
+
+  let query = db
+    .select({
+      loop: stitches,
+      video: videos,
+      author: users,
+    })
+    .from(stitches)
+    .innerJoin(videos, eq(stitches.videoUri, videos.uri))
+    .innerJoin(users, eq(videos.authorDid, users.did))
+    .where(eq(stitches.originalVideoUri, uri))
+    .orderBy(desc(stitches.createdAt))
+    .limit(limit);
+
+  if (cursor) {
+    const cursorDate = new Date(cursor);
+    query = query.where(sql`${stitches.createdAt} < ${cursorDate}`) as typeof query;
+  }
+
+  const results = await query;
+
+  const nextCursor =
+    results.length === limit
+      ? results[results.length - 1].loop.createdAt.toISOString()
+      : undefined;
+
+  return c.json({
+    loops: results.map((r) => ({
+      uri: r.loop.uri,
+      video: {
+        uri: r.video.uri,
+        cid: r.video.cid,
+        caption: r.video.caption,
+        cdnUrl: r.video.cdnUrl,
+        thumbnailUrl: r.video.thumbnailUrl,
+        viewCount: r.video.viewCount,
+        likeCount: r.video.likeCount,
+        createdAt: r.video.createdAt.toISOString(),
+      },
+      author: {
+        did: r.author.did,
+        handle: r.author.handle,
+        displayName: r.author.displayName,
+        avatar: r.author.avatar,
+      },
+      startTime: r.loop.startTime,
+      endTime: r.loop.endTime,
+      createdAt: r.loop.createdAt.toISOString(),
+    })),
+    cursor: nextCursor,
+  });
+});

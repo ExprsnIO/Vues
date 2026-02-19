@@ -18,6 +18,7 @@ export default function EditProfilePage() {
   const [avatarPreview, setAvatarPreview] = useState<string | null>(null);
   const [avatarFile, setAvatarFile] = useState<File | null>(null);
   const [hasChanges, setHasChanges] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<string | null>(null);
 
   // Load initial values from user
   useEffect(() => {
@@ -40,7 +41,37 @@ export default function EditProfilePage() {
 
   const updateMutation = useMutation({
     mutationFn: async () => {
-      // Update profile
+      // Upload avatar if changed
+      if (avatarFile) {
+        setUploadProgress('Getting upload URL...');
+
+        // Get presigned upload URL
+        const { uploadUrl, avatarUrl } = await api.getAvatarUploadUrl(avatarFile.type);
+
+        setUploadProgress('Uploading image...');
+
+        // Upload directly to S3
+        const uploadResponse = await fetch(uploadUrl, {
+          method: 'PUT',
+          body: avatarFile,
+          headers: {
+            'Content-Type': avatarFile.type,
+          },
+        });
+
+        if (!uploadResponse.ok) {
+          throw new Error('Failed to upload avatar');
+        }
+
+        setUploadProgress('Completing upload...');
+
+        // Complete the upload and update avatar URL
+        await api.completeAvatarUpload(avatarUrl);
+
+        setUploadProgress(null);
+      }
+
+      // Update profile text fields
       await api.updateActorProfile({
         displayName: displayName.trim() || undefined,
         bio: bio.trim() || undefined,
@@ -54,6 +85,9 @@ export default function EditProfilePage() {
         queryClient.invalidateQueries({ queryKey: ['profile', user.handle] });
       }
       router.push(`/profile/${user?.handle}`);
+    },
+    onError: () => {
+      setUploadProgress(null);
     },
   });
 
@@ -227,7 +261,7 @@ export default function EditProfilePage() {
               {updateMutation.isPending ? (
                 <span className="flex items-center justify-center gap-2">
                   <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                  Saving...
+                  {uploadProgress || 'Saving...'}
                 </span>
               ) : (
                 'Save changes'
