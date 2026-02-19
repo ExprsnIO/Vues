@@ -1,6 +1,6 @@
 'use client';
 
-import { useParams } from 'next/navigation';
+import { useParams, useRouter } from 'next/navigation';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import Link from 'next/link';
 import { Sidebar, useSidebar } from '@/components/Sidebar';
@@ -9,9 +9,11 @@ import { api, VideoView } from '@/lib/api';
 import { useAuth } from '@/lib/auth-context';
 import { cn } from '@/lib/utils';
 import { useState } from 'react';
+import toast from 'react-hot-toast';
 
 export default function ProfilePage() {
   const params = useParams();
+  const router = useRouter();
   const handle = params.handle as string;
   const { user, isLoading: authLoading } = useAuth();
   const queryClient = useQueryClient();
@@ -36,6 +38,26 @@ export default function ProfilePage() {
       queryClient.invalidateQueries({ queryKey: ['profile', handle] });
     },
   });
+
+  const messageMutation = useMutation({
+    mutationFn: (did: string) => api.getOrCreateConversation(did),
+    onSuccess: (result) => {
+      router.push(`/messages/${result.conversation.id}`);
+    },
+    onError: () => {
+      toast.error('Failed to start conversation');
+    },
+  });
+
+  const handleMessageClick = () => {
+    if (!user) {
+      router.push('/login?redirect=' + encodeURIComponent(`/profile/${handle}`));
+      return;
+    }
+    if (data?.profile.did) {
+      messageMutation.mutate(data.profile.did);
+    }
+  };
 
   const handleFollowClick = () => {
     if (!user) {
@@ -164,7 +186,8 @@ export default function ProfilePage() {
                                 : 'Follow'}
                         </button>
                         <button
-                          disabled={data?.profile.viewer?.blockedBy}
+                          onClick={handleMessageClick}
+                          disabled={data?.profile.viewer?.blockedBy || messageMutation.isPending}
                           className={cn(
                             'px-6 py-2 border border-border rounded-lg transition-colors',
                             data?.profile.viewer?.blockedBy
@@ -172,7 +195,7 @@ export default function ProfilePage() {
                               : 'text-text-primary hover:bg-surface'
                           )}
                         >
-                          Message
+                          {messageMutation.isPending ? '...' : 'Message'}
                         </button>
                         <UserActionsMenu
                           userDid={data.profile.did}

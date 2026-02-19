@@ -8,6 +8,7 @@ import { useAuth } from '@/lib/auth-context';
 import { useLoginModal } from './LoginModal';
 import { CommentThread } from './comments/CommentThread';
 import { CollabLoopModal } from './CollabLoopModal';
+import { ReportModal } from './ReportModal';
 import toast from 'react-hot-toast';
 
 interface VideoActionsProps {
@@ -22,6 +23,7 @@ export function VideoActions({ video }: VideoActionsProps) {
   const [likeCount, setLikeCount] = useState(video.likeCount);
   const [showComments, setShowComments] = useState(false);
   const [collabLoopModal, setCollabLoopModal] = useState<'collab' | 'loop' | null>(null);
+  const [showReportModal, setShowReportModal] = useState(false);
 
   const likeMutation = useMutation({
     mutationFn: async () => {
@@ -90,6 +92,14 @@ export function VideoActions({ video }: VideoActionsProps) {
       return;
     }
     setCollabLoopModal('loop');
+  }, [user, openLoginModal]);
+
+  const handleReport = useCallback(() => {
+    if (!user) {
+      openLoginModal('Log in to report this video');
+      return;
+    }
+    setShowReportModal(true);
   }, [user, openLoginModal]);
 
   return (
@@ -167,6 +177,13 @@ export function VideoActions({ video }: VideoActionsProps) {
           <span className="text-xs text-white font-medium">Loop</span>
         </button>
 
+        {/* Report */}
+        <button onClick={handleReport} className="flex flex-col items-center">
+          <div className="p-2 rounded-full text-white hover:text-red-400 transition-colors">
+            <FlagIcon className="w-7 h-7" />
+          </div>
+        </button>
+
         {/* Sound */}
         {video.tags && video.tags.length > 0 && (
           <button className="w-10 h-10 rounded-full bg-gray-800 border-2 border-gray-600 overflow-hidden animate-spin-slow">
@@ -192,6 +209,20 @@ export function VideoActions({ video }: VideoActionsProps) {
           onClose={() => setCollabLoopModal(null)}
         />
       )}
+
+      {/* Report modal */}
+      <ReportModal
+        isOpen={showReportModal}
+        onClose={() => setShowReportModal(false)}
+        contentType="video"
+        contentUri={video.uri}
+        contentCid={video.cid}
+        contentPreview={{
+          text: video.caption,
+          thumbnail: video.video?.thumbnail || video.thumbnailUrl,
+          authorHandle: video.author.handle,
+        }}
+      />
     </>
   );
 }
@@ -318,6 +349,24 @@ function CloseIcon({ className }: { className?: string }) {
         strokeLinecap="round"
         strokeLinejoin="round"
         d="M6 18L18 6M6 6l12 12"
+      />
+    </svg>
+  );
+}
+
+function FlagIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      viewBox="0 0 24 24"
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M3 3v1.5M3 21v-6m0 0l2.77-.693a9 9 0 016.208.682l.108.054a9 9 0 006.086.71l3.114-.732a48.524 48.524 0 01-.005-10.499l-3.11.732a9 9 0 01-6.085-.711l-.108-.054a9 9 0 00-6.208-.682L3 4.5M3 15V4.5"
       />
     </svg>
   );

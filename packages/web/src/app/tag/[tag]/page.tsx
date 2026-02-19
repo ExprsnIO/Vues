@@ -1,12 +1,32 @@
 'use client';
 
 import { useParams } from 'next/navigation';
+import { useQuery } from '@tanstack/react-query';
 import { Sidebar } from '@/components/Sidebar';
 import { VideoFeed } from '@/components/VideoFeed';
+import { api } from '@/lib/api';
 
 export default function TagPage() {
   const params = useParams();
   const tag = decodeURIComponent(params.tag as string).replace(/^#/, '');
+
+  // Fetch tag info including video count
+  const { data: tagData } = useQuery({
+    queryKey: ['tag', tag],
+    queryFn: () => api.getVideosByTag(tag, { limit: 1 }),
+  });
+
+  const videoCount = tagData?.tag?.videoCount;
+
+  const formatVideoCount = (count: number) => {
+    if (count >= 1000000) {
+      return `${(count / 1000000).toFixed(1)}M`;
+    }
+    if (count >= 1000) {
+      return `${(count / 1000).toFixed(1)}K`;
+    }
+    return count.toString();
+  };
 
   return (
     <div className="flex min-h-screen bg-black">
@@ -21,7 +41,13 @@ export default function TagPage() {
               </div>
               <div>
                 <h1 className="text-2xl font-bold text-text-primary">#{tag}</h1>
-                <p className="text-text-muted">Discover videos with this hashtag</p>
+                <p className="text-text-muted">
+                  {videoCount !== undefined ? (
+                    <>{formatVideoCount(videoCount)} videos</>
+                  ) : (
+                    'Discover videos with this hashtag'
+                  )}
+                </p>
               </div>
             </div>
           </div>

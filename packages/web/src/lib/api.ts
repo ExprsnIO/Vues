@@ -437,6 +437,227 @@ class ApiClient {
     });
   }
 
+  // Admin content moderation
+  async getAdminContent(options: {
+    type?: 'video' | 'comment';
+    status?: 'active' | 'removed' | 'flagged';
+    q?: string;
+    limit?: number;
+    cursor?: string;
+  } = {}): Promise<{
+    content: Array<{
+      uri: string;
+      type: 'video' | 'comment';
+      author: { did: string; handle: string; displayName?: string; avatar?: string };
+      text?: string;
+      thumbnail?: string;
+      viewCount?: number;
+      likeCount?: number;
+      reportCount: number;
+      status: 'active' | 'removed' | 'flagged';
+      createdAt: string;
+      removedAt?: string;
+      removedReason?: string;
+    }>;
+    cursor?: string;
+  }> {
+    const params = new URLSearchParams();
+    if (options.type) params.set('type', options.type);
+    if (options.status) params.set('status', options.status);
+    if (options.q) params.set('q', options.q);
+    if (options.limit) params.set('limit', String(options.limit));
+    if (options.cursor) params.set('cursor', options.cursor);
+    return this.fetch(`/xrpc/io.exprsn.admin.content.list?${params}`);
+  }
+
+  async removeAdminContent(data: {
+    uri: string;
+    reason: string;
+  }): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.content.remove', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async restoreAdminContent(data: {
+    uri: string;
+    reason?: string;
+  }): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.content.restore', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  // Moderation queue
+  async getModerationQueue(options: {
+    status?: 'pending' | 'in_review' | 'escalated';
+    contentType?: 'video' | 'comment' | 'loop' | 'collab' | 'user';
+    priority?: 'low' | 'medium' | 'high' | 'critical';
+    assignedTo?: string;
+    limit?: number;
+    cursor?: string;
+  } = {}): Promise<{
+    items: ModerationQueueItem[];
+    cursor?: string;
+    stats: {
+      pending: number;
+      inReview: number;
+      escalated: number;
+      resolvedToday: number;
+    };
+  }> {
+    const params = new URLSearchParams();
+    if (options.status) params.set('status', options.status);
+    if (options.contentType) params.set('contentType', options.contentType);
+    if (options.priority) params.set('priority', options.priority);
+    if (options.assignedTo) params.set('assignedTo', options.assignedTo);
+    if (options.limit) params.set('limit', String(options.limit));
+    if (options.cursor) params.set('cursor', options.cursor);
+    return this.fetch(`/xrpc/io.exprsn.admin.moderation.queue?${params}`);
+  }
+
+  async claimModerationItem(itemId: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.moderation.claim', {
+      method: 'POST',
+      body: JSON.stringify({ itemId }),
+    });
+  }
+
+  async resolveModerationItem(data: {
+    itemId: string;
+    action: 'approve' | 'remove' | 'warn' | 'escalate';
+    reason: string;
+    sanctionType?: 'warning' | 'mute' | 'suspend' | 'ban';
+    sanctionDuration?: number;
+  }): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.moderation.resolve', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async getModerationStats(): Promise<{
+    overview: {
+      pendingReports: number;
+      resolvedToday: number;
+      resolvedThisWeek: number;
+      avgResolutionTime: number;
+    };
+    byContentType: Record<string, number>;
+    byReason: Record<string, number>;
+    byModerator: Array<{
+      moderator: { did: string; handle: string; avatar?: string };
+      resolved: number;
+      avgTime: number;
+    }>;
+    recentActions: Array<{
+      id: string;
+      action: string;
+      contentType: string;
+      moderator: { handle: string };
+      createdAt: string;
+    }>;
+  }> {
+    return this.fetch('/xrpc/io.exprsn.admin.moderation.stats');
+  }
+
+  async bulkModerationAction(data: {
+    itemIds: string[];
+    action: 'approve' | 'remove' | 'escalate';
+    reason: string;
+  }): Promise<{ success: boolean; processed: number; failed: number }> {
+    return this.fetch('/xrpc/io.exprsn.admin.moderation.bulk', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  // Banned words management
+  async getBannedWords(options: {
+    cursor?: string;
+    limit?: number;
+  } = {}): Promise<{ words: BannedWord[]; cursor?: string }> {
+    const params = new URLSearchParams();
+    if (options.limit) params.set('limit', String(options.limit));
+    if (options.cursor) params.set('cursor', options.cursor);
+    return this.fetch(`/xrpc/io.exprsn.admin.moderation.bannedWords?${params}`);
+  }
+
+  async addBannedWord(data: {
+    word: string;
+    severity: 'low' | 'medium' | 'high';
+    action: 'flag' | 'block' | 'shadow';
+    reason?: string;
+  }): Promise<{ success: boolean; word: BannedWord }> {
+    return this.fetch('/xrpc/io.exprsn.admin.moderation.addBannedWord', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async updateBannedWord(data: {
+    id: string;
+    severity?: 'low' | 'medium' | 'high';
+    action?: 'flag' | 'block' | 'shadow';
+    enabled?: boolean;
+  }): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.moderation.updateBannedWord', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async removeBannedWord(id: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.moderation.removeBannedWord', {
+      method: 'POST',
+      body: JSON.stringify({ id }),
+    });
+  }
+
+  // Banned tags management
+  async getBannedTags(options: {
+    cursor?: string;
+    limit?: number;
+  } = {}): Promise<{ tags: BannedTag[]; cursor?: string }> {
+    const params = new URLSearchParams();
+    if (options.limit) params.set('limit', String(options.limit));
+    if (options.cursor) params.set('cursor', options.cursor);
+    return this.fetch(`/xrpc/io.exprsn.admin.moderation.bannedTags?${params}`);
+  }
+
+  async addBannedTag(data: {
+    tag: string;
+    severity: 'low' | 'medium' | 'high';
+    action: 'flag' | 'block' | 'shadow';
+    reason?: string;
+  }): Promise<{ success: boolean; tag: BannedTag }> {
+    return this.fetch('/xrpc/io.exprsn.admin.moderation.addBannedTag', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async updateBannedTag(data: {
+    id: string;
+    severity?: 'low' | 'medium' | 'high';
+    action?: 'flag' | 'block' | 'shadow';
+    enabled?: boolean;
+  }): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.moderation.updateBannedTag', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async removeBannedTag(id: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.moderation.removeBannedTag', {
+      method: 'POST',
+      body: JSON.stringify({ id }),
+    });
+  }
+
   // Admin team management
   async getAdminTeam(): Promise<{ admins: AdminTeamMember[] }> {
     return this.fetch('/xrpc/io.exprsn.admin.admins.list');
@@ -1026,6 +1247,10 @@ class ApiClient {
     });
   }
 
+  async getListMemberships(subjectDid: string): Promise<{ lists: ListView[] }> {
+    return this.fetch(`/xrpc/io.exprsn.graph.getListMemberships?did=${subjectDid}`);
+  }
+
   // =============================================================================
   // Stitch & Duet API
   // =============================================================================
@@ -1393,6 +1618,84 @@ export interface AdminReport {
 
 export interface AdminReportsResponse {
   reports: AdminReport[];
+}
+
+export interface ModerationQueueItem {
+  id: string;
+  contentUri: string;
+  contentType: 'video' | 'comment' | 'loop' | 'collab' | 'user';
+  status: 'pending' | 'in_review' | 'escalated' | 'resolved';
+  priority: 'low' | 'medium' | 'high' | 'critical';
+  reportCount: number;
+  reasons: string[];
+  content: {
+    uri: string;
+    text?: string;
+    thumbnail?: string;
+    author: {
+      did: string;
+      handle: string;
+      displayName?: string;
+      avatar?: string;
+    };
+  };
+  reports: Array<{
+    id: string;
+    reason: string;
+    description?: string;
+    reporter: {
+      did: string;
+      handle: string;
+    };
+    createdAt: string;
+  }>;
+  assignedTo?: {
+    did: string;
+    handle: string;
+    avatar?: string;
+  };
+  createdAt: string;
+  updatedAt: string;
+  claimedAt?: string;
+  resolvedAt?: string;
+  resolution?: {
+    action: string;
+    reason: string;
+    moderator: {
+      did: string;
+      handle: string;
+    };
+  };
+}
+
+export interface BannedWord {
+  id: string;
+  word: string;
+  severity: 'low' | 'medium' | 'high';
+  action: 'flag' | 'block' | 'shadow';
+  reason?: string;
+  enabled: boolean;
+  matchCount: number;
+  createdAt: string;
+  createdBy: {
+    did: string;
+    handle: string;
+  };
+}
+
+export interface BannedTag {
+  id: string;
+  tag: string;
+  severity: 'low' | 'medium' | 'high';
+  action: 'flag' | 'block' | 'shadow';
+  reason?: string;
+  enabled: boolean;
+  matchCount: number;
+  createdAt: string;
+  createdBy: {
+    did: string;
+    handle: string;
+  };
 }
 
 export interface AdminTeamMember {

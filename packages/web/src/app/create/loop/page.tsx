@@ -59,21 +59,93 @@ function CreateLoopContent() {
     enabled: !!originalUri,
   });
 
+  const [publishStatus, setPublishStatus] = useState<string | null>(null);
+  const [uploadProgress, setUploadProgress] = useState(0);
+
   const publishMutation = useMutation({
     mutationFn: async (data: LoopPublishData) => {
-      // TODO: Implement actual loop creation API
-      // This would upload the response video and create the loop record
-      console.log('Publishing loop:', data);
+      if (!data.responseVideoFile) {
+        throw new Error('No response video selected');
+      }
 
-      // For now, simulate API call
-      await new Promise((resolve) => setTimeout(resolve, 1500));
+      // Step 1: Get presigned upload URL
+      setPublishStatus('Preparing upload...');
+      const { uploadId, uploadUrl } = await api.getUploadUrl(data.responseVideoFile.type);
 
-      // In production, this would call something like:
-      // return api.createLoop(data);
-      return { success: true };
+      // Step 2: Upload file directly to S3
+      setPublishStatus('Uploading video...');
+      const xhr = new XMLHttpRequest();
+      await new Promise<void>((resolve, reject) => {
+        xhr.upload.addEventListener('progress', (e) => {
+          if (e.lengthComputable) {
+            setUploadProgress(Math.round((e.loaded / e.total) * 100));
+          }
+        });
+        xhr.addEventListener('load', () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            resolve();
+          } else {
+            reject(new Error('Upload failed'));
+          }
+        });
+        xhr.addEventListener('error', () => reject(new Error('Upload failed')));
+        xhr.open('PUT', uploadUrl);
+        xhr.setRequestHeader('Content-Type', data.responseVideoFile!.type);
+        xhr.send(data.responseVideoFile);
+      });
+
+      // Step 3: Trigger processing
+      setPublishStatus('Processing video...');
+      await api.completeUpload(uploadId);
+
+      // Step 4: Poll for processing status
+      let status = 'processing';
+      while (status === 'processing' || status === 'pending') {
+        await new Promise((r) => setTimeout(r, 2000));
+        const result = await api.getUploadStatus(uploadId);
+        status = result.status;
+        if (status === 'failed') {
+          throw new Error(result.error || 'Processing failed');
+        }
+      }
+
+      // Step 5: Get video dimensions
+      const video = document.createElement('video');
+      video.src = URL.createObjectURL(data.responseVideoFile);
+      await new Promise((r) => (video.onloadedmetadata = r));
+
+      // Step 6: Create the post
+      setPublishStatus('Creating post...');
+      const postResult = await api.createPost({
+        uploadId,
+        caption: data.caption || `Loop of @${originalVideo?.author?.handle}'s video`,
+        tags: ['loop'],
+        visibility: 'public',
+        aspectRatio: {
+          width: video.videoWidth,
+          height: video.videoHeight,
+        },
+        duration: Math.round(video.duration),
+      });
+
+      // Step 7: Create the loop link
+      setPublishStatus('Creating loop...');
+      await api.createLoop({
+        videoUri: postResult.uri,
+        originalVideoUri: data.originalUri,
+        startTime: data.clipStart,
+        endTime: data.clipEnd,
+      });
+
+      return { success: true, uri: postResult.uri };
     },
     onSuccess: () => {
       router.push('/');
+    },
+    onError: (error) => {
+      setPublishStatus(null);
+      setUploadProgress(0);
+      console.error('Failed to publish loop:', error);
     },
   });
 

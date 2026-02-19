@@ -1,11 +1,13 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { api, type CommentView, type ReactionType } from '@/lib/api';
 import { ReactionPicker } from './ReactionPicker';
 import { CommentInput } from './CommentInput';
+import { ReportModal } from '@/components/ReportModal';
 import { useAuth } from '@/lib/auth-context';
+import { useLoginModal } from '@/components/LoginModal';
 import { formatDistanceToNow } from '@/lib/utils';
 
 interface CommentItemProps {
@@ -26,8 +28,12 @@ export function CommentItem({
   isNested = false,
 }: CommentItemProps) {
   const { user } = useAuth();
+  const { open: openLoginModal } = useLoginModal();
   const queryClient = useQueryClient();
   const [showReplies, setShowReplies] = useState(false);
+  const [showMenu, setShowMenu] = useState(false);
+  const [showReportModal, setShowReportModal] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
   const [currentReaction, setCurrentReaction] = useState<ReactionType | undefined>(
     comment.viewer?.reaction
   );
@@ -36,6 +42,28 @@ export function CommentItem({
     love: comment.loveCount,
     dislike: comment.dislikeCount,
   });
+
+  // Close menu when clicking outside
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
+        setShowMenu(false);
+      }
+    }
+    if (showMenu) {
+      document.addEventListener('mousedown', handleClickOutside);
+      return () => document.removeEventListener('mousedown', handleClickOutside);
+    }
+  }, [showMenu]);
+
+  const handleReport = useCallback(() => {
+    if (!user) {
+      openLoginModal('Log in to report this comment');
+      return;
+    }
+    setShowMenu(false);
+    setShowReportModal(true);
+  }, [user, openLoginModal]);
 
   const reactionMutation = useMutation({
     mutationFn: async (reactionType: ReactionType) => {
@@ -146,6 +174,28 @@ export function CommentItem({
                 Reply
               </button>
             )}
+
+            {/* More menu */}
+            <div className="relative" ref={menuRef}>
+              <button
+                onClick={() => setShowMenu(!showMenu)}
+                className="text-text-muted hover:text-text-primary p-1 -m-1"
+              >
+                <MoreIcon className="w-4 h-4" />
+              </button>
+
+              {showMenu && (
+                <div className="absolute left-0 top-full mt-1 py-1 bg-surface border border-border rounded-lg shadow-lg z-10 min-w-[120px]">
+                  <button
+                    onClick={handleReport}
+                    className="w-full px-3 py-2 text-left text-sm text-red-500 hover:bg-surface-hover flex items-center gap-2"
+                  >
+                    <FlagIcon className="w-4 h-4" />
+                    Report
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Reply input */}
@@ -196,6 +246,35 @@ export function CommentItem({
           )}
         </div>
       </div>
+
+      {/* Report Modal */}
+      <ReportModal
+        isOpen={showReportModal}
+        onClose={() => setShowReportModal(false)}
+        contentType="comment"
+        contentUri={comment.uri}
+        contentCid={comment.cid}
+        contentPreview={{
+          text: comment.text,
+          authorHandle: comment.author.handle,
+        }}
+      />
     </div>
+  );
+}
+
+function MoreIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="currentColor" viewBox="0 0 24 24">
+      <path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z" />
+    </svg>
+  );
+}
+
+function FlagIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M3 3v1.5M3 21v-6m0 0l2.77-.693a9 9 0 016.208.682l.108.054a9 9 0 006.086.71l3.114-.732a48.524 48.524 0 01-.005-10.499l-3.11.732a9 9 0 01-6.085-.711l-.108-.054a9 9 0 00-6.208-.682L3 4.5M3 15V4.5" />
+    </svg>
   );
 }

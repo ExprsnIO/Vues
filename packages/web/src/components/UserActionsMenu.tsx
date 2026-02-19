@@ -4,6 +4,8 @@ import { useState, useRef, useEffect } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api';
 import { useAuth } from '@/lib/auth-context';
+import { ReportModal } from './ReportModal';
+import { AddToListModal } from './AddToListModal';
 
 interface UserActionsMenuProps {
   userDid: string;
@@ -26,6 +28,8 @@ export function UserActionsMenu({
   const { user } = useAuth();
   const queryClient = useQueryClient();
   const [isOpen, setIsOpen] = useState(false);
+  const [showReportModal, setShowReportModal] = useState(false);
+  const [showAddToListModal, setShowAddToListModal] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
   // Close menu when clicking outside
@@ -72,8 +76,13 @@ export function UserActionsMenu({
   });
 
   const handleReport = () => {
-    // TODO: Open report modal
     setIsOpen(false);
+    setShowReportModal(true);
+  };
+
+  const handleAddToList = () => {
+    setIsOpen(false);
+    setShowAddToListModal(true);
   };
 
   // Don't show if not logged in or viewing own profile
@@ -82,14 +91,15 @@ export function UserActionsMenu({
   }
 
   return (
-    <div className="relative" ref={menuRef}>
-      <button
-        onClick={() => setIsOpen(!isOpen)}
-        className="p-2 rounded-full hover:bg-surface transition-colors"
-        aria-label="More actions"
-      >
-        <MoreIcon className="w-5 h-5 text-text-primary" />
-      </button>
+    <>
+      <div className="relative" ref={menuRef}>
+        <button
+          onClick={() => setIsOpen(!isOpen)}
+          className="p-2 rounded-full hover:bg-surface transition-colors"
+          aria-label="More actions"
+        >
+          <MoreIcon className="w-5 h-5 text-text-primary" />
+        </button>
 
       {isOpen && (
         <div className="absolute right-0 top-full mt-2 w-48 bg-background border border-border rounded-lg shadow-lg z-50 overflow-hidden">
@@ -125,6 +135,15 @@ export function UserActionsMenu({
             </span>
           </button>
 
+          {/* Add to List */}
+          <button
+            onClick={handleAddToList}
+            className="w-full px-4 py-3 text-left hover:bg-surface transition-colors flex items-center gap-3"
+          >
+            <ListIcon className="w-5 h-5 text-text-muted" />
+            <span className="text-text-primary">Add to list</span>
+          </button>
+
           <div className="border-t border-border" />
 
           {/* Report */}
@@ -137,7 +156,25 @@ export function UserActionsMenu({
           </button>
         </div>
       )}
-    </div>
+      </div>
+
+      <ReportModal
+        isOpen={showReportModal}
+        onClose={() => setShowReportModal(false)}
+        contentType="user"
+        contentUri={userDid}
+        contentPreview={{
+          authorHandle: userHandle,
+        }}
+      />
+
+      <AddToListModal
+        isOpen={showAddToListModal}
+        onClose={() => setShowAddToListModal(false)}
+        userDid={userDid}
+        userHandle={userHandle}
+      />
+    </>
   );
 }
 
@@ -190,6 +227,18 @@ function ReportIcon({ className }: { className?: string }) {
         strokeLinecap="round"
         strokeLinejoin="round"
         d="M3 3v1.5M3 21v-6m0 0l2.77-.693a9 9 0 016.208.682l.108.054a9 9 0 006.086.71l3.114-.732a48.524 48.524 0 01-.005-10.499l-3.11.732a9 9 0 01-6.085-.711l-.108-.054a9 9 0 00-6.208-.682L3 4.5M3 15V4.5"
+      />
+    </svg>
+  );
+}
+
+function ListIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M8.25 6.75h12M8.25 12h12m-12 5.25h12M3.75 6.75h.007v.008H3.75V6.75zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zM3.75 12h.007v.008H3.75V12zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm-.375 5.25h.007v.008H3.75v-.008zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0z"
       />
     </svg>
   );
