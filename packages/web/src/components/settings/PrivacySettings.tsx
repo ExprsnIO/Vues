@@ -49,8 +49,8 @@ export function PrivacySettings({ privacy, onUpdate, isUpdating }: PrivacySettin
       </SettingsRow>
 
       <SettingsRow
-        label="Allow duets"
-        description="Let others create duets with your videos"
+        label="Allow collabs"
+        description="Let others create side-by-side videos with yours"
       >
         <ToggleSwitch
           checked={privacy.allowDuets}
@@ -60,8 +60,8 @@ export function PrivacySettings({ privacy, onUpdate, isUpdating }: PrivacySettin
       </SettingsRow>
 
       <SettingsRow
-        label="Allow stitches"
-        description="Let others stitch your videos"
+        label="Allow loops"
+        description="Let others use clips from your videos"
       >
         <ToggleSwitch
           checked={privacy.allowStitches}
