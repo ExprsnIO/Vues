@@ -48,7 +48,7 @@ actorRouter.get('/io.exprsn.actor.getProfile', optionalAuthMiddleware, async (c)
   // Get viewer relationship
   let viewer = undefined;
   if (viewerDid && viewerDid !== user.did) {
-    const [followingRecord, followedByRecord, blockRecord, muteRecord] = await Promise.all([
+    const [followingRecord, followedByRecord, blockRecord, blockedByRecord, muteRecord] = await Promise.all([
       db.query.follows.findFirst({
         where: and(
           eq(follows.followerDid, viewerDid),
@@ -67,6 +67,13 @@ actorRouter.get('/io.exprsn.actor.getProfile', optionalAuthMiddleware, async (c)
           eq(blocks.blockedDid, user.did)
         ),
       }),
+      // Check if the profile user has blocked the viewer
+      db.query.blocks.findFirst({
+        where: and(
+          eq(blocks.blockerDid, user.did),
+          eq(blocks.blockedDid, viewerDid)
+        ),
+      }),
       db.query.mutes.findFirst({
         where: and(
           eq(mutes.muterDid, viewerDid),
@@ -79,9 +86,10 @@ actorRouter.get('/io.exprsn.actor.getProfile', optionalAuthMiddleware, async (c)
       following: !!followingRecord,
       followedBy: !!followedByRecord,
       followUri: followingRecord?.uri,
-      muted: !!muteRecord,
-      blocked: !!blockRecord,
+      muting: !!muteRecord,
+      blocking: !!blockRecord,
       blockUri: blockRecord?.uri,
+      blockedBy: !!blockedByRecord,
     };
   }
 

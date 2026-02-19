@@ -1231,6 +1231,7 @@ export interface ProfileView {
   viewer?: {
     following: boolean;
     followUri?: string;
+    followedBy?: boolean;
     blocking?: boolean;
     blockUri?: string;
     muting?: boolean;

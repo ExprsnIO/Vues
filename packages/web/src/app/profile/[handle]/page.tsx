@@ -3,7 +3,7 @@
 import { useParams } from 'next/navigation';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import Link from 'next/link';
-import { Sidebar } from '@/components/Sidebar';
+import { Sidebar, useSidebar } from '@/components/Sidebar';
 import { UserActionsMenu } from '@/components/UserActionsMenu';
 import { api, VideoView } from '@/lib/api';
 import { useAuth } from '@/lib/auth-context';
@@ -15,6 +15,7 @@ export default function ProfilePage() {
   const handle = params.handle as string;
   const { user, isLoading: authLoading } = useAuth();
   const queryClient = useQueryClient();
+  const { openSettings } = useSidebar();
   const [activeTab, setActiveTab] = useState<'videos' | 'liked'>('videos');
 
   const { data, isLoading, error } = useQuery({
@@ -92,7 +93,14 @@ export default function ProfilePage() {
                       <VerifiedBadge />
                     )}
                   </div>
-                  <p className="text-text-muted mb-4">@{data.profile.handle}</p>
+                  <div className="flex items-center gap-2 mb-4">
+                    <p className="text-text-muted">@{data.profile.handle}</p>
+                    {!isOwnProfile && data.profile.viewer?.followedBy && (
+                      <span className="px-2 py-0.5 text-xs font-medium bg-surface text-text-muted rounded">
+                        Follows you
+                      </span>
+                    )}
+                  </div>
 
                   {/* Stats */}
                   <div className="flex items-center gap-6 mb-4">
@@ -118,12 +126,21 @@ export default function ProfilePage() {
                   {/* Action Buttons */}
                   <div className="flex items-center gap-3">
                     {isOwnProfile ? (
-                      <Link
-                        href="/profile/edit"
-                        className="inline-block px-6 py-2 border border-border rounded-lg text-text-primary hover:bg-surface transition-colors"
-                      >
-                        Edit profile
-                      </Link>
+                      <>
+                        <Link
+                          href="/profile/edit"
+                          className="inline-block px-6 py-2 border border-border rounded-lg text-text-primary hover:bg-surface transition-colors"
+                        >
+                          Edit profile
+                        </Link>
+                        <button
+                          onClick={openSettings}
+                          className="p-2 border border-border rounded-lg text-text-muted hover:text-text-primary hover:bg-surface transition-colors"
+                          aria-label="Settings"
+                        >
+                          <SettingsIcon className="w-5 h-5" />
+                        </button>
+                      </>
                     ) : (
                       <>
                         <button
@@ -291,6 +308,10 @@ function VideoThumbnail({ video }: { video: VideoView }) {
           <PlayIcon className="w-4 h-4" />
           {formatCount(video.viewCount)}
         </span>
+        <span className="flex items-center gap-1">
+          <HeartIcon className="w-4 h-4" />
+          {formatCount(video.likeCount)}
+        </span>
       </div>
     </Link>
   );
@@ -308,6 +329,23 @@ function PlayIcon({ className }: { className?: string }) {
   return (
     <svg className={className} fill="currentColor" viewBox="0 0 24 24">
       <path d="M8 5v14l11-7z" />
+    </svg>
+  );
+}
+
+function HeartIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="currentColor" viewBox="0 0 24 24">
+      <path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z" />
+    </svg>
+  );
+}
+
+function SettingsIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.325.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.241-.438.613-.43.992a7.723 7.723 0 010 .255c-.008.378.137.75.43.991l1.004.827c.424.35.534.955.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.47 6.47 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.281c-.09.543-.56.94-1.11.94h-2.594c-.55 0-1.019-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.991a6.932 6.932 0 010-.255c.007-.38-.138-.751-.43-.992l-1.004-.827a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.086.22-.128.332-.183.582-.495.644-.869l.214-1.28z" />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
     </svg>
   );
 }
