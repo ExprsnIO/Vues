@@ -8,6 +8,7 @@ import { createReadStream, statSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { Readable } from 'stream';
+import { Server as SocketIOServer } from 'socket.io';
 
 import { createOAuthClient } from './auth/oauth-client.js';
 import { xrpcRouter } from './routes/xrpc.js';
@@ -29,6 +30,8 @@ import { caRoutes } from './routes/ca.js';
 import { audioRouter } from './routes/audio.js';
 import configRoutes from './routes/config.js';
 import { createPdsApp, getPdsConfig } from './pds/index.js';
+import { initializeChatWebSocket } from './websocket/chat.js';
+import { initializeEditorCollab } from './websocket/editorCollab.js';
 
 const app = new Hono();
 
@@ -216,13 +219,28 @@ async function main() {
 
   console.log(`Starting Exprsn API server on ${host}:${port}`);
 
-  serve({
+  const server = serve({
     fetch: app.fetch,
     port,
     hostname: host,
   });
 
+  // Initialize Socket.IO
+  const io = new SocketIOServer(server, {
+    cors: {
+      origin: process.env.CORS_ORIGIN || '*',
+      methods: ['GET', 'POST'],
+      credentials: true,
+    },
+    transports: ['websocket', 'polling'],
+  });
+
+  // Initialize WebSocket handlers
+  initializeChatWebSocket(io);
+  initializeEditorCollab(io);
+
   console.log(`Server running at http://${host}:${port}`);
+  console.log('WebSocket namespaces: /chat, /editor-collab');
 }
 
 main().catch((err) => {

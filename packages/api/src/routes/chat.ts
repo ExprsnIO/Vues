@@ -8,6 +8,8 @@ import {
   messages,
   conversationParticipants,
   blocks,
+  messageReactions,
+  userPresence,
 } from '../db/index.js';
 import { eq, desc, and, or, sql } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
@@ -619,3 +621,178 @@ chatRouter.post('/io.exprsn.chat.deleteConversation', authMiddleware, async (c) 
 
   return c.json({ success: true });
 });
+
+// =============================================================================
+// Message Reactions Endpoints
+// =============================================================================
+
+/**
+ * Add a reaction to a message
+ * POST /xrpc/io.exprsn.chat.addReaction
+ */
+chatRouter.post('/io.exprsn.chat.addReaction', authMiddleware, async (c) => {
+  const { messageId, emoji } = await c.req.json();
+  const userDid = c.get('did');
+
+  if (!messageId || !emoji) {
+    throw new HTTPException(400, { message: 'Message ID and emoji are required' });
+  }
+
+  // Validate emoji (basic check for common emojis)
+  if (emoji.length > 10) {
+    throw new HTTPException(400, { message: 'Invalid emoji' });
+  }
+
+  // Find the message and verify access
+  const message = await db.query.messages.findFirst({
+    where: eq(messages.id, messageId),
+  });
+
+  if (!message) {
+    throw new HTTPException(404, { message: 'Message not found' });
+  }
+
+  // Verify user is part of the conversation
+  const conversation = await db.query.conversations.findFirst({
+    where: and(
+      eq(conversations.id, message.conversationId),
+      or(
+        eq(conversations.participant1Did, userDid),
+        eq(conversations.participant2Did, userDid)
+      )
+    ),
+  });
+
+  if (!conversation) {
+    throw new HTTPException(403, { message: 'Not authorized to react to this message' });
+  }
+
+  // Add reaction (or ignore if already exists)
+  const reactionId = nanoid();
+  await db
+    .insert(messageReactions)
+    .values({
+      id: reactionId,
+      messageId,
+      userDid,
+      emoji,
+    })
+    .onConflictDoNothing();
+
+  // Get updated reaction counts for this message
+  const reactions = await getMessageReactions(messageId);
+
+  return c.json({ success: true, reactions });
+});
+
+/**
+ * Remove a reaction from a message
+ * POST /xrpc/io.exprsn.chat.removeReaction
+ */
+chatRouter.post('/io.exprsn.chat.removeReaction', authMiddleware, async (c) => {
+  const { messageId, emoji } = await c.req.json();
+  const userDid = c.get('did');
+
+  if (!messageId || !emoji) {
+    throw new HTTPException(400, { message: 'Message ID and emoji are required' });
+  }
+
+  // Find the message
+  const message = await db.query.messages.findFirst({
+    where: eq(messages.id, messageId),
+  });
+
+  if (!message) {
+    throw new HTTPException(404, { message: 'Message not found' });
+  }
+
+  // Remove the reaction
+  await db
+    .delete(messageReactions)
+    .where(
+      and(
+        eq(messageReactions.messageId, messageId),
+        eq(messageReactions.userDid, userDid),
+        eq(messageReactions.emoji, emoji)
+      )
+    );
+
+  // Get updated reaction counts
+  const reactions = await getMessageReactions(messageId);
+
+  return c.json({ success: true, reactions });
+});
+
+/**
+ * Get reactions for messages in a conversation
+ * GET /xrpc/io.exprsn.chat.getReactions
+ */
+chatRouter.get('/io.exprsn.chat.getReactions', authMiddleware, async (c) => {
+  const messageIds = c.req.query('messageIds')?.split(',') || [];
+  const userDid = c.get('did');
+
+  if (messageIds.length === 0 || messageIds.length > 100) {
+    throw new HTTPException(400, { message: 'Provide 1-100 message IDs' });
+  }
+
+  // Get reactions for all messages
+  const reactionsMap: Record<string, Array<{ emoji: string; count: number; users: string[]; userReacted: boolean }>> = {};
+
+  for (const messageId of messageIds) {
+    reactionsMap[messageId] = await getMessageReactions(messageId, userDid);
+  }
+
+  return c.json({ reactions: reactionsMap });
+});
+
+/**
+ * Get user presence status
+ * GET /xrpc/io.exprsn.chat.getPresence
+ */
+chatRouter.get('/io.exprsn.chat.getPresence', authMiddleware, async (c) => {
+  const userDids = c.req.query('userDids')?.split(',') || [];
+
+  if (userDids.length === 0 || userDids.length > 50) {
+    throw new HTTPException(400, { message: 'Provide 1-50 user DIDs' });
+  }
+
+  const presenceData = await db.query.userPresence.findMany({
+    where: sql`${userPresence.userDid} IN (${sql.raw(userDids.map(d => `'${d}'`).join(','))})`,
+  });
+
+  const presenceMap = new Map(presenceData.map(p => [p.userDid, p]));
+
+  return c.json({
+    presence: userDids.map(did => ({
+      userDid: did,
+      status: presenceMap.get(did)?.status || 'offline',
+      lastSeen: presenceMap.get(did)?.lastSeen?.toISOString() || null,
+    })),
+  });
+});
+
+// Helper function to get reactions for a message
+async function getMessageReactions(
+  messageId: string,
+  currentUserDid?: string
+): Promise<Array<{ emoji: string; count: number; users: string[]; userReacted: boolean }>> {
+  const reactions = await db.query.messageReactions.findMany({
+    where: eq(messageReactions.messageId, messageId),
+  });
+
+  // Group by emoji
+  const emojiGroups = new Map<string, string[]>();
+  for (const reaction of reactions) {
+    if (!emojiGroups.has(reaction.emoji)) {
+      emojiGroups.set(reaction.emoji, []);
+    }
+    emojiGroups.get(reaction.emoji)!.push(reaction.userDid);
+  }
+
+  return Array.from(emojiGroups.entries()).map(([emoji, userDids]) => ({
+    emoji,
+    count: userDids.length,
+    users: userDids.slice(0, 10), // Limit to 10 users per reaction
+    userReacted: currentUserDid ? userDids.includes(currentUserDid) : false,
+  }));
+}

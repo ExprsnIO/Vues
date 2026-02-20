@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import Link from 'next/link';
@@ -8,6 +8,7 @@ import { api, MessageView, ConversationView } from '@/lib/api';
 import { useAuth } from '@/lib/auth-context';
 import { formatDistanceToNow } from '@/lib/utils';
 import toast from 'react-hot-toast';
+import { useChat, useTypingIndicator } from '@/hooks/useChat';
 
 export default function ConversationPage() {
   const params = useParams();
@@ -79,10 +80,71 @@ export default function ConversationPage() {
     },
   });
 
+  // WebSocket chat hook
+  const {
+    isConnected,
+    typingUsers,
+    presence,
+    sendTyping,
+    sendMessage: sendSocketMessage,
+    sendReaction,
+    markAsRead: markReadSocket,
+  } = useChat({
+    conversationId,
+    onNewMessage: (message) => {
+      // Add new message to cache
+      queryClient.setQueryData(['messages', conversationId], (old: any) => {
+        if (!old) return old;
+        const exists = old.messages.some((m: MessageView) => m.id === message.id);
+        if (exists) return old;
+        return {
+          ...old,
+          messages: [message, ...old.messages],
+        };
+      });
+    },
+    onReactionUpdate: (data) => {
+      // Update message reactions in cache
+      queryClient.setQueryData(['messages', conversationId], (old: any) => {
+        if (!old) return old;
+        return {
+          ...old,
+          messages: old.messages.map((m: MessageView) => {
+            if (m.id !== data.messageId) return m;
+            // Update reactions (simplified - real implementation would merge)
+            return m;
+          }),
+        };
+      });
+    },
+  });
+
+  // Typing indicator
+  const { handleTyping, stopTyping } = useTypingIndicator(sendTyping);
+
+  // Get typing users display
+  const typingDisplay = useMemo(() => {
+    const users = Array.from(typingUsers.values());
+    if (users.length === 0) return null;
+    if (users.length === 1) {
+      const u = users[0].user;
+      return `${u.displayName || u.handle} is typing...`;
+    }
+    return `${users.length} people are typing...`;
+  }, [typingUsers]);
+
+  // Get other member presence
+  const otherMemberPresence = useMemo(() => {
+    const otherDid = conversation?.members.find((m) => m.did !== user?.did)?.did;
+    if (!otherDid) return null;
+    return presence.get(otherDid);
+  }, [conversation?.members, presence, user?.did]);
+
   // Mark as read when viewing
   useEffect(() => {
     if (conversation && conversation.unreadCount > 0) {
       markReadMutation.mutate();
+      markReadSocket();
     }
   }, [conversation?.id, conversation?.unreadCount]);
 
@@ -94,8 +156,14 @@ export default function ConversationPage() {
   const handleSend = useCallback(() => {
     const text = messageText.trim();
     if (!text) return;
-    sendMessageMutation.mutate(text);
-  }, [messageText, sendMessageMutation]);
+    stopTyping();
+    sendMessageMutation.mutate(text, {
+      onSuccess: (result) => {
+        // Broadcast via WebSocket
+        sendSocketMessage(result.message);
+      },
+    });
+  }, [messageText, sendMessageMutation, sendSocketMessage, stopTyping]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -105,6 +173,16 @@ export default function ConversationPage() {
       }
     },
     [handleSend]
+  );
+
+  const handleInputChange = useCallback(
+    (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+      setMessageText(e.target.value);
+      if (e.target.value.trim()) {
+        handleTyping();
+      }
+    },
+    [handleTyping]
   );
 
   // Redirect if not logged in
@@ -147,10 +225,21 @@ export default function ConversationPage() {
               )}
             </div>
             <div className="min-w-0">
-              <p className="font-medium text-text-primary truncate">
-                {otherMember.displayName || `@${otherMember.handle}`}
+              <div className="flex items-center gap-2">
+                <p className="font-medium text-text-primary truncate">
+                  {otherMember.displayName || `@${otherMember.handle}`}
+                </p>
+                {otherMemberPresence?.status === 'online' && (
+                  <span className="w-2 h-2 rounded-full bg-green-500" title="Online" />
+                )}
+              </div>
+              <p className="text-sm text-text-muted truncate">
+                {otherMemberPresence?.status === 'online'
+                  ? 'Active now'
+                  : otherMemberPresence?.lastSeen
+                  ? `Last seen ${formatDistanceToNow(new Date(otherMemberPresence.lastSeen))}`
+                  : `@${otherMember.handle}`}
               </p>
-              <p className="text-sm text-text-muted truncate">@{otherMember.handle}</p>
             </div>
           </Link>
         ) : (
@@ -237,6 +326,7 @@ export default function ConversationPage() {
                       key={message.id}
                       message={message}
                       isOwn={message.sender.did === user?.did}
+                      onReaction={(emoji, action) => sendReaction(message.id, emoji, action)}
                     />
                   ))}
                 </div>
@@ -247,13 +337,27 @@ export default function ConversationPage() {
         )}
       </div>
 
+      {/* Typing indicator */}
+      {typingDisplay && (
+        <div className="px-4 py-2 bg-surface border-t border-border">
+          <div className="flex items-center gap-2 text-sm text-text-muted">
+            <span className="flex gap-1">
+              <span className="w-2 h-2 bg-text-muted rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+              <span className="w-2 h-2 bg-text-muted rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+              <span className="w-2 h-2 bg-text-muted rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+            </span>
+            <span>{typingDisplay}</span>
+          </div>
+        </div>
+      )}
+
       {/* Input */}
       <div className="flex-shrink-0 border-t border-border p-4 bg-surface">
         <div className="flex items-end gap-3">
           <div className="flex-1 relative">
             <textarea
               value={messageText}
-              onChange={(e) => setMessageText(e.target.value)}
+              onChange={handleInputChange}
               onKeyDown={handleKeyDown}
               placeholder="Type a message..."
               rows={1}
@@ -274,24 +378,98 @@ export default function ConversationPage() {
   );
 }
 
-function MessageBubble({ message, isOwn }: { message: MessageView; isOwn: boolean }) {
+const QUICK_REACTIONS = ['❤️', '😂', '😮', '😢', '👍', '👎'];
+
+interface MessageBubbleProps {
+  message: MessageView;
+  isOwn: boolean;
+  onReaction: (emoji: string, action: 'add' | 'remove') => void;
+}
+
+function MessageBubble({ message, isOwn, onReaction }: MessageBubbleProps) {
+  const [showReactions, setShowReactions] = useState(false);
+  const [reactions] = useState<Array<{ emoji: string; count: number; userReacted: boolean }>>(
+    (message as any).reactions || []
+  );
+
   return (
-    <div className={`flex ${isOwn ? 'justify-end' : 'justify-start'}`}>
-      <div
-        className={`max-w-[75%] px-4 py-2.5 rounded-2xl ${
-          isOwn
-            ? 'bg-accent text-text-inverse rounded-br-md'
-            : 'bg-surface text-text-primary rounded-bl-md'
-        }`}
-      >
-        <p className="whitespace-pre-wrap break-words">{message.text}</p>
-        <p
-          className={`text-xs mt-1 ${
-            isOwn ? 'text-text-inverse/70' : 'text-text-muted'
+    <div className={`flex ${isOwn ? 'justify-end' : 'justify-start'} group`}>
+      <div className="relative">
+        {/* Reaction picker trigger */}
+        <button
+          onClick={() => setShowReactions(!showReactions)}
+          className={`absolute top-1/2 -translate-y-1/2 ${
+            isOwn ? 'right-full mr-2' : 'left-full ml-2'
+          } p-1 rounded-full bg-surface border border-border opacity-0 group-hover:opacity-100 transition-opacity hover:bg-surface-hover`}
+        >
+          <span className="text-xs">😊</span>
+        </button>
+
+        {/* Reaction picker */}
+        {showReactions && (
+          <>
+            <div className="fixed inset-0 z-10" onClick={() => setShowReactions(false)} />
+            <div
+              className={`absolute z-20 bottom-full mb-2 ${
+                isOwn ? 'right-0' : 'left-0'
+              } bg-surface border border-border rounded-full px-2 py-1 flex gap-1 shadow-lg`}
+            >
+              {QUICK_REACTIONS.map((emoji) => (
+                <button
+                  key={emoji}
+                  onClick={() => {
+                    onReaction(emoji, 'add');
+                    setShowReactions(false);
+                  }}
+                  className="p-1.5 hover:bg-surface-hover rounded-full transition-colors text-lg"
+                >
+                  {emoji}
+                </button>
+              ))}
+            </div>
+          </>
+        )}
+
+        <div
+          className={`max-w-[75%] px-4 py-2.5 rounded-2xl ${
+            isOwn
+              ? 'bg-accent text-text-inverse rounded-br-md'
+              : 'bg-surface text-text-primary rounded-bl-md'
           }`}
         >
-          {formatTime(new Date(message.createdAt))}
-        </p>
+          <p className="whitespace-pre-wrap break-words">{message.text}</p>
+          <p
+            className={`text-xs mt-1 ${
+              isOwn ? 'text-text-inverse/70' : 'text-text-muted'
+            }`}
+          >
+            {formatTime(new Date(message.createdAt))}
+          </p>
+        </div>
+
+        {/* Reactions display */}
+        {reactions.length > 0 && (
+          <div
+            className={`absolute -bottom-3 ${isOwn ? 'right-2' : 'left-2'} flex gap-0.5`}
+          >
+            {reactions.map((reaction) => (
+              <button
+                key={reaction.emoji}
+                onClick={() => onReaction(reaction.emoji, reaction.userReacted ? 'remove' : 'add')}
+                className={`px-1.5 py-0.5 text-xs rounded-full border ${
+                  reaction.userReacted
+                    ? 'bg-accent/20 border-accent'
+                    : 'bg-surface border-border'
+                } hover:bg-surface-hover transition-colors`}
+              >
+                {reaction.emoji}
+                {reaction.count > 1 && (
+                  <span className="ml-0.5 text-text-muted">{reaction.count}</span>
+                )}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

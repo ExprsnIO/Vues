@@ -813,6 +813,68 @@ export const conversationParticipants = pgTable(
   })
 );
 
+// Message reactions
+export const messageReactions = pgTable(
+  'message_reactions',
+  {
+    id: text('id').primaryKey(),
+    messageId: text('message_id')
+      .notNull()
+      .references(() => messages.id, { onDelete: 'cascade' }),
+    userDid: text('user_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    emoji: text('emoji').notNull(), // Unicode emoji or custom emoji ID
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    messageIdx: index('message_reactions_message_idx').on(table.messageId),
+    userIdx: index('message_reactions_user_idx').on(table.userDid),
+    uniqueReaction: uniqueIndex('message_reactions_unique_idx').on(
+      table.messageId,
+      table.userDid,
+      table.emoji
+    ),
+  })
+);
+
+// Message attachments (images, files, etc.)
+export const messageAttachments = pgTable(
+  'message_attachments',
+  {
+    id: text('id').primaryKey(),
+    messageId: text('message_id')
+      .notNull()
+      .references(() => messages.id, { onDelete: 'cascade' }),
+    type: text('type').notNull(), // 'image' | 'video' | 'audio' | 'file'
+    url: text('url').notNull(),
+    mimeType: text('mime_type'),
+    fileName: text('file_name'),
+    fileSize: integer('file_size'),
+    width: integer('width'),
+    height: integer('height'),
+    duration: real('duration'), // For audio/video
+    thumbnailUrl: text('thumbnail_url'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    messageIdx: index('message_attachments_message_idx').on(table.messageId),
+  })
+);
+
+// User presence tracking (online/offline status)
+export const userPresence = pgTable(
+  'user_presence',
+  {
+    userDid: text('user_did')
+      .primaryKey()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    status: text('status').notNull().default('offline'), // 'online' | 'away' | 'offline'
+    lastSeen: timestamp('last_seen').defaultNow().notNull(),
+    currentConversationId: text('current_conversation_id'),
+  }
+);
+
 // ============================================
 // Graph/Lists Tables
 // ============================================
@@ -1102,6 +1164,12 @@ export type Message = typeof messages.$inferSelect;
 export type NewMessage = typeof messages.$inferInsert;
 export type ConversationParticipant = typeof conversationParticipants.$inferSelect;
 export type NewConversationParticipant = typeof conversationParticipants.$inferInsert;
+export type MessageReaction = typeof messageReactions.$inferSelect;
+export type NewMessageReaction = typeof messageReactions.$inferInsert;
+export type MessageAttachment = typeof messageAttachments.$inferSelect;
+export type NewMessageAttachment = typeof messageAttachments.$inferInsert;
+export type UserPresence = typeof userPresence.$inferSelect;
+export type NewUserPresence = typeof userPresence.$inferInsert;
 export type NotificationSubscriptionRow = typeof notificationSubscriptions.$inferSelect;
 export type NewNotificationSubscriptionRow = typeof notificationSubscriptions.$inferInsert;
 export type NotificationRow = typeof notifications.$inferSelect;
