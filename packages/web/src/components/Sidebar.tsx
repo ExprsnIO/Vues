@@ -163,7 +163,7 @@ export function Sidebar() {
           {/* Upload button */}
           <Link
             href="/upload"
-            className="flex items-center gap-3 px-4 py-3 rounded-lg bg-gradient-to-r from-primary-500 to-primary-600 text-white hover:from-primary-600 hover:to-primary-700 transition-colors mt-4"
+            className="flex items-center gap-3 px-4 py-3 rounded-lg bg-accent text-text-inverse hover:bg-accent-hover transition-colors mt-4"
           >
             <PlusIcon className="w-6 h-6" />
             <span className="font-medium">Upload</span>

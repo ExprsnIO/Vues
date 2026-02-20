@@ -1113,3 +1113,254 @@ export type NewDuet = typeof duets.$inferInsert;
 // User preferences type exports
 export type UserPreference = typeof userPreferences.$inferSelect;
 export type NewUserPreference = typeof userPreferences.$inferInsert;
+
+// ============================================
+// Organization Tables
+// ============================================
+
+// Organizations - business/team/nonprofit entities
+export const organizations = pgTable(
+  'organizations',
+  {
+    id: text('id').primaryKey(),
+    ownerDid: text('owner_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    type: text('type').notNull(), // 'team' | 'enterprise' | 'nonprofit' | 'business'
+    description: text('description'),
+    website: text('website'),
+    avatar: text('avatar'),
+    verified: boolean('verified').default(false).notNull(),
+    memberCount: integer('member_count').default(1).notNull(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    ownerIdx: index('organizations_owner_idx').on(table.ownerDid),
+    typeIdx: index('organizations_type_idx').on(table.type),
+    nameIdx: index('organizations_name_idx').on(table.name),
+  })
+);
+
+// Organization members - users belonging to organizations
+export const organizationMembers = pgTable(
+  'organization_members',
+  {
+    id: text('id').primaryKey(),
+    organizationId: text('organization_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    userDid: text('user_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    role: text('role').notNull(), // 'owner' | 'admin' | 'member'
+    permissions: jsonb('permissions').$type<string[]>().default([]), // ['bulk_import', 'manage_members', 'edit_settings']
+    invitedBy: text('invited_by'),
+    joinedAt: timestamp('joined_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    orgIdx: index('org_members_org_idx').on(table.organizationId),
+    userIdx: index('org_members_user_idx').on(table.userDid),
+    roleIdx: index('org_members_role_idx').on(table.role),
+    uniqueMember: uniqueIndex('org_members_unique_idx').on(table.organizationId, table.userDid),
+  })
+);
+
+// Bulk import jobs - tracking file imports for organizations
+export const bulkImportJobs = pgTable(
+  'bulk_import_jobs',
+  {
+    id: text('id').primaryKey(),
+    organizationId: text('organization_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    createdBy: text('created_by')
+      .notNull()
+      .references(() => users.did),
+    fileType: text('file_type').notNull(), // 'xlsx' | 'csv' | 'sqlite'
+    fileName: text('file_name').notNull(),
+    fileSize: integer('file_size'),
+    status: text('status').notNull(), // 'pending' | 'validating' | 'processing' | 'completed' | 'failed' | 'cancelled'
+    totalRows: integer('total_rows'),
+    processedRows: integer('processed_rows').default(0).notNull(),
+    successCount: integer('success_count').default(0).notNull(),
+    errorCount: integer('error_count').default(0).notNull(),
+    errors: jsonb('errors').$type<{ row: number; field?: string; error: string }[]>(),
+    fieldMapping: jsonb('field_mapping').$type<Record<string, string>>(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    startedAt: timestamp('started_at'),
+    completedAt: timestamp('completed_at'),
+  },
+  (table) => ({
+    orgIdx: index('bulk_import_jobs_org_idx').on(table.organizationId),
+    createdByIdx: index('bulk_import_jobs_created_by_idx').on(table.createdBy),
+    statusIdx: index('bulk_import_jobs_status_idx').on(table.status),
+    createdIdx: index('bulk_import_jobs_created_idx').on(table.createdAt),
+  })
+);
+
+// ============================================
+// Live Streaming Tables
+// ============================================
+
+// Live streams - active and past live broadcasts
+export const liveStreams = pgTable(
+  'live_streams',
+  {
+    id: text('id').primaryKey(),
+    userDid: text('user_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    title: text('title').notNull(),
+    description: text('description'),
+    status: text('status').notNull(), // 'scheduled' | 'live' | 'ended'
+    streamKey: text('stream_key').notNull(),
+    ingestUrl: text('ingest_url'),
+    playbackUrl: text('playback_url'),
+    thumbnailUrl: text('thumbnail_url'),
+    viewerCount: integer('viewer_count').default(0).notNull(),
+    peakViewers: integer('peak_viewers').default(0).notNull(),
+    totalViews: integer('total_views').default(0).notNull(),
+    provider: text('provider').notNull(), // 'srs' | 'aws_ivs' | 'custom'
+    providerStreamId: text('provider_stream_id'),
+    providerChannelArn: text('provider_channel_arn'),
+    category: text('category'),
+    tags: jsonb('tags').$type<string[]>().default([]),
+    visibility: text('visibility').default('public').notNull(), // 'public' | 'followers' | 'private'
+    chatEnabled: boolean('chat_enabled').default(true).notNull(),
+    recordingEnabled: boolean('recording_enabled').default(true).notNull(),
+    recordingUrl: text('recording_url'),
+    scheduledAt: timestamp('scheduled_at'),
+    startedAt: timestamp('started_at'),
+    endedAt: timestamp('ended_at'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    userIdx: index('live_streams_user_idx').on(table.userDid),
+    statusIdx: index('live_streams_status_idx').on(table.status),
+    providerIdx: index('live_streams_provider_idx').on(table.provider),
+    categoryIdx: index('live_streams_category_idx').on(table.category),
+    visibilityIdx: index('live_streams_visibility_idx').on(table.visibility),
+    scheduledIdx: index('live_streams_scheduled_idx').on(table.scheduledAt),
+    createdIdx: index('live_streams_created_idx').on(table.createdAt),
+    streamKeyIdx: uniqueIndex('live_streams_stream_key_idx').on(table.streamKey),
+  })
+);
+
+// Stream chat messages
+export const streamChat = pgTable(
+  'stream_chat',
+  {
+    id: text('id').primaryKey(),
+    streamId: text('stream_id')
+      .notNull()
+      .references(() => liveStreams.id, { onDelete: 'cascade' }),
+    userDid: text('user_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    message: text('message').notNull(),
+    messageType: text('message_type').default('text').notNull(), // 'text' | 'emote' | 'system' | 'donation'
+    metadata: jsonb('metadata').$type<Record<string, unknown>>(),
+    isDeleted: boolean('is_deleted').default(false).notNull(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    streamIdx: index('stream_chat_stream_idx').on(table.streamId),
+    userIdx: index('stream_chat_user_idx').on(table.userDid),
+    createdIdx: index('stream_chat_created_idx').on(table.createdAt),
+    streamCreatedIdx: index('stream_chat_stream_created_idx').on(table.streamId, table.createdAt),
+  })
+);
+
+// Stream moderators - users who can moderate a stream's chat
+export const streamModerators = pgTable(
+  'stream_moderators',
+  {
+    id: text('id').primaryKey(),
+    streamId: text('stream_id')
+      .notNull()
+      .references(() => liveStreams.id, { onDelete: 'cascade' }),
+    userDid: text('user_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    addedBy: text('added_by')
+      .notNull()
+      .references(() => users.did),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    streamIdx: index('stream_moderators_stream_idx').on(table.streamId),
+    userIdx: index('stream_moderators_user_idx').on(table.userDid),
+    uniqueModerator: uniqueIndex('stream_moderators_unique_idx').on(table.streamId, table.userDid),
+  })
+);
+
+// Stream banned users - users banned from a stream's chat
+export const streamBannedUsers = pgTable(
+  'stream_banned_users',
+  {
+    id: text('id').primaryKey(),
+    streamId: text('stream_id')
+      .notNull()
+      .references(() => liveStreams.id, { onDelete: 'cascade' }),
+    userDid: text('user_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    reason: text('reason'),
+    bannedBy: text('banned_by')
+      .notNull()
+      .references(() => users.did),
+    expiresAt: timestamp('expires_at'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    streamIdx: index('stream_banned_users_stream_idx').on(table.streamId),
+    userIdx: index('stream_banned_users_user_idx').on(table.userDid),
+    uniqueBan: uniqueIndex('stream_banned_users_unique_idx').on(table.streamId, table.userDid),
+    expiresIdx: index('stream_banned_users_expires_idx').on(table.expiresAt),
+  })
+);
+
+// Stream viewers - tracking who is watching
+export const streamViewers = pgTable(
+  'stream_viewers',
+  {
+    id: text('id').primaryKey(),
+    streamId: text('stream_id')
+      .notNull()
+      .references(() => liveStreams.id, { onDelete: 'cascade' }),
+    userDid: text('user_did').references(() => users.did, { onDelete: 'cascade' }),
+    sessionId: text('session_id').notNull(), // For anonymous viewers
+    watchDuration: integer('watch_duration').default(0).notNull(), // seconds
+    joinedAt: timestamp('joined_at').defaultNow().notNull(),
+    leftAt: timestamp('left_at'),
+  },
+  (table) => ({
+    streamIdx: index('stream_viewers_stream_idx').on(table.streamId),
+    userIdx: index('stream_viewers_user_idx').on(table.userDid),
+    sessionIdx: index('stream_viewers_session_idx').on(table.sessionId),
+    joinedIdx: index('stream_viewers_joined_idx').on(table.joinedAt),
+  })
+);
+
+// Organization type exports
+export type Organization = typeof organizations.$inferSelect;
+export type NewOrganization = typeof organizations.$inferInsert;
+export type OrganizationMember = typeof organizationMembers.$inferSelect;
+export type NewOrganizationMember = typeof organizationMembers.$inferInsert;
+export type BulkImportJob = typeof bulkImportJobs.$inferSelect;
+export type NewBulkImportJob = typeof bulkImportJobs.$inferInsert;
+
+// Live streaming type exports
+export type LiveStream = typeof liveStreams.$inferSelect;
+export type NewLiveStream = typeof liveStreams.$inferInsert;
+export type StreamChatMessage = typeof streamChat.$inferSelect;
+export type NewStreamChatMessage = typeof streamChat.$inferInsert;
+export type StreamModerator = typeof streamModerators.$inferSelect;
+export type NewStreamModerator = typeof streamModerators.$inferInsert;
+export type StreamBannedUser = typeof streamBannedUsers.$inferSelect;
+export type NewStreamBannedUser = typeof streamBannedUsers.$inferInsert;
+export type StreamViewer = typeof streamViewers.$inferSelect;
+export type NewStreamViewer = typeof streamViewers.$inferInsert;

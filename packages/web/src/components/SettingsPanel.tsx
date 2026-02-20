@@ -15,6 +15,7 @@ import { SecuritySettings } from '@/components/settings/SecuritySettings';
 import { BlockedMutedSettings } from '@/components/settings/BlockedMutedSettings';
 import { AccountSettings } from '@/components/settings/AccountSettings';
 import type { UserSettings, UserSettingsUpdate } from '@exprsn/shared';
+import { DEFAULT_SETTINGS } from '@exprsn/shared';
 import { cn } from '@/lib/utils';
 
 interface SettingsPanelProps {
@@ -81,7 +82,19 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
     updateSettingsMutation.mutate(update);
   };
 
-  const settings = settingsData?.settings;
+  // Merge with defaults to ensure all fields exist
+  const settings: UserSettings | undefined = settingsData?.settings
+    ? {
+        ...DEFAULT_SETTINGS,
+        ...settingsData.settings,
+        accessibility: { ...DEFAULT_SETTINGS.accessibility, ...settingsData.settings.accessibility },
+        playback: { ...DEFAULT_SETTINGS.playback, ...settingsData.settings.playback },
+        notifications: { ...DEFAULT_SETTINGS.notifications, ...settingsData.settings.notifications },
+        privacy: { ...DEFAULT_SETTINGS.privacy, ...settingsData.settings.privacy },
+        content: { ...DEFAULT_SETTINGS.content, ...settingsData.settings.content },
+        layout: { ...DEFAULT_SETTINGS.layout, ...settingsData.settings.layout },
+      }
+    : undefined;
 
   if (!user) return null;
 
@@ -98,9 +111,9 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
       {/* Panel */}
       <aside
         className={cn(
-          'fixed top-0 h-screen w-80 bg-background border-r border-border flex flex-col z-50 overflow-y-auto',
+          'fixed top-0 left-0 h-screen w-96 bg-background border-r border-border flex flex-col z-50 overflow-y-auto',
           'transition-transform duration-300 ease-in-out',
-          isOpen ? 'translate-x-0 lg:translate-x-60' : '-translate-x-full lg:-translate-x-full'
+          isOpen ? 'translate-x-0 lg:translate-x-60' : '-translate-x-full'
         )}
       >
         {/* Header */}

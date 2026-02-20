@@ -22,6 +22,8 @@ import { feedRouter } from './routes/feed.js';
 import { graphRouter } from './routes/graph.js';
 import { videoExtendedRouter } from './routes/video-extended.js';
 import { authRouter } from './routes/auth.js';
+import { organizationRoutes } from './routes/organization.js';
+import { liveRoutes } from './routes/live.js';
 import { createPdsApp, getPdsConfig } from './pds/index.js';
 
 const app = new Hono();
@@ -146,6 +148,8 @@ app.route('/xrpc', notificationRouter);
 app.route('/xrpc', feedRouter);
 app.route('/xrpc', graphRouter);
 app.route('/xrpc', videoExtendedRouter);
+app.route('/xrpc', organizationRoutes);
+app.route('/xrpc', liveRoutes);
 // Admin routes last (has wildcard middleware)
 app.route('/xrpc', adminRouter);
 app.route('/oauth', oauthRouter);

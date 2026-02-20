@@ -4,6 +4,7 @@ import { useCallback } from 'react';
 import type { ThemeId, ColorMode, UserSettingsUpdate } from '@exprsn/shared';
 import { SettingsRow, Select } from './SettingsSection';
 import { cn } from '@/lib/utils';
+import { useSettingsStore } from '@/stores/settings-store';
 
 interface ThemeSettingsProps {
   themeId: ThemeId;
@@ -27,18 +28,28 @@ const COLOR_MODES: { value: ColorMode; label: string }[] = [
 ];
 
 export function ThemeSettings({ themeId, colorMode, onUpdate, isUpdating }: ThemeSettingsProps) {
+  // Use Zustand store to immediately update the UI
+  const setTheme = useSettingsStore((state) => state.setTheme);
+  const setColorMode = useSettingsStore((state) => state.setColorMode);
+
   const handleThemeChange = useCallback(
     (newThemeId: ThemeId) => {
+      // Update Zustand store immediately (also syncs to server)
+      setTheme(newThemeId);
+      // Also call the parent callback to update React Query cache
       onUpdate({ themeId: newThemeId });
     },
-    [onUpdate]
+    [setTheme, onUpdate]
   );
 
   const handleColorModeChange = useCallback(
     (newMode: string) => {
+      // Update Zustand store immediately (also syncs to server)
+      setColorMode(newMode as ColorMode);
+      // Also call the parent callback to update React Query cache
       onUpdate({ colorMode: newMode as ColorMode });
     },
-    [onUpdate]
+    [setColorMode, onUpdate]
   );
 
   return (

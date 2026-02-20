@@ -1439,6 +1439,306 @@ class ApiClient {
       body: JSON.stringify({ preferences }),
     });
   }
+
+  // =============================================================================
+  // Organization API
+  // =============================================================================
+
+  async createOrganization(data: {
+    name: string;
+    type: 'team' | 'enterprise' | 'nonprofit' | 'business';
+    website?: string;
+  }): Promise<{ organization: OrganizationView }> {
+    return this.fetch('/xrpc/io.exprsn.org.create', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async getOrganization(orgId: string): Promise<{ organization: OrganizationView }> {
+    const params = new URLSearchParams({ id: orgId });
+    return this.fetch(`/xrpc/io.exprsn.org.get?${params}`);
+  }
+
+  async updateOrganization(
+    orgId: string,
+    data: { name?: string; website?: string }
+  ): Promise<{ organization: OrganizationView }> {
+    return this.fetch('/xrpc/io.exprsn.org.update', {
+      method: 'POST',
+      body: JSON.stringify({ id: orgId, ...data }),
+    });
+  }
+
+  async getMyOrganizations(): Promise<{ organizations: OrganizationView[] }> {
+    return this.fetch('/xrpc/io.exprsn.org.list');
+  }
+
+  async getOrganizationMembers(
+    orgId: string,
+    options: { cursor?: string; limit?: number } = {}
+  ): Promise<{ members: OrganizationMemberView[]; cursor?: string }> {
+    const { cursor, limit = 50 } = options;
+    const params = new URLSearchParams({ id: orgId, limit: String(limit) });
+    if (cursor) params.set('cursor', cursor);
+    return this.fetch(`/xrpc/io.exprsn.org.members.list?${params}`);
+  }
+
+  async inviteOrganizationMember(
+    orgId: string,
+    data: { email?: string; did?: string; role?: 'admin' | 'member' }
+  ): Promise<{ member: OrganizationMemberView }> {
+    return this.fetch('/xrpc/io.exprsn.org.members.invite', {
+      method: 'POST',
+      body: JSON.stringify({ organizationId: orgId, ...data }),
+    });
+  }
+
+  async updateMemberRole(
+    orgId: string,
+    memberId: string,
+    role: 'admin' | 'member'
+  ): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.org.members.updateRole', {
+      method: 'POST',
+      body: JSON.stringify({ organizationId: orgId, memberId, role }),
+    });
+  }
+
+  async removeMember(orgId: string, memberId: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.org.members.remove', {
+      method: 'POST',
+      body: JSON.stringify({ organizationId: orgId, memberId }),
+    });
+  }
+
+  // Bulk Import
+  async uploadBulkImport(
+    orgId: string,
+    file: File
+  ): Promise<{ job: BulkImportJobView }> {
+    const formData = new FormData();
+    formData.append('organizationId', orgId);
+    formData.append('file', file);
+
+    const headers: HeadersInit = {};
+    if (this.sessionToken) {
+      headers['Authorization'] = `Bearer ${this.sessionToken}`;
+    }
+    if (this.devAdminMode) {
+      headers['X-Dev-Admin'] = 'true';
+    }
+
+    const response = await fetch(`${this.baseUrl}/xrpc/io.exprsn.org.import.upload`, {
+      method: 'POST',
+      headers,
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.message || `API error: ${response.status}`);
+    }
+
+    return response.json();
+  }
+
+  async getBulkImportStatus(jobId: string): Promise<{ job: BulkImportJobView }> {
+    const params = new URLSearchParams({ jobId });
+    return this.fetch(`/xrpc/io.exprsn.org.import.status?${params}`);
+  }
+
+  async listBulkImportJobs(
+    orgId: string,
+    options: { cursor?: string; limit?: number } = {}
+  ): Promise<{ jobs: BulkImportJobView[]; cursor?: string }> {
+    const { cursor, limit = 20 } = options;
+    const params = new URLSearchParams({ organizationId: orgId, limit: String(limit) });
+    if (cursor) params.set('cursor', cursor);
+    return this.fetch(`/xrpc/io.exprsn.org.import.list?${params}`);
+  }
+
+  async downloadImportTemplate(format: 'csv' | 'xlsx'): Promise<Blob> {
+    const params = new URLSearchParams({ format });
+    const headers: HeadersInit = {};
+    if (this.sessionToken) {
+      headers['Authorization'] = `Bearer ${this.sessionToken}`;
+    }
+
+    const response = await fetch(
+      `${this.baseUrl}/xrpc/io.exprsn.org.import.template?${params}`,
+      { headers }
+    );
+
+    if (!response.ok) {
+      throw new Error(`Failed to download template: ${response.status}`);
+    }
+
+    return response.blob();
+  }
+
+  async cancelBulkImport(jobId: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.org.import.cancel', {
+      method: 'POST',
+      body: JSON.stringify({ jobId }),
+    });
+  }
+
+  // =============================================================================
+  // Live Streaming API
+  // =============================================================================
+
+  async createStream(data: {
+    title: string;
+    description?: string;
+    category?: string;
+    tags?: string[];
+    visibility?: 'public' | 'followers' | 'private';
+    scheduledAt?: string;
+  }): Promise<{ stream: LiveStreamView }> {
+    return this.fetch('/xrpc/io.exprsn.live.createStream', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async getStream(streamId: string): Promise<{ stream: LiveStreamView }> {
+    const params = new URLSearchParams({ id: streamId });
+    return this.fetch(`/xrpc/io.exprsn.live.getStream?${params}`);
+  }
+
+  async startStream(streamId: string): Promise<{ stream: LiveStreamView }> {
+    return this.fetch('/xrpc/io.exprsn.live.startStream', {
+      method: 'POST',
+      body: JSON.stringify({ id: streamId }),
+    });
+  }
+
+  async endStream(streamId: string): Promise<{ stream: LiveStreamView }> {
+    return this.fetch('/xrpc/io.exprsn.live.endStream', {
+      method: 'POST',
+      body: JSON.stringify({ id: streamId }),
+    });
+  }
+
+  async updateStream(
+    streamId: string,
+    data: { title?: string; description?: string; category?: string; tags?: string[] }
+  ): Promise<{ stream: LiveStreamView }> {
+    return this.fetch('/xrpc/io.exprsn.live.updateStream', {
+      method: 'POST',
+      body: JSON.stringify({ id: streamId, ...data }),
+    });
+  }
+
+  async deleteStream(streamId: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.live.deleteStream', {
+      method: 'POST',
+      body: JSON.stringify({ id: streamId }),
+    });
+  }
+
+  async getLiveNow(
+    options: { category?: string; cursor?: string; limit?: number } = {}
+  ): Promise<{ streams: LiveStreamSummary[]; cursor?: string }> {
+    const { category, cursor, limit = 20 } = options;
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (category) params.set('category', category);
+    if (cursor) params.set('cursor', cursor);
+    return this.fetch(`/xrpc/io.exprsn.live.getLiveNow?${params}`);
+  }
+
+  async getScheduledStreams(
+    limit = 20
+  ): Promise<{ streams: LiveStreamSummary[] }> {
+    const params = new URLSearchParams({ limit: String(limit) });
+    return this.fetch(`/xrpc/io.exprsn.live.getScheduled?${params}`);
+  }
+
+  async getUserStreams(
+    userDid: string,
+    options: { status?: string; cursor?: string; limit?: number } = {}
+  ): Promise<{ streams: LiveStreamSummary[]; cursor?: string }> {
+    const { status, cursor, limit = 20 } = options;
+    const params = new URLSearchParams({ did: userDid, limit: String(limit) });
+    if (status) params.set('status', status);
+    if (cursor) params.set('cursor', cursor);
+    return this.fetch(`/xrpc/io.exprsn.live.getUserStreams?${params}`);
+  }
+
+  // Live Chat
+  async getStreamChat(
+    streamId: string,
+    options: { before?: string; limit?: number } = {}
+  ): Promise<{ messages: LiveChatMessage[] }> {
+    const { before, limit = 50 } = options;
+    const params = new URLSearchParams({ streamId, limit: String(limit) });
+    if (before) params.set('before', before);
+    return this.fetch(`/xrpc/io.exprsn.live.chat.messages?${params}`);
+  }
+
+  async sendStreamChat(streamId: string, message: string): Promise<{ message: LiveChatMessage }> {
+    return this.fetch('/xrpc/io.exprsn.live.chat.send', {
+      method: 'POST',
+      body: JSON.stringify({ streamId, message }),
+    });
+  }
+
+  async deleteStreamChat(streamId: string, messageId: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.live.chat.delete', {
+      method: 'POST',
+      body: JSON.stringify({ streamId, messageId }),
+    });
+  }
+
+  // Stream Moderation
+  async addStreamModerator(streamId: string, userDid: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.live.moderators.add', {
+      method: 'POST',
+      body: JSON.stringify({ streamId, did: userDid }),
+    });
+  }
+
+  async removeStreamModerator(streamId: string, userDid: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.live.moderators.remove', {
+      method: 'POST',
+      body: JSON.stringify({ streamId, did: userDid }),
+    });
+  }
+
+  async banFromStream(
+    streamId: string,
+    userDid: string,
+    reason?: string,
+    duration?: number
+  ): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.live.ban', {
+      method: 'POST',
+      body: JSON.stringify({ streamId, did: userDid, reason, duration }),
+    });
+  }
+
+  async unbanFromStream(streamId: string, userDid: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.live.unban', {
+      method: 'POST',
+      body: JSON.stringify({ streamId, did: userDid }),
+    });
+  }
+
+  // Viewer tracking
+  async joinStream(streamId: string): Promise<{ viewerCount: number }> {
+    return this.fetch('/xrpc/io.exprsn.live.viewer.join', {
+      method: 'POST',
+      body: JSON.stringify({ streamId }),
+    });
+  }
+
+  async leaveStream(streamId: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.live.viewer.leave', {
+      method: 'POST',
+      body: JSON.stringify({ streamId }),
+    });
+  }
 }
 
 // Profile types
@@ -2038,6 +2338,122 @@ export interface MutedWord {
 export interface HiddenPostsPref extends PreferenceItem {
   $type: 'io.exprsn.actor.getPreferences#hiddenPostsPref';
   items: string[];
+}
+
+// Organization types
+export interface OrganizationView {
+  id: string;
+  name: string;
+  type: 'team' | 'enterprise' | 'nonprofit' | 'business';
+  website?: string;
+  verified: boolean;
+  owner: {
+    did: string;
+    handle: string;
+    displayName?: string;
+    avatar?: string;
+  };
+  memberCount: number;
+  createdAt: string;
+  viewer?: {
+    role: 'owner' | 'admin' | 'member';
+    permissions: string[];
+  };
+}
+
+export interface OrganizationMemberView {
+  id: string;
+  user: {
+    did: string;
+    handle: string;
+    displayName?: string;
+    avatar?: string;
+  };
+  role: 'owner' | 'admin' | 'member';
+  permissions: string[];
+  joinedAt: string;
+}
+
+export interface BulkImportJobView {
+  id: string;
+  organizationId: string;
+  fileName: string;
+  fileType: 'xlsx' | 'csv' | 'sqlite';
+  status: 'pending' | 'processing' | 'completed' | 'failed' | 'cancelled';
+  totalRows: number;
+  processedRows: number;
+  successCount: number;
+  errorCount: number;
+  errors?: Array<{ row: number; field?: string; error: string }>;
+  createdAt: string;
+  completedAt?: string;
+  createdBy: {
+    did: string;
+    handle: string;
+    displayName?: string;
+  };
+}
+
+// Live Streaming types
+export interface LiveStreamView {
+  id: string;
+  title: string;
+  description?: string;
+  category?: string;
+  tags?: string[];
+  status: 'scheduled' | 'live' | 'ended';
+  visibility: 'public' | 'followers' | 'private';
+  streamKey: string;
+  ingestUrl: string;
+  playbackUrl?: string;
+  thumbnailUrl?: string;
+  viewerCount: number;
+  peakViewers: number;
+  streamer: {
+    did: string;
+    handle: string;
+    displayName?: string;
+    avatar?: string;
+  };
+  scheduledAt?: string;
+  startedAt?: string;
+  endedAt?: string;
+  createdAt: string;
+  viewer?: {
+    isModerator: boolean;
+    isBanned: boolean;
+  };
+}
+
+export interface LiveStreamSummary {
+  id: string;
+  title: string;
+  category?: string;
+  tags?: string[];
+  viewerCount: number;
+  thumbnailUrl?: string;
+  startedAt?: string;
+  scheduledAt?: string;
+  streamer: {
+    did: string;
+    handle: string;
+    displayName?: string;
+    avatar?: string;
+  };
+}
+
+export interface LiveChatMessage {
+  id: string;
+  message: string;
+  type: 'chat' | 'system' | 'emote';
+  user: {
+    did: string;
+    handle: string;
+    displayName?: string;
+    avatar?: string;
+  };
+  isModerator: boolean;
+  createdAt: string;
 }
 
 export const api = new ApiClient(API_BASE);
