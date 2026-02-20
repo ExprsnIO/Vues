@@ -11,7 +11,8 @@ import type {
   ExecutionResult,
   PortDataType,
 } from './NodeTypes';
-import { convertValue, getDefaultValue } from './NodeTypes';
+import { convertValue, getDefaultValue, arePortsCompatible } from './NodeTypes';
+export { arePortsCompatible } from './NodeTypes';
 import { topologicalSort, getAffectedNodes } from './TopologicalSort';
 import { wouldCreateCycle } from './CycleDetector';
 

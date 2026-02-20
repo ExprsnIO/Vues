@@ -17,6 +17,13 @@ import type {
   AnimatableProperty,
 } from './types';
 import { getEasingFunction, EASING_CATEGORIES, lerp } from './easing';
+import { NodeEditor } from './nodes/ui/NodeEditor';
+import type { NodeInstance, NodeConnection } from './nodes/engine/NodeTypes';
+import { VisualEffectsPanel } from './effects/VisualEffectsPanel';
+import type { EffectInstance } from './effects';
+import { WaveformTrack } from './audio/WaveformTrack';
+import { useEditorCollaboration } from '@/hooks/useEditorCollaboration';
+import { PresenceIndicators, CollaboratorCursors } from '@/components/collaboration';
 
 interface LoopEditorProps {
   originalVideo: {
@@ -35,6 +42,12 @@ interface LoopEditorProps {
   onClipChange: (start: number, end: number) => void;
   onPublish: (data: LoopPublishData) => void;
   onCancel: () => void;
+  // Collaboration
+  projectId?: string;
+  userDid?: string;
+  userName?: string;
+  userAvatar?: string;
+  enableCollaboration?: boolean;
 }
 
 export interface LoopPublishData {
@@ -47,9 +60,14 @@ export interface LoopPublishData {
   captions: Caption[];
   audioTracks: AudioTrack[];
   transition: Transition | null;
+  visualEffects?: EffectInstance[];
+  nodeGraph?: {
+    nodes: NodeInstance[];
+    connections: NodeConnection[];
+  };
 }
 
-type EditorTab = 'clip' | 'response' | 'text' | 'captions' | 'music' | 'effects' | 'preview';
+type EditorTab = 'clip' | 'response' | 'text' | 'captions' | 'music' | 'effects' | 'nodes' | 'preview';
 
 const MAX_CLIP_DURATION = 5;
 const CANVAS_WIDTH = 1080;
@@ -86,8 +104,59 @@ export function LoopEditor({
   onClipChange,
   onPublish,
   onCancel,
+  projectId,
+  userDid,
+  userName,
+  userAvatar,
+  enableCollaboration = false,
 }: LoopEditorProps) {
   const [activeTab, setActiveTab] = useState<EditorTab>('clip');
+
+  // Collaboration
+  const {
+    state: collabState,
+    connect: collabConnect,
+    joinProject,
+    updateCursor,
+    updateActiveView,
+  } = useEditorCollaboration();
+
+  // Connect to collaboration server if enabled
+  useEffect(() => {
+    if (enableCollaboration && projectId && userDid && userName) {
+      const token = localStorage.getItem('session') || '';
+      collabConnect({
+        token,
+        userDid,
+        userName,
+        userAvatar,
+      });
+    }
+  }, [enableCollaboration, projectId, userDid, userName, userAvatar, collabConnect]);
+
+  // Join project when connected
+  useEffect(() => {
+    if (collabState.isConnected && projectId) {
+      joinProject(projectId);
+    }
+  }, [collabState.isConnected, projectId, joinProject]);
+
+  // Update active view when tab changes
+  useEffect(() => {
+    if (collabState.isConnected) {
+      const viewMap: Record<EditorTab, 'timeline' | 'canvas' | 'inspector' | 'library'> = {
+        clip: 'timeline',
+        response: 'canvas',
+        text: 'inspector',
+        captions: 'inspector',
+        music: 'library',
+        effects: 'inspector',
+        nodes: 'canvas',
+        preview: 'canvas',
+      };
+      updateActiveView(viewMap[activeTab]);
+    }
+  }, [activeTab, collabState.isConnected, updateActiveView]);
   const [responseVideo, setResponseVideo] = useState<File | null>(null);
   const [responseVideoUrl, setResponseVideoUrl] = useState<string | null>(null);
   const [caption, setCaption] = useState('');
@@ -114,6 +183,13 @@ export function LoopEditor({
 
   // Transition between clip and response
   const [transition, setTransition] = useState<Transition | null>(null);
+
+  // Node graph for effect pipelines
+  const [graphNodes, setGraphNodes] = useState<NodeInstance[]>([]);
+  const [graphConnections, setGraphConnections] = useState<NodeConnection[]>([]);
+
+  // Visual effects
+  const [visualEffects, setVisualEffects] = useState<EffectInstance[]>([]);
 
   // Playback state
   const [isPlaying, setIsPlaying] = useState(false);
@@ -552,6 +628,12 @@ export function LoopEditor({
     return lerp(prev.value as number, next.value as number, easedProgress);
   }
 
+  // Handle node graph changes
+  const handleNodeGraphChange = useCallback((nodes: NodeInstance[], connections: NodeConnection[]) => {
+    setGraphNodes(nodes);
+    setGraphConnections(connections);
+  }, []);
+
   // Handle publish
   const handlePublish = useCallback(() => {
     onPublish({
@@ -564,8 +646,13 @@ export function LoopEditor({
       captions,
       audioTracks,
       transition,
+      visualEffects: visualEffects.length > 0 ? visualEffects : undefined,
+      nodeGraph: graphNodes.length > 0 ? {
+        nodes: graphNodes,
+        connections: graphConnections,
+      } : undefined,
     });
-  }, [originalVideo.uri, clipStart, clipEnd, responseVideo, caption, textOverlays, captions, audioTracks, transition, onPublish]);
+  }, [originalVideo.uri, clipStart, clipEnd, responseVideo, caption, textOverlays, captions, audioTracks, transition, visualEffects, graphNodes, graphConnections, onPublish]);
 
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
@@ -594,10 +681,21 @@ export function LoopEditor({
             <span className="font-semibold text-text-primary">Loop Editor</span>
           </div>
         </div>
-        <div className="flex items-center gap-2 text-sm text-text-muted">
-          <span>{FPS} fps</span>
-          <span className="w-px h-4 bg-border" />
-          <span className="font-mono">{formatTime(currentTime)}</span>
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2 text-sm text-text-muted">
+            <span>{FPS} fps</span>
+            <span className="w-px h-4 bg-border" />
+            <span className="font-mono">{formatTime(currentTime)}</span>
+          </div>
+          {/* Collaboration indicators */}
+          {enableCollaboration && collabState.isConnected && (
+            <PresenceIndicators
+              collaborators={collabState.collaborators}
+              currentUserDid={userDid || ''}
+              maxAvatars={4}
+              size="sm"
+            />
+          )}
         </div>
         <div className="flex items-center gap-3">
           <button
@@ -618,7 +716,7 @@ export function LoopEditor({
 
       {/* Tabs */}
       <div className="flex border-b border-border bg-background-alt shrink-0 overflow-x-auto">
-        {(['clip', 'response', 'text', 'captions', 'music', 'effects', 'preview'] as EditorTab[]).map((tab) => (
+        {(['clip', 'response', 'text', 'captions', 'music', 'effects', 'nodes', 'preview'] as EditorTab[]).map((tab) => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
@@ -634,6 +732,7 @@ export function LoopEditor({
             {tab === 'captions' && 'Captions'}
             {tab === 'music' && 'Music'}
             {tab === 'effects' && 'Effects'}
+            {tab === 'nodes' && 'Nodes'}
             {tab === 'preview' && 'Preview'}
           </button>
         ))}
@@ -641,20 +740,58 @@ export function LoopEditor({
 
       {/* Main content */}
       <div className="flex-1 flex overflow-hidden">
-        {/* Canvas area */}
-        <div className="flex-1 flex items-center justify-center bg-gray-900 p-4">
-          <div className="relative" style={{ transform: 'scale(0.35)', transformOrigin: 'center' }}>
-            <canvas
-              ref={canvasRef}
-              width={CANVAS_WIDTH}
-              height={CANVAS_HEIGHT}
-              className="rounded-lg shadow-2xl bg-black"
+        {/* Node Editor - Full width when nodes tab is active */}
+        {activeTab === 'nodes' ? (
+          <div className="flex-1 flex flex-col">
+            <NodeEditor
+              initialNodes={graphNodes}
+              initialConnections={graphConnections}
+              onChange={handleNodeGraphChange}
+              context={{
+                time: currentTime,
+                frame: currentFrame,
+                fps: FPS,
+                duration: totalDuration,
+              }}
             />
+            <div className="p-3 bg-background-alt border-t border-border text-center">
+              <p className="text-xs text-text-muted">
+                {graphNodes.length} nodes | {graphConnections.length} connections
+              </p>
+            </div>
           </div>
-        </div>
+        ) : (
+          <>
+            {/* Canvas area */}
+            <div
+              className="flex-1 flex items-center justify-center bg-gray-900 p-4 relative"
+              onMouseMove={enableCollaboration && collabState.isConnected ? (e) => {
+                const rect = e.currentTarget.getBoundingClientRect();
+                updateCursor({
+                  x: e.clientX - rect.left,
+                  y: e.clientY - rect.top,
+                });
+              } : undefined}
+            >
+              <div className="relative" style={{ transform: 'scale(0.35)', transformOrigin: 'center' }}>
+                <canvas
+                  ref={canvasRef}
+                  width={CANVAS_WIDTH}
+                  height={CANVAS_HEIGHT}
+                  className="rounded-lg shadow-2xl bg-black"
+                />
+              </div>
+              {/* Collaborator cursors */}
+              {enableCollaboration && collabState.isConnected && (
+                <CollaboratorCursors
+                  collaborators={collabState.collaborators}
+                  currentUserDid={userDid || ''}
+                />
+              )}
+            </div>
 
-        {/* Right panel */}
-        <div className="w-80 bg-background-alt border-l border-border flex flex-col overflow-y-auto">
+            {/* Right panel */}
+            <div className="w-80 bg-background-alt border-l border-border flex flex-col overflow-y-auto">
           {activeTab === 'clip' && (
             <ClipPanel
               originalVideo={originalVideo}
@@ -724,12 +861,21 @@ export function LoopEditor({
           )}
 
           {activeTab === 'effects' && (
-            <EffectsPanel
-              transition={transition}
-              onTransitionChange={setTransition}
-              transitionTypes={TRANSITION_TYPES}
-              clipDuration={clipDuration}
-            />
+            <div className="flex flex-col h-full overflow-y-auto">
+              <EffectsPanel
+                transition={transition}
+                onTransitionChange={setTransition}
+                transitionTypes={TRANSITION_TYPES}
+                clipDuration={clipDuration}
+              />
+              <div className="border-t border-border">
+                <VisualEffectsPanel
+                  effects={visualEffects}
+                  onEffectsChange={setVisualEffects}
+                  currentTime={currentTime}
+                />
+              </div>
+            </div>
           )}
 
           {activeTab === 'preview' && (
@@ -742,9 +888,13 @@ export function LoopEditor({
               captionCount={captions.length}
               audioCount={audioTracks.length}
               hasTransition={!!transition}
+              nodeCount={graphNodes.length}
+              vfxCount={visualEffects.filter(e => e.enabled).length}
             />
           )}
         </div>
+          </>
+        )}
       </div>
 
       {/* Timeline */}
@@ -1325,7 +1475,7 @@ function EffectsPanel({ transition, onTransitionChange, transitionTypes, clipDur
   );
 }
 
-function PreviewPanel({ caption, onCaptionChange, clipDuration, originalAuthor, textCount, captionCount, audioCount, hasTransition }: {
+function PreviewPanel({ caption, onCaptionChange, clipDuration, originalAuthor, textCount, captionCount, audioCount, hasTransition, nodeCount = 0, vfxCount = 0 }: {
   caption: string;
   onCaptionChange: (c: string) => void;
   clipDuration: number;
@@ -1334,6 +1484,8 @@ function PreviewPanel({ caption, onCaptionChange, clipDuration, originalAuthor, 
   captionCount: number;
   audioCount: number;
   hasTransition: boolean;
+  nodeCount?: number;
+  vfxCount?: number;
 }) {
   return (
     <div className="p-4 space-y-6">
@@ -1373,6 +1525,18 @@ function PreviewPanel({ caption, onCaptionChange, clipDuration, originalAuthor, 
             <dt className="text-text-muted">Transition</dt>
             <dd className="text-text-primary">{hasTransition ? 'Yes' : 'None'}</dd>
           </div>
+          {nodeCount > 0 && (
+            <div className="flex justify-between">
+              <dt className="text-text-muted">Effect nodes</dt>
+              <dd className="text-text-primary">{nodeCount}</dd>
+            </div>
+          )}
+          {vfxCount > 0 && (
+            <div className="flex justify-between">
+              <dt className="text-text-muted">Visual effects</dt>
+              <dd className="text-text-primary">{vfxCount}</dd>
+            </div>
+          )}
         </dl>
       </div>
     </div>
@@ -1451,20 +1615,47 @@ function Timeline({ currentTime, currentFrame, totalDuration, totalFrames, clipD
             ))}
           </div>
         </div>
-        {/* Audio track */}
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-text-muted w-16">Audio</span>
-          <div className="flex-1 h-6 bg-surface rounded relative">
-            {audioTracks.map((a) => (
-              <div
-                key={a.id}
-                className={`absolute top-0.5 h-5 rounded cursor-pointer ${selectedAudioTrack === a.id ? 'bg-green-500' : 'bg-green-600/70'}`}
-                style={{ left: `${(a.startFrame / totalFrames) * 100}%`, width: `${((a.endFrame - a.startFrame) / totalFrames) * 100}%`, minWidth: 4 }}
-                onClick={() => onSelectAudioTrack(a.id)}
-              />
-            ))}
+        {/* Audio tracks with waveform */}
+        {audioTracks.map((a) => (
+          <div key={a.id} className="flex items-center gap-2">
+            <span className="text-xs text-text-muted w-16 truncate">{a.sound?.title || 'Audio'}</span>
+            <div
+              className={`flex-1 h-8 rounded relative overflow-hidden cursor-pointer border ${
+                selectedAudioTrack === a.id ? 'border-green-500' : 'border-transparent'
+              }`}
+              style={{
+                marginLeft: `${(a.startFrame / totalFrames) * 100}%`,
+                width: `${((a.endFrame - a.startFrame) / totalFrames) * 100}%`,
+                maxWidth: `${100 - (a.startFrame / totalFrames) * 100}%`,
+              }}
+              onClick={() => onSelectAudioTrack(a.id)}
+            >
+              {a.sound?.id || a.file ? (
+                <WaveformTrack
+                  soundId={a.sound?.id}
+                  audioFile={a.file}
+                  startTime={a.trimStart}
+                  endTime={(a.endFrame - a.startFrame) / fps - a.trimEnd}
+                  duration={(a.endFrame - a.startFrame) / fps}
+                  currentTime={currentTime - (a.startFrame / fps)}
+                  isPlaying={isPlaying}
+                  height={32}
+                  color={selectedAudioTrack === a.id ? '#22c55e' : '#16a34a'}
+                  backgroundColor="#1e293b"
+                  showBeats={false}
+                />
+              ) : (
+                <div className={`w-full h-full ${selectedAudioTrack === a.id ? 'bg-green-500' : 'bg-green-600/70'}`} />
+              )}
+            </div>
           </div>
-        </div>
+        ))}
+        {audioTracks.length === 0 && (
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-text-muted w-16">Audio</span>
+            <div className="flex-1 h-6 bg-surface rounded" />
+          </div>
+        )}
         {/* Playhead slider */}
         <input
           type="range"

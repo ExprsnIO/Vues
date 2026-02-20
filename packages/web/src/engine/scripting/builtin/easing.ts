@@ -191,7 +191,7 @@ export function spring(
   damping: number = 10,
   velocity: number = 0
 ): number {
-  const fn = springEasing({ mass, stiffness, damping, velocity });
+  const fn = springEasing(mass, stiffness, damping, velocity);
   return fn(Math.max(0, Math.min(1, t)));
 }
 

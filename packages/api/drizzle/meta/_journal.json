@@ -43,6 +43,13 @@
       "when": 1771366325765,
       "tag": "0005_freezing_ezekiel",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1771609866660,
+      "tag": "0006_remarkable_leopardon",
+      "breakpoints": true
     }
   ]
 }
