@@ -24,12 +24,23 @@ import {
 } from './auth';
 import { api } from './api';
 
+export interface SocialLinks {
+  twitter?: string;
+  instagram?: string;
+  youtube?: string;
+  tiktok?: string;
+  discord?: string;
+}
+
 export interface User {
   did: string;
   handle: string;
   displayName?: string;
   avatar?: string;
   bio?: string;
+  location?: string;
+  website?: string;
+  socialLinks?: SocialLinks;
   followerCount?: number;
   followingCount?: number;
   videoCount?: number;

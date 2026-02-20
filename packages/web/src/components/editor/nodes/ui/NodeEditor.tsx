@@ -61,11 +61,26 @@ export function NodeEditor({
 
   const canvasRef = useRef<HTMLDivElement>(null);
   const engineRef = useRef<NodeEngine>(getNodeEngine());
+  const isInitialMount = useRef(true);
+  const prevInitialNodes = useRef(initialNodes);
+  const prevInitialConnections = useRef(initialConnections);
 
   // Initialize nodes
   useEffect(() => {
     registerAllNodes();
   }, []);
+
+  // Sync with external props only when they actually change
+  useEffect(() => {
+    if (prevInitialNodes.current !== initialNodes) {
+      setNodes(initialNodes);
+      prevInitialNodes.current = initialNodes;
+    }
+    if (prevInitialConnections.current !== initialConnections) {
+      setConnections(initialConnections);
+      prevInitialConnections.current = initialConnections;
+    }
+  }, [initialNodes, initialConnections]);
 
   // Update engine when graph changes
   useEffect(() => {
@@ -73,8 +88,19 @@ export function NodeEditor({
     if (context) {
       engineRef.current.setContext(context);
     }
-    onChange?.(nodes, connections);
-  }, [nodes, connections, context, onChange]);
+  }, [nodes, connections, context]);
+
+  // Call onChange only after internal changes (not on mount or prop sync)
+  useEffect(() => {
+    if (isInitialMount.current) {
+      isInitialMount.current = false;
+      return;
+    }
+    // Only notify parent if this is an internal change, not a prop sync
+    if (nodes !== initialNodes || connections !== initialConnections) {
+      onChange?.(nodes, connections);
+    }
+  }, [nodes, connections, onChange, initialNodes, initialConnections]);
 
   // Get port position for a node
   const getPortPosition = useCallback(

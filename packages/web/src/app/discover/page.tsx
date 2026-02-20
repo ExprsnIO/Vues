@@ -33,10 +33,10 @@ export default function DiscoverPage() {
   });
 
   return (
-    <div className="flex min-h-screen bg-black">
+    <div className="flex min-h-screen bg-background-alt">
       <Sidebar />
       <main className="flex-1 ml-0 lg:ml-60 pt-14 lg:pt-0 pb-16 lg:pb-0 p-4 lg:p-6">
-        <div className="max-w-3xl mx-auto">
+        <div className="w-full">
           <h1 className="text-2xl font-bold text-white mb-6">Discover</h1>
 
           {/* Search bar */}
@@ -125,11 +125,11 @@ export default function DiscoverPage() {
                 <h2 className="text-lg font-semibold text-white mb-4">
                   Categories
                 </h2>
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-3">
                   {CATEGORIES.map((category) => (
                     <Link
                       key={category.id}
-                      href={`/category/${category.id}`}
+                      href={`/tag/${encodeURIComponent(category.id)}`}
                       className="relative overflow-hidden rounded-xl aspect-[2/1] group"
                     >
                       <div

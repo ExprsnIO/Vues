@@ -12,7 +12,6 @@ import { AccessibilitySettings } from '@/components/settings/AccessibilitySettin
 import { ContentSettings } from '@/components/settings/ContentSettings';
 import { LayoutSettings } from '@/components/settings/LayoutSettings';
 import { SecuritySettings } from '@/components/settings/SecuritySettings';
-import { BlockedMutedSettings } from '@/components/settings/BlockedMutedSettings';
 import { AccountSettings } from '@/components/settings/AccountSettings';
 import { TokensSettings } from '@/components/settings/TokensSettings';
 import type { UserSettings, UserSettingsUpdate } from '@exprsn/shared';
@@ -212,13 +211,6 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                   onUpdate={handleSettingsUpdate}
                   isUpdating={updateSettingsMutation.isPending}
                 />
-              </SettingsSection>
-
-              <SettingsSection
-                title="Blocked & Muted"
-                description="Manage blocked and muted users"
-              >
-                <BlockedMutedSettings />
               </SettingsSection>
 
               <SettingsSection

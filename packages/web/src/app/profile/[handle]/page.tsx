@@ -5,6 +5,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import Link from 'next/link';
 import { Sidebar, useSidebar } from '@/components/Sidebar';
 import { UserActionsMenu } from '@/components/UserActionsMenu';
+import { BlockedMutedSettings } from '@/components/settings/BlockedMutedSettings';
 import { api, VideoView } from '@/lib/api';
 import { useAuth } from '@/lib/auth-context';
 import { cn } from '@/lib/utils';
@@ -18,7 +19,7 @@ export default function ProfilePage() {
   const { user, isLoading: authLoading } = useAuth();
   const queryClient = useQueryClient();
   const { openSettings } = useSidebar();
-  const [activeTab, setActiveTab] = useState<'videos' | 'liked'>('videos');
+  const [activeTab, setActiveTab] = useState<'videos' | 'liked' | 'blocked'>('videos');
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['profile', handle],
@@ -145,6 +146,60 @@ export default function ProfilePage() {
                     <p className="text-text-primary mb-4">{data.profile.bio}</p>
                   )}
 
+                  {/* Location & Links */}
+                  <div className="flex flex-wrap items-center gap-4 mb-4">
+                    {data.profile.location && (
+                      <span className="flex items-center gap-1 text-text-muted text-sm">
+                        <LocationIcon className="w-4 h-4" />
+                        {data.profile.location}
+                      </span>
+                    )}
+                    {data.profile.website && (
+                      <a
+                        href={data.profile.website.startsWith('http') ? data.profile.website : `https://${data.profile.website}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center gap-1 text-accent hover:underline text-sm"
+                      >
+                        <LinkIcon className="w-4 h-4" />
+                        {data.profile.website.replace(/^https?:\/\//, '')}
+                      </a>
+                    )}
+                    {data.profile.socialLinks?.twitter && (
+                      <a
+                        href={`https://twitter.com/${data.profile.socialLinks.twitter.replace('@', '')}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-text-muted hover:text-text-primary transition-colors"
+                        title="Twitter"
+                      >
+                        <TwitterIcon className="w-5 h-5" />
+                      </a>
+                    )}
+                    {data.profile.socialLinks?.instagram && (
+                      <a
+                        href={`https://instagram.com/${data.profile.socialLinks.instagram.replace('@', '')}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-text-muted hover:text-text-primary transition-colors"
+                        title="Instagram"
+                      >
+                        <InstagramIcon className="w-5 h-5" />
+                      </a>
+                    )}
+                    {data.profile.socialLinks?.youtube && (
+                      <a
+                        href={data.profile.socialLinks.youtube.startsWith('http') ? data.profile.socialLinks.youtube : `https://youtube.com/${data.profile.socialLinks.youtube}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-text-muted hover:text-text-primary transition-colors"
+                        title="YouTube"
+                      >
+                        <YouTubeIcon className="w-5 h-5" />
+                      </a>
+                    )}
+                  </div>
+
                   {/* Action Buttons */}
                   <div className="flex items-center gap-3">
                     {isOwnProfile ? (
@@ -244,22 +299,45 @@ export default function ProfilePage() {
                       <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-accent" />
                     )}
                   </button>
+                  {isOwnProfile && (
+                    <button
+                      onClick={() => setActiveTab('blocked')}
+                      className={cn(
+                        'pb-4 px-2 font-medium transition-colors relative',
+                        activeTab === 'blocked'
+                          ? 'text-text-primary'
+                          : 'text-text-muted hover:text-text-primary'
+                      )}
+                    >
+                      Blocked & Muted
+                      {activeTab === 'blocked' && (
+                        <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-accent" />
+                      )}
+                    </button>
+                  )}
                 </div>
               </div>
 
-              {/* Video Grid */}
-              <div className="grid grid-cols-3 gap-4">
-                {data.videos.map((video) => (
-                  <VideoThumbnail key={video.uri} video={video} />
-                ))}
-              </div>
+              {/* Tab Content */}
+              {activeTab === 'blocked' && isOwnProfile ? (
+                <BlockedMutedSettings />
+              ) : (
+                <>
+                  {/* Video Grid */}
+                  <div className="grid grid-cols-3 gap-4">
+                    {data.videos.map((video) => (
+                      <VideoThumbnail key={video.uri} video={video} />
+                    ))}
+                  </div>
 
-              {data.videos.length === 0 && (
-                <div className="text-center py-16">
-                  <p className="text-text-muted">
-                    {activeTab === 'videos' ? 'No videos yet' : 'No liked videos'}
-                  </p>
-                </div>
+                  {data.videos.length === 0 && (
+                    <div className="text-center py-16">
+                      <p className="text-text-muted">
+                        {activeTab === 'videos' ? 'No videos yet' : 'No liked videos'}
+                      </p>
+                    </div>
+                  )}
+                </>
               )}
             </>
           ) : null}
@@ -381,4 +459,45 @@ function formatCount(count: number): string {
     return (count / 1000).toFixed(1).replace(/\.0$/, '') + 'K';
   }
   return count.toString();
+}
+
+function LocationIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M15 10.5a3 3 0 11-6 0 3 3 0 016 0z" />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1115 0z" />
+    </svg>
+  );
+}
+
+function LinkIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M13.19 8.688a4.5 4.5 0 011.242 7.244l-4.5 4.5a4.5 4.5 0 01-6.364-6.364l1.757-1.757m13.35-.622l1.757-1.757a4.5 4.5 0 00-6.364-6.364l-4.5 4.5a4.5 4.5 0 001.242 7.244" />
+    </svg>
+  );
+}
+
+function TwitterIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="currentColor" viewBox="0 0 24 24">
+      <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
+    </svg>
+  );
+}
+
+function InstagramIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="currentColor" viewBox="0 0 24 24">
+      <path d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zm0-2.163c-3.259 0-3.667.014-4.947.072-4.358.2-6.78 2.618-6.98 6.98-.059 1.281-.073 1.689-.073 4.948 0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98 1.281.058 1.689.072 4.948.072 3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98-1.281-.059-1.69-.073-4.949-.073zm0 5.838c-3.403 0-6.162 2.759-6.162 6.162s2.759 6.163 6.162 6.163 6.162-2.759 6.162-6.163c0-3.403-2.759-6.162-6.162-6.162zm0 10.162c-2.209 0-4-1.79-4-4 0-2.209 1.791-4 4-4s4 1.791 4 4c0 2.21-1.791 4-4 4zm6.406-11.845c-.796 0-1.441.645-1.441 1.44s.645 1.44 1.441 1.44c.795 0 1.439-.645 1.439-1.44s-.644-1.44-1.439-1.44z" />
+    </svg>
+  );
+}
+
+function YouTubeIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="currentColor" viewBox="0 0 24 24">
+      <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z" />
+    </svg>
+  );
 }

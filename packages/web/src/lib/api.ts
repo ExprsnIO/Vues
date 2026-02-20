@@ -1000,6 +1000,15 @@ class ApiClient {
   async updateActorProfile(data: {
     displayName?: string;
     bio?: string;
+    location?: string;
+    website?: string;
+    socialLinks?: {
+      twitter?: string;
+      instagram?: string;
+      youtube?: string;
+      tiktok?: string;
+      discord?: string;
+    };
   }): Promise<{ success: boolean; profile: ActorProfileView }> {
     return this.fetch('/xrpc/io.exprsn.actor.updateProfile', {
       method: 'POST',
@@ -1973,6 +1982,15 @@ class ApiClient {
   }
 }
 
+// Social links type
+export interface SocialLinks {
+  twitter?: string;
+  instagram?: string;
+  youtube?: string;
+  tiktok?: string;
+  discord?: string;
+}
+
 // Profile types
 export interface ProfileView {
   did: string;
@@ -1980,6 +1998,9 @@ export interface ProfileView {
   displayName?: string;
   avatar?: string;
   bio?: string;
+  location?: string;
+  website?: string;
+  socialLinks?: SocialLinks;
   followerCount: number;
   followingCount: number;
   videoCount: number;

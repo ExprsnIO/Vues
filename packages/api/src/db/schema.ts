@@ -11,6 +11,16 @@ import {
 } from 'drizzle-orm/pg-core';
 
 // Users table - cached user profiles from PDS
+// Social links type
+export interface UserSocialLinks {
+  website?: string;
+  twitter?: string;
+  instagram?: string;
+  youtube?: string;
+  tiktok?: string;
+  discord?: string;
+}
+
 export const users = pgTable(
   'users',
   {
@@ -19,6 +29,9 @@ export const users = pgTable(
     displayName: text('display_name'),
     avatar: text('avatar'),
     bio: text('bio'),
+    website: text('website'),
+    location: text('location'),
+    socialLinks: jsonb('social_links').$type<UserSocialLinks>(),
     followerCount: integer('follower_count').default(0).notNull(),
     followingCount: integer('following_count').default(0).notNull(),
     videoCount: integer('video_count').default(0).notNull(),
