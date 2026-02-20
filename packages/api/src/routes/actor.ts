@@ -281,9 +281,10 @@ actorRouter.get('/io.exprsn.actor.getSuggestions', optionalAuthMiddleware, async
     verified: user.verified,
   }));
 
+  const lastResult = results[results.length - 1];
   const nextCursor =
-    results.length === limit
-      ? results[results.length - 1].followerCount.toString()
+    results.length === limit && lastResult
+      ? lastResult.followerCount.toString()
       : undefined;
 
   return c.json({
@@ -307,24 +308,25 @@ actorRouter.get('/io.exprsn.actor.searchActors', async (c) => {
 
   const searchPattern = `%${q.toLowerCase()}%`;
 
-  let query = db
-    .select()
-    .from(users)
-    .where(
-      or(
-        sql`LOWER(${users.handle}) LIKE ${searchPattern}`,
-        sql`LOWER(${users.displayName}) LIKE ${searchPattern}`
-      )
-    )
-    .orderBy(desc(users.followerCount))
-    .limit(limit);
+  // Build conditions array
+  const conditions = [
+    or(
+      sql`LOWER(${users.handle}) LIKE ${searchPattern}`,
+      sql`LOWER(${users.displayName}) LIKE ${searchPattern}`
+    ),
+  ];
 
   if (cursor) {
     const cursorCount = parseInt(cursor, 10);
-    query = query.where(sql`${users.followerCount} < ${cursorCount}`) as typeof query;
+    conditions.push(sql`${users.followerCount} < ${cursorCount}`);
   }
 
-  const results = await query;
+  const results = await db
+    .select()
+    .from(users)
+    .where(and(...conditions))
+    .orderBy(desc(users.followerCount))
+    .limit(limit);
 
   const actors = results.map((user) => ({
     did: user.did,
@@ -338,9 +340,10 @@ actorRouter.get('/io.exprsn.actor.searchActors', async (c) => {
     verified: user.verified,
   }));
 
+  const lastResult = results[results.length - 1];
   const nextCursor =
-    results.length === limit
-      ? results[results.length - 1].followerCount.toString()
+    results.length === limit && lastResult
+      ? lastResult.followerCount.toString()
       : undefined;
 
   return c.json({
@@ -372,19 +375,20 @@ actorRouter.get('/io.exprsn.actor.getVideos', optionalAuthMiddleware, async (c) 
     throw new HTTPException(404, { message: 'User not found' });
   }
 
-  let query = db
-    .select()
-    .from(videos)
-    .where(eq(videos.authorDid, user.did))
-    .orderBy(desc(videos.createdAt))
-    .limit(limit);
+  // Build conditions array
+  const conditions = [eq(videos.authorDid, user.did)];
 
   if (cursor) {
     const cursorDate = new Date(cursor);
-    query = query.where(sql`${videos.createdAt} < ${cursorDate}`) as typeof query;
+    conditions.push(sql`${videos.createdAt} < ${cursorDate}`);
   }
 
-  const results = await query;
+  const results = await db
+    .select()
+    .from(videos)
+    .where(and(...conditions))
+    .orderBy(desc(videos.createdAt))
+    .limit(limit);
 
   const videoViews = results.map((video) => ({
     uri: video.uri,
@@ -415,9 +419,10 @@ actorRouter.get('/io.exprsn.actor.getVideos', optionalAuthMiddleware, async (c) 
     indexedAt: video.indexedAt.toISOString(),
   }));
 
+  const lastResult = results[results.length - 1];
   const nextCursor =
-    results.length === limit
-      ? results[results.length - 1].createdAt.toISOString()
+    results.length === limit && lastResult
+      ? lastResult.createdAt.toISOString()
       : undefined;
 
   return c.json({
@@ -454,7 +459,7 @@ actorRouter.get('/io.exprsn.actor.getPreferences', authMiddleware, async (c) => 
 
   // Return preferences as array of objects with $type
   const preferences = prefs.map((pref) => ({
-    ...pref.prefData,
+    ...(typeof pref.prefData === 'object' && pref.prefData !== null ? pref.prefData : {}),
     $type: pref.prefType,
   }));
 

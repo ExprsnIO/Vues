@@ -1,6 +1,8 @@
 import { Hono } from 'hono';
 import * as bcrypt from 'bcryptjs';
 import { eq } from 'drizzle-orm';
+import { readFile } from 'fs/promises';
+import { existsSync } from 'fs';
 import { createPdsRouter, PdsDependencies, PdsServerConfig } from '@exprsn/pds';
 import { createDidService, DidWebConfig } from '@exprsn/pds';
 import { createLocalBlobStore, createS3BlobStore } from '@exprsn/pds';
@@ -39,13 +41,14 @@ export function getPdsConfig(): PdsConfig {
 
 /**
  * Account store implementation using database
+ * Implements AccountStore & AccountLookup interfaces
  */
 function createAccountStore() {
   return {
     async createAccount(account: {
       did: string;
       handle: string;
-      email?: string;
+      email: string;
       passwordHash: string;
       signingKeyPublic: string;
       signingKeyPrivate: string;
@@ -66,11 +69,6 @@ function createAccountStore() {
       return result[0] || null;
     },
 
-    async getAccountByEmail(email: string) {
-      const result = await db.select().from(actorRepos).where(eq(actorRepos.email, email)).limit(1);
-      return result[0] || null;
-    },
-
     async getAccountByDid(did: string) {
       const result = await db.select().from(actorRepos).where(eq(actorRepos.did, did)).limit(1);
       return result[0] || null;
@@ -81,59 +79,59 @@ function createAccountStore() {
       return result.length > 0;
     },
 
-    async resolveHandle(handle: string) {
+    async emailExists(email: string) {
+      const result = await db.select({ did: actorRepos.did }).from(actorRepos).where(eq(actorRepos.email, email)).limit(1);
+      return result.length > 0;
+    },
+
+    // AccountLookup interface methods
+    async getDidByHandle(handle: string) {
       const result = await db.select({ did: actorRepos.did }).from(actorRepos).where(eq(actorRepos.handle, handle)).limit(1);
       return result[0]?.did || null;
     },
 
-    async updateRepoRoot(did: string, rootCid: string, rev: string) {
-      await db.update(actorRepos).set({ rootCid, rev, updatedAt: new Date() }).where(eq(actorRepos.did, did));
+    async getHandleByDid(did: string) {
+      const result = await db.select({ handle: actorRepos.handle }).from(actorRepos).where(eq(actorRepos.did, did)).limit(1);
+      return result[0]?.handle || null;
     },
   };
 }
 
 /**
  * Session store implementation
+ * Implements SessionStore interface
  */
 function createSessionStore() {
   return {
-    async createSession(session: { did: string; accessToken: string; refreshToken: string; expiresAt: Date }) {
+    async createSession(did: string): Promise<{ accessJwt: string; refreshJwt: string }> {
+      const accessJwt = `exp_${crypto.randomUUID().replace(/-/g, '')}`;
+      const refreshJwt = `exp_refresh_${crypto.randomUUID().replace(/-/g, '')}`;
+      const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
+
       await db.insert(sessions).values({
         id: crypto.randomUUID(),
-        did: session.did,
-        accessJwt: session.accessToken,
-        refreshJwt: session.refreshToken,
-        expiresAt: session.expiresAt,
+        did,
+        accessJwt,
+        refreshJwt,
+        expiresAt,
       });
+
+      return { accessJwt, refreshJwt };
     },
 
-    async getSessionByAccessToken(token: string) {
+    async validateAccessToken(token: string): Promise<{ did: string } | null> {
       const result = await db.select().from(sessions).where(eq(sessions.accessJwt, token)).limit(1);
-      if (!result[0]) return null;
-      return {
-        did: result[0].did,
-        accessToken: result[0].accessJwt,
-        refreshToken: result[0].refreshJwt,
-        expiresAt: result[0].expiresAt,
-      };
+      if (!result[0] || result[0].expiresAt < new Date()) return null;
+      return { did: result[0].did };
     },
 
-    async getSessionByRefreshToken(token: string) {
+    async validateRefreshToken(token: string): Promise<{ did: string } | null> {
       const result = await db.select().from(sessions).where(eq(sessions.refreshJwt, token)).limit(1);
       if (!result[0]) return null;
-      return {
-        did: result[0].did,
-        accessToken: result[0].accessJwt,
-        refreshToken: result[0].refreshJwt,
-        expiresAt: result[0].expiresAt,
-      };
+      return { did: result[0].did };
     },
 
-    async deleteSession(did: string) {
-      await db.delete(sessions).where(eq(sessions.did, did));
-    },
-
-    async deleteAllSessions(did: string) {
+    async deleteSession(did: string, _token: string) {
       await db.delete(sessions).where(eq(sessions.did, did));
     },
   };
@@ -141,10 +139,30 @@ function createSessionStore() {
 
 /**
  * Repo store manager implementation
+ * Implements RepoStoreManager & SyncRepoManager interfaces
  */
 function createRepoManager() {
   return {
-    // RepoStoreManager
+    // RepoStoreManager interface
+    async getRepo(_did: string) {
+      // Full repository implementation requires MST/BlockStore
+      // Return null to indicate repo doesn't exist (will trigger creation)
+      return null;
+    },
+
+    async createRepo(_did: string) {
+      // Creating a full Repository requires MST/BlockStore/signing functions
+      // This is a stub - full PDS functionality requires complete implementation
+      throw new Error('Full PDS repository creation not implemented');
+    },
+
+    // SyncRepoManager interface
+    async getBlockStore(_did: string) {
+      // Return null as block stores require full implementation
+      return null;
+    },
+
+    // Legacy methods for compatibility
     async getRepoRoot(did: string) {
       const result = await db.select({ rootCid: actorRepos.rootCid, rev: actorRepos.rev })
         .from(actorRepos).where(eq(actorRepos.did, did)).limit(1);
@@ -313,9 +331,9 @@ async function getSession(c: { req: { header(name: string): string | undefined }
 
   const token = authHeader.substring(7);
   const sessionStore = createSessionStore();
-  const session = await sessionStore.getSessionByAccessToken(token);
+  const session = await sessionStore.validateAccessToken(token);
 
-  if (!session || session.expiresAt < new Date()) {
+  if (!session) {
     return null;
   }
 
@@ -327,12 +345,11 @@ async function getSession(c: { req: { header(name: string): string | undefined }
  */
 export function createPdsApp(config: PdsConfig): Hono {
   const serverConfig: PdsServerConfig = {
-    serviceDid: `did:web:${config.domain}`,
+    domain: config.domain,
     serviceEndpoint: `https://${config.domain}`,
     availableUserDomains: [config.domain],
     inviteCodeRequired: false,
     phoneVerificationRequired: false,
-    emailRequired: true,
   };
 
   const accountStore = createAccountStore();
@@ -349,7 +366,7 @@ export function createPdsApp(config: PdsConfig): Hono {
       })
     : createLocalBlobStore(`${config.dataPath}/blobs`);
 
-  const deps: PdsDependencies = {
+  const deps = {
     config: serverConfig,
     accountStore,
     sessionStore,
@@ -359,7 +376,7 @@ export function createPdsApp(config: PdsConfig): Hono {
     verifyPassword: (password: string, hash: string) => bcrypt.compare(password, hash),
     generateKeyPair,
     getSession,
-  };
+  } as PdsDependencies;
 
   const pdsRouter = createPdsRouter(deps);
   const didServiceConfig: DidWebConfig = {
@@ -396,12 +413,23 @@ export function createPdsApp(config: PdsConfig): Hono {
       return c.json({ error: 'NotFound', message: 'Blob not found' }, 404);
     }
 
-    const blob = await blobStore.get(`${did}/${cid}`);
+    // Read blob from storage path
+    let blob: Buffer | null = null;
+    if (blobMeta.storagePath && existsSync(blobMeta.storagePath)) {
+      try {
+        blob = await readFile(blobMeta.storagePath);
+      } catch {
+        // If read fails, blob will be null
+      }
+    }
     if (!blob) {
       return c.json({ error: 'NotFound', message: 'Blob data not found' }, 404);
     }
 
-    return c.body(blob, 200, { 'Content-Type': blobMeta.mimeType });
+    return new Response(blob, {
+      status: 200,
+      headers: { 'Content-Type': blobMeta.mimeType },
+    });
   });
 
   // Well-known DID resolution

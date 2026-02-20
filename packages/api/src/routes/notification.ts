@@ -26,8 +26,8 @@ notificationRouter.get('/io.exprsn.notification.listNotifications', authMiddlewa
   const cursor = c.req.query('cursor');
   const filter = c.req.query('filter'); // all, likes, comments, follows, mentions, reposts
 
-  // Build where clause
-  let whereClause = eq(notifications.userDid, userDid);
+  // Build conditions array
+  const conditions = [eq(notifications.userDid, userDid)];
 
   if (filter && filter !== 'all') {
     const reasonMap: Record<string, string> = {
@@ -39,25 +39,23 @@ notificationRouter.get('/io.exprsn.notification.listNotifications', authMiddlewa
     };
     const reason = reasonMap[filter];
     if (reason) {
-      whereClause = and(whereClause, eq(notifications.reason, reason))!;
+      conditions.push(eq(notifications.reason, reason));
     }
   }
 
-  let query = db
+  if (cursor) {
+    const cursorDate = new Date(cursor);
+    conditions.push(lt(notifications.createdAt, cursorDate));
+  }
+
+  const results = await db
     .select({
       notification: notifications,
     })
     .from(notifications)
-    .where(whereClause)
+    .where(and(...conditions))
     .orderBy(desc(notifications.createdAt))
     .limit(limit);
-
-  if (cursor) {
-    const cursorDate = new Date(cursor);
-    query = query.where(lt(notifications.createdAt, cursorDate)) as typeof query;
-  }
-
-  const results = await query;
 
   // Get actor info for all notifications
   const actorDids = [...new Set(results.map((r) => r.notification.actorDid))];
@@ -93,9 +91,10 @@ notificationRouter.get('/io.exprsn.notification.listNotifications', authMiddlewa
     };
   });
 
+  const lastResult = results[results.length - 1];
   const nextCursor =
-    results.length === limit
-      ? results[results.length - 1].notification.createdAt.toISOString()
+    results.length === limit && lastResult
+      ? lastResult.notification.createdAt.toISOString()
       : undefined;
 
   return c.json({

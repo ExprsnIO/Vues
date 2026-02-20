@@ -79,7 +79,13 @@ videoExtendedRouter.get('/io.exprsn.video.getStitches', optionalAuthMiddleware, 
     throw new HTTPException(400, { message: 'Video URI is required' });
   }
 
-  let query = db
+  const conditions = [eq(stitches.originalVideoUri, uri)];
+  if (cursor) {
+    const cursorDate = new Date(cursor);
+    conditions.push(sql`${stitches.createdAt} < ${cursorDate}`);
+  }
+
+  const results = await db
     .select({
       stitch: stitches,
       video: videos,
@@ -88,20 +94,14 @@ videoExtendedRouter.get('/io.exprsn.video.getStitches', optionalAuthMiddleware, 
     .from(stitches)
     .innerJoin(videos, eq(stitches.videoUri, videos.uri))
     .innerJoin(users, eq(videos.authorDid, users.did))
-    .where(eq(stitches.originalVideoUri, uri))
+    .where(and(...conditions))
     .orderBy(desc(stitches.createdAt))
     .limit(limit);
 
-  if (cursor) {
-    const cursorDate = new Date(cursor);
-    query = query.where(sql`${stitches.createdAt} < ${cursorDate}`) as typeof query;
-  }
-
-  const results = await query;
-
+  const lastResult = results[results.length - 1];
   const nextCursor =
-    results.length === limit
-      ? results[results.length - 1].stitch.createdAt.toISOString()
+    results.length === limit && lastResult
+      ? lastResult.stitch.createdAt.toISOString()
       : undefined;
 
   return c.json({
@@ -198,7 +198,13 @@ videoExtendedRouter.get('/io.exprsn.video.getDuets', optionalAuthMiddleware, asy
     throw new HTTPException(400, { message: 'Video URI is required' });
   }
 
-  let query = db
+  const conditions = [eq(duets.originalVideoUri, uri)];
+  if (cursor) {
+    const cursorDate = new Date(cursor);
+    conditions.push(sql`${duets.createdAt} < ${cursorDate}`);
+  }
+
+  const results = await db
     .select({
       duet: duets,
       video: videos,
@@ -207,19 +213,13 @@ videoExtendedRouter.get('/io.exprsn.video.getDuets', optionalAuthMiddleware, asy
     .from(duets)
     .innerJoin(videos, eq(duets.videoUri, videos.uri))
     .innerJoin(users, eq(videos.authorDid, users.did))
-    .where(eq(duets.originalVideoUri, uri))
+    .where(and(...conditions))
     .orderBy(desc(duets.createdAt))
     .limit(limit);
 
-  if (cursor) {
-    const cursorDate = new Date(cursor);
-    query = query.where(sql`${duets.createdAt} < ${cursorDate}`) as typeof query;
-  }
-
-  const results = await query;
-
+  const lastResult = results[results.length - 1];
   const nextCursor =
-    results.length === limit ? results[results.length - 1].duet.createdAt.toISOString() : undefined;
+    results.length === limit && lastResult ? lastResult.duet.createdAt.toISOString() : undefined;
 
   return c.json({
     duets: results.map((r) => ({
@@ -273,26 +273,26 @@ videoExtendedRouter.get('/io.exprsn.video.getVideosBySound', optionalAuthMiddlew
     throw new HTTPException(404, { message: 'Sound not found' });
   }
 
-  let query = db
+  const conditions = [eq(videos.soundUri, soundId)];
+  if (cursor) {
+    const cursorInt = parseInt(cursor, 10);
+    conditions.push(sql`${videos.viewCount} < ${cursorInt}`);
+  }
+
+  const results = await db
     .select({
       video: videos,
       author: users,
     })
     .from(videos)
     .innerJoin(users, eq(videos.authorDid, users.did))
-    .where(eq(videos.soundUri, soundId))
+    .where(and(...conditions))
     .orderBy(desc(videos.viewCount))
     .limit(limit);
 
-  if (cursor) {
-    const cursorInt = parseInt(cursor, 10);
-    query = query.where(sql`${videos.viewCount} < ${cursorInt}`) as typeof query;
-  }
-
-  const results = await query;
-
+  const lastResult = results[results.length - 1];
   const nextCursor =
-    results.length === limit ? results[results.length - 1].video.viewCount.toString() : undefined;
+    results.length === limit && lastResult ? lastResult.video.viewCount.toString() : undefined;
 
   return c.json({
     sound: {
@@ -348,23 +348,22 @@ videoExtendedRouter.get('/io.exprsn.video.getVideosByTag', optionalAuthMiddlewar
   // Normalize tag (remove # if present, lowercase)
   const normalizedTag = tag.toLowerCase().replace(/^#/, '');
 
-  let query = db
+  const conditions = [sql`${videos.tags} @> ${JSON.stringify([normalizedTag])}::jsonb`];
+  if (cursor) {
+    const cursorInt = parseInt(cursor, 10);
+    conditions.push(sql`${videos.viewCount} < ${cursorInt}`);
+  }
+
+  const results = await db
     .select({
       video: videos,
       author: users,
     })
     .from(videos)
     .innerJoin(users, eq(videos.authorDid, users.did))
-    .where(sql`${videos.tags} @> ${JSON.stringify([normalizedTag])}::jsonb`)
+    .where(and(...conditions))
     .orderBy(desc(videos.viewCount))
     .limit(limit);
-
-  if (cursor) {
-    const cursorInt = parseInt(cursor, 10);
-    query = query.where(sql`${videos.viewCount} < ${cursorInt}`) as typeof query;
-  }
-
-  const results = await query;
 
   // Calculate total video count for this tag
   const countResult = await db
@@ -374,8 +373,9 @@ videoExtendedRouter.get('/io.exprsn.video.getVideosByTag', optionalAuthMiddlewar
 
   const totalVideos = countResult[0]?.count || 0;
 
+  const lastResult = results[results.length - 1];
   const nextCursor =
-    results.length === limit ? results[results.length - 1].video.viewCount.toString() : undefined;
+    results.length === limit && lastResult ? lastResult.video.viewCount.toString() : undefined;
 
   return c.json({
     tag: {
@@ -570,7 +570,13 @@ videoExtendedRouter.get('/io.exprsn.video.getCollabs', optionalAuthMiddleware, a
     throw new HTTPException(400, { message: 'Video URI is required' });
   }
 
-  let query = db
+  const conditions = [eq(duets.originalVideoUri, uri)];
+  if (cursor) {
+    const cursorDate = new Date(cursor);
+    conditions.push(sql`${duets.createdAt} < ${cursorDate}`);
+  }
+
+  const results = await db
     .select({
       collab: duets,
       video: videos,
@@ -579,19 +585,13 @@ videoExtendedRouter.get('/io.exprsn.video.getCollabs', optionalAuthMiddleware, a
     .from(duets)
     .innerJoin(videos, eq(duets.videoUri, videos.uri))
     .innerJoin(users, eq(videos.authorDid, users.did))
-    .where(eq(duets.originalVideoUri, uri))
+    .where(and(...conditions))
     .orderBy(desc(duets.createdAt))
     .limit(limit);
 
-  if (cursor) {
-    const cursorDate = new Date(cursor);
-    query = query.where(sql`${duets.createdAt} < ${cursorDate}`) as typeof query;
-  }
-
-  const results = await query;
-
+  const lastResult = results[results.length - 1];
   const nextCursor =
-    results.length === limit ? results[results.length - 1].collab.createdAt.toISOString() : undefined;
+    results.length === limit && lastResult ? lastResult.collab.createdAt.toISOString() : undefined;
 
   return c.json({
     collabs: results.map((r) => ({
@@ -692,7 +692,13 @@ videoExtendedRouter.get('/io.exprsn.video.getLoops', optionalAuthMiddleware, asy
     throw new HTTPException(400, { message: 'Video URI is required' });
   }
 
-  let query = db
+  const conditions = [eq(stitches.originalVideoUri, uri)];
+  if (cursor) {
+    const cursorDate = new Date(cursor);
+    conditions.push(sql`${stitches.createdAt} < ${cursorDate}`);
+  }
+
+  const results = await db
     .select({
       loop: stitches,
       video: videos,
@@ -701,20 +707,14 @@ videoExtendedRouter.get('/io.exprsn.video.getLoops', optionalAuthMiddleware, asy
     .from(stitches)
     .innerJoin(videos, eq(stitches.videoUri, videos.uri))
     .innerJoin(users, eq(videos.authorDid, users.did))
-    .where(eq(stitches.originalVideoUri, uri))
+    .where(and(...conditions))
     .orderBy(desc(stitches.createdAt))
     .limit(limit);
 
-  if (cursor) {
-    const cursorDate = new Date(cursor);
-    query = query.where(sql`${stitches.createdAt} < ${cursorDate}`) as typeof query;
-  }
-
-  const results = await query;
-
+  const lastResult = results[results.length - 1];
   const nextCursor =
-    results.length === limit
-      ? results[results.length - 1].loop.createdAt.toISOString()
+    results.length === limit && lastResult
+      ? lastResult.loop.createdAt.toISOString()
       : undefined;
 
   return c.json({

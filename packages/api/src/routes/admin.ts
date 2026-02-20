@@ -166,7 +166,7 @@ adminRouter.get(
         ...u,
         status: sanctionMap.get(u.did) || 'active',
       })),
-      cursor: hasMore ? items[items.length - 1].did : undefined,
+      cursor: hasMore && items[items.length - 1] ? items[items.length - 1]!.did : undefined,
     });
   }
 );

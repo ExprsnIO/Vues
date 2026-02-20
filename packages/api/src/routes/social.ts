@@ -116,27 +116,27 @@ socialRouter.get('/io.exprsn.video.getReposts', optionalAuthMiddleware, async (c
     throw new HTTPException(400, { message: 'User DID is required' });
   }
 
-  let query = db
+  const conditions = [eq(reposts.authorDid, did)];
+  if (cursor) {
+    const cursorDate = new Date(cursor);
+    conditions.push(sql`${reposts.createdAt} < ${cursorDate}`);
+  }
+
+  const results = await db
     .select({
       repost: reposts,
       video: videos,
     })
     .from(reposts)
     .innerJoin(videos, eq(reposts.videoUri, videos.uri))
-    .where(eq(reposts.authorDid, did))
+    .where(and(...conditions))
     .orderBy(desc(reposts.createdAt))
     .limit(limit);
 
-  if (cursor) {
-    const cursorDate = new Date(cursor);
-    query = query.where(sql`${reposts.createdAt} < ${cursorDate}`) as typeof query;
-  }
-
-  const results = await query;
-
+  const lastResult = results[results.length - 1];
   const nextCursor =
-    results.length === limit
-      ? results[results.length - 1].repost.createdAt.toISOString()
+    results.length === limit && lastResult
+      ? lastResult.repost.createdAt.toISOString()
       : undefined;
 
   return c.json({
@@ -247,12 +247,16 @@ socialRouter.get('/io.exprsn.video.getBookmarks', authMiddleware, async (c) => {
   const limit = Math.min(parseInt(c.req.query('limit') || '30', 10), 100);
   const cursor = c.req.query('cursor');
 
-  let conditions = [eq(bookmarks.authorDid, userDid)];
+  const conditions = [eq(bookmarks.authorDid, userDid)];
   if (folder) {
     conditions.push(eq(bookmarks.folder, folder));
   }
+  if (cursor) {
+    const cursorDate = new Date(cursor);
+    conditions.push(sql`${bookmarks.createdAt} < ${cursorDate}`);
+  }
 
-  let query = db
+  const results = await db
     .select({
       bookmark: bookmarks,
       video: videos,
@@ -263,16 +267,10 @@ socialRouter.get('/io.exprsn.video.getBookmarks', authMiddleware, async (c) => {
     .orderBy(desc(bookmarks.createdAt))
     .limit(limit);
 
-  if (cursor) {
-    const cursorDate = new Date(cursor);
-    query = query.where(sql`${bookmarks.createdAt} < ${cursorDate}`) as typeof query;
-  }
-
-  const results = await query;
-
+  const lastResult = results[results.length - 1];
   const nextCursor =
-    results.length === limit
-      ? results[results.length - 1].bookmark.createdAt.toISOString()
+    results.length === limit && lastResult
+      ? lastResult.bookmark.createdAt.toISOString()
       : undefined;
 
   return c.json({
@@ -364,27 +362,27 @@ socialRouter.get('/io.exprsn.graph.getBlocks', authMiddleware, async (c) => {
   const limit = Math.min(parseInt(c.req.query('limit') || '50', 10), 100);
   const cursor = c.req.query('cursor');
 
-  let query = db
+  const conditions = [eq(blocks.blockerDid, userDid)];
+  if (cursor) {
+    const cursorDate = new Date(cursor);
+    conditions.push(sql`${blocks.createdAt} < ${cursorDate}`);
+  }
+
+  const results = await db
     .select({
       block: blocks,
       user: users,
     })
     .from(blocks)
     .innerJoin(users, eq(blocks.blockedDid, users.did))
-    .where(eq(blocks.blockerDid, userDid))
+    .where(and(...conditions))
     .orderBy(desc(blocks.createdAt))
     .limit(limit);
 
-  if (cursor) {
-    const cursorDate = new Date(cursor);
-    query = query.where(sql`${blocks.createdAt} < ${cursorDate}`) as typeof query;
-  }
-
-  const results = await query;
-
+  const lastResult = results[results.length - 1];
   const nextCursor =
-    results.length === limit
-      ? results[results.length - 1].block.createdAt.toISOString()
+    results.length === limit && lastResult
+      ? lastResult.block.createdAt.toISOString()
       : undefined;
 
   return c.json({
@@ -477,27 +475,27 @@ socialRouter.get('/io.exprsn.graph.getMutes', authMiddleware, async (c) => {
   const limit = Math.min(parseInt(c.req.query('limit') || '50', 10), 100);
   const cursor = c.req.query('cursor');
 
-  let query = db
+  const conditions = [eq(mutes.muterDid, userDid)];
+  if (cursor) {
+    const cursorDate = new Date(cursor);
+    conditions.push(sql`${mutes.createdAt} < ${cursorDate}`);
+  }
+
+  const results = await db
     .select({
       mute: mutes,
       user: users,
     })
     .from(mutes)
     .innerJoin(users, eq(mutes.mutedDid, users.did))
-    .where(eq(mutes.muterDid, userDid))
+    .where(and(...conditions))
     .orderBy(desc(mutes.createdAt))
     .limit(limit);
 
-  if (cursor) {
-    const cursorDate = new Date(cursor);
-    query = query.where(sql`${mutes.createdAt} < ${cursorDate}`) as typeof query;
-  }
-
-  const results = await query;
-
+  const lastResult = results[results.length - 1];
   const nextCursor =
-    results.length === limit
-      ? results[results.length - 1].mute.createdAt.toISOString()
+    results.length === limit && lastResult
+      ? lastResult.mute.createdAt.toISOString()
       : undefined;
 
   return c.json({

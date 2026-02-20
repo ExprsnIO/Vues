@@ -419,7 +419,7 @@ xrpcRouter.get('/io.exprsn.video.getTrendingTags', async (c) => {
     `
   );
 
-  const tags = (results.rows as { tag: string; video_count: string }[]).map((row) => ({
+  const tags = (results as unknown as { tag: string; video_count: string }[]).map((row) => ({
     name: row.tag,
     videoCount: parseInt(row.video_count, 10),
   }));
@@ -713,11 +713,12 @@ xrpcRouter.post('/io.exprsn.video.trackView', optionalAuthMiddleware, async (c) 
     await db
       .insert(userInteractions)
       .values({
+        id: crypto.randomUUID(),
         userDid,
         videoUri,
         interactionType: 'view',
         watchDuration: watchDuration || 0,
-        watchPercentage: completed ? 100 : Math.min(99, Math.floor((watchDuration || 0) / 10)),
+        completionRate: completed ? 1.0 : Math.min(0.99, (watchDuration || 0) / 100),
         createdAt: new Date(),
       })
       .onConflictDoNothing();

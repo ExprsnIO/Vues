@@ -146,26 +146,26 @@ chatRouter.get('/io.exprsn.chat.getConversations', authMiddleware, async (c) => 
   const limit = Math.min(parseInt(c.req.query('limit') || '50', 10), 100);
   const cursor = c.req.query('cursor');
 
-  let query = db
+  const conditions = [
+    or(
+      eq(conversations.participant1Did, userDid),
+      eq(conversations.participant2Did, userDid)
+    ),
+  ];
+
+  if (cursor) {
+    const cursorDate = new Date(cursor);
+    conditions.push(sql`${conversations.lastMessageAt} < ${cursorDate}`);
+  }
+
+  const results = await db
     .select({
       conversation: conversations,
     })
     .from(conversations)
-    .where(
-      or(
-        eq(conversations.participant1Did, userDid),
-        eq(conversations.participant2Did, userDid)
-      )
-    )
+    .where(and(...conditions))
     .orderBy(desc(conversations.lastMessageAt))
     .limit(limit);
-
-  if (cursor) {
-    const cursorDate = new Date(cursor);
-    query = query.where(sql`${conversations.lastMessageAt} < ${cursorDate}`) as typeof query;
-  }
-
-  const results = await query;
 
   // Hydrate with participant info
   const hydratedConversations = await Promise.all(
@@ -225,9 +225,10 @@ chatRouter.get('/io.exprsn.chat.getConversations', authMiddleware, async (c) => 
     })
   );
 
+  const lastResult = results[results.length - 1];
   const nextCursor =
-    results.length === limit && results[results.length - 1].conversation.lastMessageAt
-      ? results[results.length - 1].conversation.lastMessageAt!.toISOString()
+    results.length === limit && lastResult?.conversation.lastMessageAt
+      ? lastResult.conversation.lastMessageAt.toISOString()
       : undefined;
 
   return c.json({
@@ -356,21 +357,21 @@ chatRouter.get('/io.exprsn.chat.getMessages', authMiddleware, async (c) => {
     throw new HTTPException(404, { message: 'Conversation not found' });
   }
 
-  let query = db
+  const messageConditions = [eq(messages.conversationId, conversationId)];
+
+  if (cursor) {
+    const cursorDate = new Date(cursor);
+    messageConditions.push(sql`${messages.createdAt} < ${cursorDate}`);
+  }
+
+  const results = await db
     .select({
       message: messages,
     })
     .from(messages)
-    .where(eq(messages.conversationId, conversationId))
+    .where(and(...messageConditions))
     .orderBy(desc(messages.createdAt))
     .limit(limit);
-
-  if (cursor) {
-    const cursorDate = new Date(cursor);
-    query = query.where(sql`${messages.createdAt} < ${cursorDate}`) as typeof query;
-  }
-
-  const results = await query;
 
   // Get unique sender DIDs
   const senderDids = [...new Set(results.map((r) => r.message.senderDid))];
@@ -393,9 +394,10 @@ chatRouter.get('/io.exprsn.chat.getMessages', authMiddleware, async (c) => {
       )
     );
 
+  const lastMessageResult = results[results.length - 1];
   const nextCursor =
-    results.length === limit
-      ? results[results.length - 1].message.createdAt.toISOString()
+    results.length === limit && lastMessageResult
+      ? lastMessageResult.message.createdAt.toISOString()
       : undefined;
 
   return c.json({

@@ -129,23 +129,22 @@ graphRouter.get('/io.exprsn.graph.getFollowers', optionalAuthMiddleware, async (
     throw new HTTPException(404, { message: 'User not found' });
   }
 
-  let query = db
+  const conditions = [eq(follows.followeeDid, did)];
+  if (cursor) {
+    const cursorDate = new Date(cursor);
+    conditions.push(sql`${follows.createdAt} < ${cursorDate}`);
+  }
+
+  const results = await db
     .select({
       follow: follows,
       user: users,
     })
     .from(follows)
     .innerJoin(users, eq(follows.followerDid, users.did))
-    .where(eq(follows.followeeDid, did))
+    .where(and(...conditions))
     .orderBy(desc(follows.createdAt))
     .limit(limit);
-
-  if (cursor) {
-    const cursorDate = new Date(cursor);
-    query = query.where(sql`${follows.createdAt} < ${cursorDate}`) as typeof query;
-  }
-
-  const results = await query;
 
   // If viewer is logged in, check if they follow each user
   let viewerFollows: Set<string> = new Set();
@@ -165,9 +164,10 @@ graphRouter.get('/io.exprsn.graph.getFollowers', optionalAuthMiddleware, async (
     viewerFollows = new Set(viewerFollowsQuery.map((f) => f.followeeDid));
   }
 
+  const lastFollowerResult = results[results.length - 1];
   const nextCursor =
-    results.length === limit
-      ? results[results.length - 1].follow.createdAt.toISOString()
+    results.length === limit && lastFollowerResult
+      ? lastFollowerResult.follow.createdAt.toISOString()
       : undefined;
 
   return c.json({
@@ -217,23 +217,22 @@ graphRouter.get('/io.exprsn.graph.getFollowing', optionalAuthMiddleware, async (
     throw new HTTPException(404, { message: 'User not found' });
   }
 
-  let query = db
+  const followingConditions = [eq(follows.followerDid, did)];
+  if (cursor) {
+    const cursorDate = new Date(cursor);
+    followingConditions.push(sql`${follows.createdAt} < ${cursorDate}`);
+  }
+
+  const results = await db
     .select({
       follow: follows,
       user: users,
     })
     .from(follows)
     .innerJoin(users, eq(follows.followeeDid, users.did))
-    .where(eq(follows.followerDid, did))
+    .where(and(...followingConditions))
     .orderBy(desc(follows.createdAt))
     .limit(limit);
-
-  if (cursor) {
-    const cursorDate = new Date(cursor);
-    query = query.where(sql`${follows.createdAt} < ${cursorDate}`) as typeof query;
-  }
-
-  const results = await query;
 
   // If viewer is logged in, check if they follow each user
   let viewerFollows: Set<string> = new Set();
@@ -253,9 +252,10 @@ graphRouter.get('/io.exprsn.graph.getFollowing', optionalAuthMiddleware, async (
     viewerFollows = new Set(viewerFollowsQuery.map((f) => f.followeeDid));
   }
 
+  const lastFollowingResult = results[results.length - 1];
   const nextCursor =
-    results.length === limit
-      ? results[results.length - 1].follow.createdAt.toISOString()
+    results.length === limit && lastFollowingResult
+      ? lastFollowingResult.follow.createdAt.toISOString()
       : undefined;
 
   return c.json({
@@ -298,6 +298,15 @@ graphRouter.post('/io.exprsn.graph.createList', authMiddleware, async (c) => {
     throw new HTTPException(400, { message: 'List name is required' });
   }
 
+  if (!purpose) {
+    throw new HTTPException(400, { message: 'List purpose is required' });
+  }
+
+  const validPurposes = ['curatelist', 'modlist', 'referencelist'];
+  if (!validPurposes.includes(purpose)) {
+    throw new HTTPException(400, { message: `Invalid purpose. Must be one of: ${validPurposes.join(', ')}` });
+  }
+
   const listId = nanoid();
   const listUri = `at://${userDid}/io.exprsn.graph.list/${listId}`;
 
@@ -308,7 +317,7 @@ graphRouter.post('/io.exprsn.graph.createList', authMiddleware, async (c) => {
     name,
     description: description || null,
     avatar: avatar || null,
-    purpose: purpose || 'curatelist',
+    purpose,
     createdAt: new Date(),
   });
 
@@ -404,22 +413,22 @@ graphRouter.get('/io.exprsn.graph.getLists', optionalAuthMiddleware, async (c) =
     throw new HTTPException(404, { message: 'User not found' });
   }
 
-  let query = db
+  const listConditions = [eq(lists.authorDid, did)];
+  if (cursor) {
+    const cursorDate = new Date(cursor);
+    listConditions.push(sql`${lists.createdAt} < ${cursorDate}`);
+  }
+
+  const results = await db
     .select()
     .from(lists)
-    .where(eq(lists.authorDid, did))
+    .where(and(...listConditions))
     .orderBy(desc(lists.createdAt))
     .limit(limit);
 
-  if (cursor) {
-    const cursorDate = new Date(cursor);
-    query = query.where(sql`${lists.createdAt} < ${cursorDate}`) as typeof query;
-  }
-
-  const results = await query;
-
+  const lastListResult = results[results.length - 1];
   const nextCursor =
-    results.length === limit ? results[results.length - 1].createdAt.toISOString() : undefined;
+    results.length === limit && lastListResult ? lastListResult.createdAt.toISOString() : undefined;
 
   return c.json({
     lists: results.map((list) => ({
@@ -469,27 +478,27 @@ graphRouter.get('/io.exprsn.graph.getList', optionalAuthMiddleware, async (c) =>
   });
 
   // Get list items with users
-  let query = db
+  const itemConditions = [eq(listItems.listUri, uri)];
+  if (cursor) {
+    const cursorDate = new Date(cursor);
+    itemConditions.push(sql`${listItems.createdAt} < ${cursorDate}`);
+  }
+
+  const members = await db
     .select({
       item: listItems,
       user: users,
     })
     .from(listItems)
     .innerJoin(users, eq(listItems.subjectDid, users.did))
-    .where(eq(listItems.listUri, uri))
+    .where(and(...itemConditions))
     .orderBy(desc(listItems.createdAt))
     .limit(limit);
 
-  if (cursor) {
-    const cursorDate = new Date(cursor);
-    query = query.where(sql`${listItems.createdAt} < ${cursorDate}`) as typeof query;
-  }
-
-  const members = await query;
-
+  const lastMember = members[members.length - 1];
   const nextCursor =
-    members.length === limit
-      ? members[members.length - 1].item.createdAt.toISOString()
+    members.length === limit && lastMember
+      ? lastMember.item.createdAt.toISOString()
       : undefined;
 
   return c.json({

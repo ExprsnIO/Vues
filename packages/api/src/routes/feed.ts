@@ -102,19 +102,18 @@ feedRouter.get('/io.exprsn.feed.getTimeline', authMiddleware, async (c) => {
   }
 
   // Get videos from followed users
-  let query = db
-    .select()
-    .from(videos)
-    .where(inArray(videos.authorDid, followedDids))
-    .orderBy(desc(videos.createdAt))
-    .limit(limit);
-
+  const timelineConditions = [inArray(videos.authorDid, followedDids)];
   if (cursor) {
     const cursorDate = new Date(cursor);
-    query = query.where(lt(videos.createdAt, cursorDate)) as typeof query;
+    timelineConditions.push(lt(videos.createdAt, cursorDate));
   }
 
-  const results = await query;
+  const results = await db
+    .select()
+    .from(videos)
+    .where(and(...timelineConditions))
+    .orderBy(desc(videos.createdAt))
+    .limit(limit);
 
   // Build feed with video views
   const feed = await Promise.all(
@@ -123,9 +122,10 @@ feedRouter.get('/io.exprsn.feed.getTimeline', authMiddleware, async (c) => {
     }))
   );
 
+  const lastResult = results[results.length - 1];
   const nextCursor =
-    results.length === limit
-      ? results[results.length - 1].createdAt.toISOString()
+    results.length === limit && lastResult
+      ? lastResult.createdAt.toISOString()
       : undefined;
 
   return c.json({
@@ -159,31 +159,31 @@ feedRouter.get('/io.exprsn.feed.getActorLikes', optionalAuthMiddleware, async (c
   }
 
   // Get likes with video data
-  let query = db
+  const likesConditions = [eq(likes.authorDid, user.did)];
+  if (cursor) {
+    const cursorDate = new Date(cursor);
+    likesConditions.push(lt(likes.createdAt, cursorDate));
+  }
+
+  const results = await db
     .select({
       like: likes,
       video: videos,
     })
     .from(likes)
     .innerJoin(videos, eq(likes.videoUri, videos.uri))
-    .where(eq(likes.authorDid, user.did))
+    .where(and(...likesConditions))
     .orderBy(desc(likes.createdAt))
     .limit(limit);
-
-  if (cursor) {
-    const cursorDate = new Date(cursor);
-    query = query.where(lt(likes.createdAt, cursorDate)) as typeof query;
-  }
-
-  const results = await query;
 
   const feed = await Promise.all(
     results.map(async (r) => await buildVideoView(r.video, viewerDid))
   );
 
+  const lastLikeResult = results[results.length - 1];
   const nextCursor =
-    results.length === limit
-      ? results[results.length - 1].like.createdAt.toISOString()
+    results.length === limit && lastLikeResult
+      ? lastLikeResult.like.createdAt.toISOString()
       : undefined;
 
   return c.json({
@@ -202,37 +202,37 @@ feedRouter.get('/io.exprsn.feed.getSuggestedFeed', optionalAuthMiddleware, async
   const cursor = c.req.query('cursor');
 
   // Get trending videos combined with recent popular videos
-  let query = db
+  const suggestedConditions = [eq(videos.visibility, 'public')];
+  if (cursor) {
+    const cursorScore = parseFloat(cursor);
+    suggestedConditions.push(
+      sql`COALESCE(${trendingVideos.score}, 0) + ${videos.viewCount} * 0.001 < ${cursorScore}`
+    );
+  }
+
+  const results = await db
     .select({
       video: videos,
       trendingScore: trendingVideos.score,
     })
     .from(videos)
     .leftJoin(trendingVideos, eq(videos.uri, trendingVideos.videoUri))
-    .where(eq(videos.visibility, 'public'))
+    .where(and(...suggestedConditions))
     .orderBy(
       desc(sql`COALESCE(${trendingVideos.score}, 0) + ${videos.viewCount} * 0.001`)
     )
     .limit(limit);
 
-  if (cursor) {
-    const cursorScore = parseFloat(cursor);
-    query = query.where(
-      sql`COALESCE(${trendingVideos.score}, 0) + ${videos.viewCount} * 0.001 < ${cursorScore}`
-    ) as typeof query;
-  }
-
-  const results = await query;
-
   const feed = await Promise.all(
     results.map(async (r) => await buildVideoView(r.video, viewerDid))
   );
 
+  const lastSuggestedResult = results[results.length - 1];
   const nextCursor =
-    results.length === limit
+    results.length === limit && lastSuggestedResult
       ? (
-          (results[results.length - 1].trendingScore || 0) +
-          results[results.length - 1].video.viewCount * 0.001
+          (lastSuggestedResult.trendingScore || 0) +
+          lastSuggestedResult.video.viewCount * 0.001
         ).toString()
       : undefined;
 
@@ -278,19 +278,18 @@ feedRouter.get('/io.exprsn.feed.getActorFeed', optionalAuthMiddleware, async (c)
 
   // Get posts if filter includes posts
   if (filter === 'posts' || filter === 'posts_and_reposts') {
-    let postsQuery = db
-      .select()
-      .from(videos)
-      .where(eq(videos.authorDid, user.did))
-      .orderBy(desc(videos.createdAt))
-      .limit(limit);
-
+    const postsConditions = [eq(videos.authorDid, user.did)];
     if (cursor) {
       const cursorDate = new Date(cursor);
-      postsQuery = postsQuery.where(lt(videos.createdAt, cursorDate)) as typeof postsQuery;
+      postsConditions.push(lt(videos.createdAt, cursorDate));
     }
 
-    const posts = await postsQuery;
+    const posts = await db
+      .select()
+      .from(videos)
+      .where(and(...postsConditions))
+      .orderBy(desc(videos.createdAt))
+      .limit(limit);
     feedItems.push(
       ...posts.map((v) => ({
         video: v,
@@ -302,23 +301,22 @@ feedRouter.get('/io.exprsn.feed.getActorFeed', optionalAuthMiddleware, async (c)
 
   // Get reposts if filter includes reposts
   if (filter === 'reposts' || filter === 'posts_and_reposts') {
-    let repostsQuery = db
+    const repostsConditions = [eq(reposts.authorDid, user.did)];
+    if (cursor) {
+      const cursorDate = new Date(cursor);
+      repostsConditions.push(lt(reposts.createdAt, cursorDate));
+    }
+
+    const repostResults = await db
       .select({
         repost: reposts,
         video: videos,
       })
       .from(reposts)
       .innerJoin(videos, eq(reposts.videoUri, videos.uri))
-      .where(eq(reposts.authorDid, user.did))
+      .where(and(...repostsConditions))
       .orderBy(desc(reposts.createdAt))
       .limit(limit);
-
-    if (cursor) {
-      const cursorDate = new Date(cursor);
-      repostsQuery = repostsQuery.where(lt(reposts.createdAt, cursorDate)) as typeof repostsQuery;
-    }
-
-    const repostResults = await repostsQuery;
     feedItems.push(
       ...repostResults.map((r) => ({
         video: r.video,
@@ -357,9 +355,10 @@ feedRouter.get('/io.exprsn.feed.getActorFeed', optionalAuthMiddleware, async (c)
     })
   );
 
+  const lastFeedItem = limitedItems[limitedItems.length - 1];
   const nextCursor =
-    limitedItems.length === limit
-      ? limitedItems[limitedItems.length - 1].timestamp.toISOString()
+    limitedItems.length === limit && lastFeedItem
+      ? lastFeedItem.timestamp.toISOString()
       : undefined;
 
   return c.json({

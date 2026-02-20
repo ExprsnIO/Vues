@@ -7,18 +7,26 @@ import {
   organizationMembers,
   bulkImportJobs,
   users,
+  organizationTags,
+  organizationMemberTags,
+  organizationBlockedWords,
+  organizationActivity,
+  actorRepos,
 } from '../db/schema.js';
-import { eq, and, desc, sql } from 'drizzle-orm';
+import { eq, and, desc, asc, sql, gte, count } from 'drizzle-orm';
 import {
   createImportJob,
   generateCSVTemplate,
   generateXLSXTemplate,
 } from '../services/bulk-import.js';
+import { authMiddleware, optionalAuthMiddleware } from '../auth/middleware.js';
+import bcrypt from 'bcryptjs';
+import * as XLSX from 'xlsx';
 
 // Middleware type for authenticated requests
 type AuthContext = {
   Variables: {
-    userDid: string;
+    did: string;
   };
 };
 
@@ -69,8 +77,8 @@ async function checkOrgPermission(
 // ============================================
 
 // Create organization
-organizationRoutes.post('/xrpc/io.exprsn.org.create', async (c) => {
-  const userDid = c.get('userDid');
+organizationRoutes.post('/io.exprsn.org.create', authMiddleware, async (c) => {
+  const userDid = c.get('did');
   if (!userDid) {
     throw new HTTPException(401, { message: 'Authentication required' });
   }
@@ -124,8 +132,8 @@ organizationRoutes.post('/xrpc/io.exprsn.org.create', async (c) => {
 });
 
 // Get organization
-organizationRoutes.get('/xrpc/io.exprsn.org.get', async (c) => {
-  const userDid = c.get('userDid');
+organizationRoutes.get('/io.exprsn.org.get', optionalAuthMiddleware, async (c) => {
+  const userDid = c.get('did');
   const orgId = c.req.query('id');
 
   if (!orgId) {
@@ -195,8 +203,8 @@ organizationRoutes.get('/xrpc/io.exprsn.org.get', async (c) => {
 });
 
 // Update organization
-organizationRoutes.post('/xrpc/io.exprsn.org.update', async (c) => {
-  const userDid = c.get('userDid');
+organizationRoutes.post('/io.exprsn.org.update', authMiddleware, async (c) => {
+  const userDid = c.get('did');
   if (!userDid) {
     throw new HTTPException(401, { message: 'Authentication required' });
   }
@@ -243,8 +251,8 @@ organizationRoutes.post('/xrpc/io.exprsn.org.update', async (c) => {
 });
 
 // List user's organizations
-organizationRoutes.get('/xrpc/io.exprsn.org.list', async (c) => {
-  const userDid = c.get('userDid');
+organizationRoutes.get('/io.exprsn.org.list', authMiddleware, async (c) => {
+  const userDid = c.get('did');
   if (!userDid) {
     throw new HTTPException(401, { message: 'Authentication required' });
   }
@@ -277,13 +285,10 @@ organizationRoutes.get('/xrpc/io.exprsn.org.list', async (c) => {
 // ============================================
 
 // List organization members
-organizationRoutes.get('/xrpc/io.exprsn.org.members.list', async (c) => {
-  const userDid = c.get('userDid');
-  if (!userDid) {
-    throw new HTTPException(401, { message: 'Authentication required' });
-  }
+organizationRoutes.get('/io.exprsn.org.members.list', authMiddleware, async (c) => {
+  const userDid = c.get('did');
 
-  const orgId = c.req.query('organizationId');
+  const orgId = c.req.query('id') || c.req.query('organizationId');
   const limit = Math.min(parseInt(c.req.query('limit') || '50'), 100);
   const cursor = c.req.query('cursor');
 
@@ -340,8 +345,8 @@ organizationRoutes.get('/xrpc/io.exprsn.org.members.list', async (c) => {
 });
 
 // Invite member to organization
-organizationRoutes.post('/xrpc/io.exprsn.org.members.invite', async (c) => {
-  const userDid = c.get('userDid');
+organizationRoutes.post('/io.exprsn.org.members.invite', authMiddleware, async (c) => {
+  const userDid = c.get('did');
   if (!userDid) {
     throw new HTTPException(401, { message: 'Authentication required' });
   }
@@ -416,8 +421,8 @@ organizationRoutes.post('/xrpc/io.exprsn.org.members.invite', async (c) => {
 });
 
 // Update member role
-organizationRoutes.post('/xrpc/io.exprsn.org.members.updateRole', async (c) => {
-  const userDid = c.get('userDid');
+organizationRoutes.post('/io.exprsn.org.members.updateRole', authMiddleware, async (c) => {
+  const userDid = c.get('did');
   if (!userDid) {
     throw new HTTPException(401, { message: 'Authentication required' });
   }
@@ -459,8 +464,8 @@ organizationRoutes.post('/xrpc/io.exprsn.org.members.updateRole', async (c) => {
 });
 
 // Remove member from organization
-organizationRoutes.post('/xrpc/io.exprsn.org.members.remove', async (c) => {
-  const userDid = c.get('userDid');
+organizationRoutes.post('/io.exprsn.org.members.remove', authMiddleware, async (c) => {
+  const userDid = c.get('did');
   if (!userDid) {
     throw new HTTPException(401, { message: 'Authentication required' });
   }
@@ -519,8 +524,8 @@ organizationRoutes.post('/xrpc/io.exprsn.org.members.remove', async (c) => {
 // ============================================
 
 // Upload file for bulk import
-organizationRoutes.post('/xrpc/io.exprsn.org.import.upload', async (c) => {
-  const userDid = c.get('userDid');
+organizationRoutes.post('/io.exprsn.org.import.upload', authMiddleware, async (c) => {
+  const userDid = c.get('did');
   if (!userDid) {
     throw new HTTPException(401, { message: 'Authentication required' });
   }
@@ -581,8 +586,8 @@ organizationRoutes.post('/xrpc/io.exprsn.org.import.upload', async (c) => {
 });
 
 // Get import job status
-organizationRoutes.get('/xrpc/io.exprsn.org.import.status', async (c) => {
-  const userDid = c.get('userDid');
+organizationRoutes.get('/io.exprsn.org.import.status', authMiddleware, async (c) => {
+  const userDid = c.get('did');
   if (!userDid) {
     throw new HTTPException(401, { message: 'Authentication required' });
   }
@@ -624,8 +629,8 @@ organizationRoutes.get('/xrpc/io.exprsn.org.import.status', async (c) => {
 });
 
 // List import jobs for organization
-organizationRoutes.get('/xrpc/io.exprsn.org.import.list', async (c) => {
-  const userDid = c.get('userDid');
+organizationRoutes.get('/io.exprsn.org.import.list', authMiddleware, async (c) => {
+  const userDid = c.get('did');
   if (!userDid) {
     throw new HTTPException(401, { message: 'Authentication required' });
   }
@@ -675,7 +680,7 @@ organizationRoutes.get('/xrpc/io.exprsn.org.import.list', async (c) => {
 });
 
 // Download import template
-organizationRoutes.get('/xrpc/io.exprsn.org.import.template', async (c) => {
+organizationRoutes.get('/io.exprsn.org.import.template', authMiddleware, async (c) => {
   const format = c.req.query('format') || 'csv';
 
   if (format === 'xlsx') {
@@ -698,8 +703,8 @@ organizationRoutes.get('/xrpc/io.exprsn.org.import.template', async (c) => {
 });
 
 // Cancel import job
-organizationRoutes.post('/xrpc/io.exprsn.org.import.cancel', async (c) => {
-  const userDid = c.get('userDid');
+organizationRoutes.post('/io.exprsn.org.import.cancel', authMiddleware, async (c) => {
+  const userDid = c.get('did');
   if (!userDid) {
     throw new HTTPException(401, { message: 'Authentication required' });
   }
@@ -737,6 +742,1115 @@ organizationRoutes.post('/xrpc/io.exprsn.org.import.cancel', async (c) => {
       completedAt: new Date(),
     })
     .where(eq(bulkImportJobs.id, body.jobId));
+
+  return c.json({ success: true });
+});
+
+// ============================================
+// Member Management - Extended
+// ============================================
+
+// Update member profile (by admin)
+organizationRoutes.post('/io.exprsn.org.members.update', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const body = await c.req.json<{
+    organizationId: string;
+    memberId: string;
+    displayName?: string;
+    bio?: string;
+    avatar?: string;
+  }>();
+
+  if (!body.organizationId || !body.memberId) {
+    throw new HTTPException(400, { message: 'Organization ID and member ID required' });
+  }
+
+  // Check permission
+  const access = await checkOrgPermission(userDid, body.organizationId, 'manage_members');
+  if (!access) {
+    throw new HTTPException(403, { message: 'Permission denied' });
+  }
+
+  // Get member info
+  const memberResult = await db
+    .select()
+    .from(organizationMembers)
+    .where(eq(organizationMembers.id, body.memberId))
+    .limit(1);
+
+  const member = memberResult[0];
+  if (!member || member.organizationId !== body.organizationId) {
+    throw new HTTPException(404, { message: 'Member not found' });
+  }
+
+  // Update the user profile
+  const updates: Record<string, unknown> = {};
+  if (body.displayName !== undefined) updates.displayName = body.displayName;
+  if (body.bio !== undefined) updates.bio = body.bio;
+  if (body.avatar !== undefined) updates.avatar = body.avatar;
+
+  if (Object.keys(updates).length > 0) {
+    await db
+      .update(users)
+      .set(updates)
+      .where(eq(users.did, member.userDid));
+
+    // Log activity
+    await db.insert(organizationActivity).values({
+      id: nanoid(),
+      organizationId: body.organizationId,
+      actorDid: userDid,
+      action: 'member_updated',
+      targetType: 'member',
+      targetId: body.memberId,
+      details: { updates: Object.keys(updates) },
+    });
+  }
+
+  return c.json({ success: true });
+});
+
+// Reset member password
+organizationRoutes.post('/io.exprsn.org.members.resetPassword', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const body = await c.req.json<{
+    organizationId: string;
+    memberId: string;
+    newPassword?: string;
+  }>();
+
+  if (!body.organizationId || !body.memberId) {
+    throw new HTTPException(400, { message: 'Organization ID and member ID required' });
+  }
+
+  // Check permission
+  const access = await checkOrgPermission(userDid, body.organizationId, 'manage_members');
+  if (!access) {
+    throw new HTTPException(403, { message: 'Permission denied' });
+  }
+
+  // Get member info
+  const memberResult = await db
+    .select()
+    .from(organizationMembers)
+    .where(eq(organizationMembers.id, body.memberId))
+    .limit(1);
+
+  const member = memberResult[0];
+  if (!member || member.organizationId !== body.organizationId) {
+    throw new HTTPException(404, { message: 'Member not found' });
+  }
+
+  // Generate or use provided password
+  const newPassword = body.newPassword || nanoid(12);
+  const passwordHash = await bcrypt.hash(newPassword, 10);
+
+  // Update actor_repos password
+  await db
+    .update(actorRepos)
+    .set({ passwordHash })
+    .where(eq(actorRepos.did, member.userDid));
+
+  // Log activity
+  await db.insert(organizationActivity).values({
+    id: nanoid(),
+    organizationId: body.organizationId,
+    actorDid: userDid,
+    action: 'password_reset',
+    targetType: 'member',
+    targetId: body.memberId,
+  });
+
+  return c.json({
+    success: true,
+    temporaryPassword: body.newPassword ? undefined : newPassword,
+  });
+});
+
+// Suspend/activate member
+organizationRoutes.post('/io.exprsn.org.members.suspend', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const body = await c.req.json<{
+    organizationId: string;
+    memberId: string;
+    suspended: boolean;
+    reason?: string;
+  }>();
+
+  if (!body.organizationId || !body.memberId || body.suspended === undefined) {
+    throw new HTTPException(400, { message: 'Missing required fields' });
+  }
+
+  // Check permission
+  const access = await checkOrgPermission(userDid, body.organizationId, 'manage_members');
+  if (!access) {
+    throw new HTTPException(403, { message: 'Permission denied' });
+  }
+
+  // Get member info
+  const memberResult = await db
+    .select()
+    .from(organizationMembers)
+    .where(eq(organizationMembers.id, body.memberId))
+    .limit(1);
+
+  const member = memberResult[0];
+  if (!member || member.organizationId !== body.organizationId) {
+    throw new HTTPException(404, { message: 'Member not found' });
+  }
+
+  // Can't suspend owner
+  if (member.role === 'owner') {
+    throw new HTTPException(400, { message: 'Cannot suspend organization owner' });
+  }
+
+  // Update member status
+  await db
+    .update(organizationMembers)
+    .set({
+      status: body.suspended ? 'suspended' : 'active',
+      suspendedAt: body.suspended ? new Date() : null,
+      suspendedBy: body.suspended ? userDid : null,
+      suspendedReason: body.suspended ? body.reason : null,
+    })
+    .where(eq(organizationMembers.id, body.memberId));
+
+  // Log activity
+  await db.insert(organizationActivity).values({
+    id: nanoid(),
+    organizationId: body.organizationId,
+    actorDid: userDid,
+    action: body.suspended ? 'member_suspended' : 'member_activated',
+    targetType: 'member',
+    targetId: body.memberId,
+    details: body.reason ? { reason: body.reason } : undefined,
+  });
+
+  return c.json({ success: true });
+});
+
+// Reorder members
+organizationRoutes.post('/io.exprsn.org.members.reorder', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const body = await c.req.json<{
+    organizationId: string;
+    memberIds: string[];
+  }>();
+
+  if (!body.organizationId || !body.memberIds?.length) {
+    throw new HTTPException(400, { message: 'Organization ID and member IDs required' });
+  }
+
+  // Check permission
+  const access = await checkOrgPermission(userDid, body.organizationId, 'manage_members');
+  if (!access) {
+    throw new HTTPException(403, { message: 'Permission denied' });
+  }
+
+  // Update display order for each member
+  for (let i = 0; i < body.memberIds.length; i++) {
+    const memberId = body.memberIds[i];
+    if (!memberId) continue;
+    await db
+      .update(organizationMembers)
+      .set({ displayOrder: i })
+      .where(
+        and(
+          eq(organizationMembers.id, memberId),
+          eq(organizationMembers.organizationId, body.organizationId)
+        )
+      );
+  }
+
+  return c.json({ success: true });
+});
+
+// Export members to CSV/XLSX
+organizationRoutes.get('/io.exprsn.org.members.export', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const organizationId = c.req.query('organizationId');
+  const format = c.req.query('format') || 'csv';
+
+  if (!organizationId) {
+    throw new HTTPException(400, { message: 'Organization ID required' });
+  }
+
+  // Check permission
+  const access = await checkOrgPermission(userDid, organizationId);
+  if (!access) {
+    throw new HTTPException(403, { message: 'Permission denied' });
+  }
+
+  // Get all members
+  const members = await db
+    .select({
+      member: organizationMembers,
+      user: users,
+    })
+    .from(organizationMembers)
+    .innerJoin(users, eq(users.did, organizationMembers.userDid))
+    .where(eq(organizationMembers.organizationId, organizationId))
+    .orderBy(asc(organizationMembers.displayOrder));
+
+  // Format data for export
+  const exportData = members.map(({ member, user }) => ({
+    handle: user.handle,
+    displayName: user.displayName || '',
+    email: '', // Don't export email for privacy
+    role: member.role,
+    status: member.status,
+    joinedAt: member.joinedAt.toISOString(),
+  }));
+
+  if (format === 'xlsx') {
+    const ws = XLSX.utils.json_to_sheet(exportData);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Members');
+    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+
+    return new Response(buffer, {
+      headers: {
+        'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'Content-Disposition': 'attachment; filename="members.xlsx"',
+      },
+    });
+  }
+
+  // CSV format
+  const headers = ['handle', 'displayName', 'email', 'role', 'status', 'joinedAt'];
+  const csvRows = [headers.join(',')];
+  for (const row of exportData) {
+    csvRows.push(headers.map(h => `"${String(row[h as keyof typeof row]).replace(/"/g, '""')}"`).join(','));
+  }
+
+  return new Response(csvRows.join('\n'), {
+    headers: {
+      'Content-Type': 'text/csv',
+      'Content-Disposition': 'attachment; filename="members.csv"',
+    },
+  });
+});
+
+// ============================================
+// Tag Management
+// ============================================
+
+// List organization tags
+organizationRoutes.get('/io.exprsn.org.tags.list', authMiddleware, async (c) => {
+  const organizationId = c.req.query('organizationId');
+
+  if (!organizationId) {
+    throw new HTTPException(400, { message: 'Organization ID required' });
+  }
+
+  const tags = await db
+    .select({
+      tag: organizationTags,
+      memberCount: sql<number>`(SELECT COUNT(*) FROM organization_member_tags WHERE tag_id = ${organizationTags.id})`,
+    })
+    .from(organizationTags)
+    .where(eq(organizationTags.organizationId, organizationId))
+    .orderBy(asc(organizationTags.name));
+
+  return c.json({
+    tags: tags.map(({ tag, memberCount }) => ({
+      id: tag.id,
+      name: tag.name,
+      color: tag.color,
+      description: tag.description,
+      memberCount,
+      createdAt: tag.createdAt.toISOString(),
+    })),
+  });
+});
+
+// Create tag
+organizationRoutes.post('/io.exprsn.org.tags.create', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const body = await c.req.json<{
+    organizationId: string;
+    name: string;
+    color: string;
+    description?: string;
+  }>();
+
+  if (!body.organizationId || !body.name || !body.color) {
+    throw new HTTPException(400, { message: 'Organization ID, name, and color required' });
+  }
+
+  // Check permission
+  const access = await checkOrgPermission(userDid, body.organizationId, 'edit_settings');
+  if (!access) {
+    throw new HTTPException(403, { message: 'Permission denied' });
+  }
+
+  const tagId = nanoid();
+
+  await db.insert(organizationTags).values({
+    id: tagId,
+    organizationId: body.organizationId,
+    name: body.name.trim(),
+    color: body.color,
+    description: body.description,
+    createdBy: userDid,
+  });
+
+  // Log activity
+  await db.insert(organizationActivity).values({
+    id: nanoid(),
+    organizationId: body.organizationId,
+    actorDid: userDid,
+    action: 'tag_created',
+    targetType: 'tag',
+    targetId: tagId,
+    details: { name: body.name },
+  });
+
+  return c.json({
+    tag: {
+      id: tagId,
+      name: body.name.trim(),
+      color: body.color,
+      description: body.description,
+      memberCount: 0,
+    },
+  });
+});
+
+// Update tag
+organizationRoutes.post('/io.exprsn.org.tags.update', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const body = await c.req.json<{
+    tagId: string;
+    name?: string;
+    color?: string;
+    description?: string;
+  }>();
+
+  if (!body.tagId) {
+    throw new HTTPException(400, { message: 'Tag ID required' });
+  }
+
+  // Get tag to find organization
+  const tagResult = await db
+    .select()
+    .from(organizationTags)
+    .where(eq(organizationTags.id, body.tagId))
+    .limit(1);
+
+  const tag = tagResult[0];
+  if (!tag) {
+    throw new HTTPException(404, { message: 'Tag not found' });
+  }
+
+  // Check permission
+  const access = await checkOrgPermission(userDid, tag.organizationId, 'edit_settings');
+  if (!access) {
+    throw new HTTPException(403, { message: 'Permission denied' });
+  }
+
+  const updates: Record<string, unknown> = { updatedAt: new Date() };
+  if (body.name !== undefined) updates.name = body.name.trim();
+  if (body.color !== undefined) updates.color = body.color;
+  if (body.description !== undefined) updates.description = body.description;
+
+  await db
+    .update(organizationTags)
+    .set(updates)
+    .where(eq(organizationTags.id, body.tagId));
+
+  return c.json({ success: true });
+});
+
+// Delete tag
+organizationRoutes.post('/io.exprsn.org.tags.delete', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const body = await c.req.json<{ tagId: string }>();
+
+  if (!body.tagId) {
+    throw new HTTPException(400, { message: 'Tag ID required' });
+  }
+
+  // Get tag to find organization
+  const tagResult = await db
+    .select()
+    .from(organizationTags)
+    .where(eq(organizationTags.id, body.tagId))
+    .limit(1);
+
+  const tag = tagResult[0];
+  if (!tag) {
+    throw new HTTPException(404, { message: 'Tag not found' });
+  }
+
+  // Check permission
+  const access = await checkOrgPermission(userDid, tag.organizationId, 'edit_settings');
+  if (!access) {
+    throw new HTTPException(403, { message: 'Permission denied' });
+  }
+
+  // Delete tag (cascade will remove member tags)
+  await db.delete(organizationTags).where(eq(organizationTags.id, body.tagId));
+
+  // Log activity
+  await db.insert(organizationActivity).values({
+    id: nanoid(),
+    organizationId: tag.organizationId,
+    actorDid: userDid,
+    action: 'tag_deleted',
+    targetType: 'tag',
+    targetId: body.tagId,
+    details: { name: tag.name },
+  });
+
+  return c.json({ success: true });
+});
+
+// Assign tag to member
+organizationRoutes.post('/io.exprsn.org.members.assignTag', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const body = await c.req.json<{
+    organizationId: string;
+    memberId: string;
+    tagId: string;
+  }>();
+
+  if (!body.organizationId || !body.memberId || !body.tagId) {
+    throw new HTTPException(400, { message: 'Organization ID, member ID, and tag ID required' });
+  }
+
+  // Check permission
+  const access = await checkOrgPermission(userDid, body.organizationId, 'manage_members');
+  if (!access) {
+    throw new HTTPException(403, { message: 'Permission denied' });
+  }
+
+  // Check if already assigned
+  const existing = await db
+    .select()
+    .from(organizationMemberTags)
+    .where(
+      and(
+        eq(organizationMemberTags.memberId, body.memberId),
+        eq(organizationMemberTags.tagId, body.tagId)
+      )
+    )
+    .limit(1);
+
+  if (existing[0]) {
+    return c.json({ success: true, alreadyAssigned: true });
+  }
+
+  await db.insert(organizationMemberTags).values({
+    id: nanoid(),
+    memberId: body.memberId,
+    tagId: body.tagId,
+    assignedBy: userDid,
+  });
+
+  return c.json({ success: true });
+});
+
+// Remove tag from member
+organizationRoutes.post('/io.exprsn.org.members.removeTag', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const body = await c.req.json<{
+    memberId: string;
+    tagId: string;
+  }>();
+
+  if (!body.memberId || !body.tagId) {
+    throw new HTTPException(400, { message: 'Member ID and tag ID required' });
+  }
+
+  // Get member to find organization
+  const memberResult = await db
+    .select()
+    .from(organizationMembers)
+    .where(eq(organizationMembers.id, body.memberId))
+    .limit(1);
+
+  const member = memberResult[0];
+  if (!member) {
+    throw new HTTPException(404, { message: 'Member not found' });
+  }
+
+  // Check permission
+  const access = await checkOrgPermission(userDid, member.organizationId, 'manage_members');
+  if (!access) {
+    throw new HTTPException(403, { message: 'Permission denied' });
+  }
+
+  await db
+    .delete(organizationMemberTags)
+    .where(
+      and(
+        eq(organizationMemberTags.memberId, body.memberId),
+        eq(organizationMemberTags.tagId, body.tagId)
+      )
+    );
+
+  return c.json({ success: true });
+});
+
+// ============================================
+// Blocked Words Management
+// ============================================
+
+// List blocked words
+organizationRoutes.get('/io.exprsn.org.blockedWords.list', authMiddleware, async (c) => {
+  const organizationId = c.req.query('organizationId');
+
+  if (!organizationId) {
+    throw new HTTPException(400, { message: 'Organization ID required' });
+  }
+
+  const words = await db
+    .select()
+    .from(organizationBlockedWords)
+    .where(eq(organizationBlockedWords.organizationId, organizationId))
+    .orderBy(asc(organizationBlockedWords.word));
+
+  return c.json({
+    words: words.map(w => ({
+      id: w.id,
+      word: w.word,
+      severity: w.severity,
+      enabled: w.enabled,
+      createdAt: w.createdAt.toISOString(),
+    })),
+  });
+});
+
+// Add blocked word
+organizationRoutes.post('/io.exprsn.org.blockedWords.add', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const body = await c.req.json<{
+    organizationId: string;
+    word: string;
+    severity: 'low' | 'medium' | 'high';
+  }>();
+
+  if (!body.organizationId || !body.word) {
+    throw new HTTPException(400, { message: 'Organization ID and word required' });
+  }
+
+  // Check permission
+  const access = await checkOrgPermission(userDid, body.organizationId, 'edit_settings');
+  if (!access) {
+    throw new HTTPException(403, { message: 'Permission denied' });
+  }
+
+  const wordId = nanoid();
+
+  try {
+    await db.insert(organizationBlockedWords).values({
+      id: wordId,
+      organizationId: body.organizationId,
+      word: body.word.toLowerCase().trim(),
+      severity: body.severity || 'medium',
+      createdBy: userDid,
+    });
+  } catch {
+    throw new HTTPException(409, { message: 'Word already exists' });
+  }
+
+  return c.json({
+    word: {
+      id: wordId,
+      word: body.word.toLowerCase().trim(),
+      severity: body.severity || 'medium',
+      enabled: true,
+    },
+  });
+});
+
+// Update blocked word
+organizationRoutes.post('/io.exprsn.org.blockedWords.update', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const body = await c.req.json<{
+    id: string;
+    enabled?: boolean;
+    severity?: 'low' | 'medium' | 'high';
+  }>();
+
+  if (!body.id) {
+    throw new HTTPException(400, { message: 'Word ID required' });
+  }
+
+  // Get word to find organization
+  const wordResult = await db
+    .select()
+    .from(organizationBlockedWords)
+    .where(eq(organizationBlockedWords.id, body.id))
+    .limit(1);
+
+  const word = wordResult[0];
+  if (!word) {
+    throw new HTTPException(404, { message: 'Word not found' });
+  }
+
+  // Check permission
+  const access = await checkOrgPermission(userDid, word.organizationId, 'edit_settings');
+  if (!access) {
+    throw new HTTPException(403, { message: 'Permission denied' });
+  }
+
+  const updates: Record<string, unknown> = {};
+  if (body.enabled !== undefined) updates.enabled = body.enabled;
+  if (body.severity !== undefined) updates.severity = body.severity;
+
+  await db
+    .update(organizationBlockedWords)
+    .set(updates)
+    .where(eq(organizationBlockedWords.id, body.id));
+
+  return c.json({ success: true });
+});
+
+// Remove blocked word
+organizationRoutes.post('/io.exprsn.org.blockedWords.remove', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const body = await c.req.json<{ id: string }>();
+
+  if (!body.id) {
+    throw new HTTPException(400, { message: 'Word ID required' });
+  }
+
+  // Get word to find organization
+  const wordResult = await db
+    .select()
+    .from(organizationBlockedWords)
+    .where(eq(organizationBlockedWords.id, body.id))
+    .limit(1);
+
+  const word = wordResult[0];
+  if (!word) {
+    throw new HTTPException(404, { message: 'Word not found' });
+  }
+
+  // Check permission
+  const access = await checkOrgPermission(userDid, word.organizationId, 'edit_settings');
+  if (!access) {
+    throw new HTTPException(403, { message: 'Permission denied' });
+  }
+
+  await db.delete(organizationBlockedWords).where(eq(organizationBlockedWords.id, body.id));
+
+  return c.json({ success: true });
+});
+
+// Import blocked words (bulk)
+organizationRoutes.post('/io.exprsn.org.blockedWords.import', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const body = await c.req.json<{
+    organizationId: string;
+    words: string[];
+    severity: 'low' | 'medium' | 'high';
+  }>();
+
+  if (!body.organizationId || !body.words?.length) {
+    throw new HTTPException(400, { message: 'Organization ID and words required' });
+  }
+
+  // Check permission
+  const access = await checkOrgPermission(userDid, body.organizationId, 'edit_settings');
+  if (!access) {
+    throw new HTTPException(403, { message: 'Permission denied' });
+  }
+
+  let imported = 0;
+  for (const word of body.words) {
+    const trimmed = word.toLowerCase().trim();
+    if (!trimmed) continue;
+
+    try {
+      await db.insert(organizationBlockedWords).values({
+        id: nanoid(),
+        organizationId: body.organizationId,
+        word: trimmed,
+        severity: body.severity || 'medium',
+        createdBy: userDid,
+      });
+      imported++;
+    } catch {
+      // Ignore duplicates
+    }
+  }
+
+  return c.json({ imported });
+});
+
+// Export blocked words
+organizationRoutes.get('/io.exprsn.org.blockedWords.export', authMiddleware, async (c) => {
+  const organizationId = c.req.query('organizationId');
+  const format = c.req.query('format') || 'txt';
+
+  if (!organizationId) {
+    throw new HTTPException(400, { message: 'Organization ID required' });
+  }
+
+  const words = await db
+    .select()
+    .from(organizationBlockedWords)
+    .where(eq(organizationBlockedWords.organizationId, organizationId))
+    .orderBy(asc(organizationBlockedWords.word));
+
+  if (format === 'json') {
+    return c.json({
+      words: words.map(w => ({
+        word: w.word,
+        severity: w.severity,
+        enabled: w.enabled,
+      })),
+    });
+  }
+
+  // TXT format - one word per line
+  const content = words.map(w => w.word).join('\n');
+  return new Response(content, {
+    headers: {
+      'Content-Type': 'text/plain',
+      'Content-Disposition': 'attachment; filename="blocked-words.txt"',
+    },
+  });
+});
+
+// ============================================
+// Statistics & Activity
+// ============================================
+
+// Get organization statistics
+organizationRoutes.get('/io.exprsn.org.stats', authMiddleware, async (c) => {
+  const organizationId = c.req.query('organizationId');
+
+  if (!organizationId) {
+    throw new HTTPException(400, { message: 'Organization ID required' });
+  }
+
+  // Get member stats
+  const memberStats = await db
+    .select({
+      total: count(),
+      active: sql<number>`COUNT(*) FILTER (WHERE status = 'active')`,
+      suspended: sql<number>`COUNT(*) FILTER (WHERE status = 'suspended')`,
+    })
+    .from(organizationMembers)
+    .where(eq(organizationMembers.organizationId, organizationId));
+
+  // Get role distribution
+  const roleDistribution = await db
+    .select({
+      role: organizationMembers.role,
+      count: count(),
+    })
+    .from(organizationMembers)
+    .where(eq(organizationMembers.organizationId, organizationId))
+    .groupBy(organizationMembers.role);
+
+  // Get recent imports
+  const recentImports = await db
+    .select({
+      date: sql<string>`DATE(created_at)`,
+      count: count(),
+      successCount: sql<number>`SUM(success_count)`,
+    })
+    .from(bulkImportJobs)
+    .where(
+      and(
+        eq(bulkImportJobs.organizationId, organizationId),
+        gte(bulkImportJobs.createdAt, new Date(Date.now() - 30 * 24 * 60 * 60 * 1000))
+      )
+    )
+    .groupBy(sql`DATE(created_at)`)
+    .orderBy(sql`DATE(created_at)`);
+
+  // Get member growth (last 30 days)
+  const memberGrowth = await db
+    .select({
+      date: sql<string>`DATE(joined_at)`,
+      count: count(),
+    })
+    .from(organizationMembers)
+    .where(
+      and(
+        eq(organizationMembers.organizationId, organizationId),
+        gte(organizationMembers.joinedAt, new Date(Date.now() - 30 * 24 * 60 * 60 * 1000))
+      )
+    )
+    .groupBy(sql`DATE(joined_at)`)
+    .orderBy(sql`DATE(joined_at)`);
+
+  return c.json({
+    memberCount: memberStats[0]?.total || 0,
+    activeMembers: memberStats[0]?.active || 0,
+    suspendedMembers: memberStats[0]?.suspended || 0,
+    membersByRole: roleDistribution.map(r => ({
+      role: r.role,
+      count: r.count,
+    })),
+    memberGrowth: memberGrowth.map(g => ({
+      date: g.date,
+      count: g.count,
+    })),
+    recentImports: recentImports.map(i => ({
+      date: i.date,
+      count: i.count,
+      successCount: i.successCount || 0,
+    })),
+  });
+});
+
+// Get organization activity feed
+organizationRoutes.get('/io.exprsn.org.activity', authMiddleware, async (c) => {
+  const organizationId = c.req.query('organizationId');
+  const limit = Math.min(parseInt(c.req.query('limit') || '20'), 50);
+  const cursor = c.req.query('cursor');
+
+  if (!organizationId) {
+    throw new HTTPException(400, { message: 'Organization ID required' });
+  }
+
+  let query = db
+    .select({
+      activity: organizationActivity,
+      actor: {
+        did: users.did,
+        handle: users.handle,
+        displayName: users.displayName,
+        avatar: users.avatar,
+      },
+    })
+    .from(organizationActivity)
+    .innerJoin(users, eq(users.did, organizationActivity.actorDid))
+    .where(eq(organizationActivity.organizationId, organizationId))
+    .orderBy(desc(organizationActivity.createdAt))
+    .limit(limit + 1);
+
+  if (cursor) {
+    // @ts-expect-error - Drizzle query chaining type issue
+    query = query.where(
+      and(
+        eq(organizationActivity.organizationId, organizationId),
+        sql`${organizationActivity.createdAt} < ${new Date(cursor)}`
+      )
+    ) as typeof query;
+  }
+
+  const results = await query;
+  const hasMore = results.length > limit;
+  const activities = hasMore ? results.slice(0, -1) : results;
+
+  return c.json({
+    activities: activities.map(({ activity, actor }) => ({
+      id: activity.id,
+      action: activity.action,
+      targetType: activity.targetType,
+      targetId: activity.targetId,
+      details: activity.details,
+      actor,
+      createdAt: activity.createdAt.toISOString(),
+    })),
+    cursor: hasMore ? activities[activities.length - 1]?.activity.createdAt.toISOString() : undefined,
+  });
+});
+
+// ============================================
+// Danger Zone
+// ============================================
+
+// Transfer ownership
+organizationRoutes.post('/io.exprsn.org.transferOwnership', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const body = await c.req.json<{
+    organizationId: string;
+    newOwnerDid: string;
+  }>();
+
+  if (!body.organizationId || !body.newOwnerDid) {
+    throw new HTTPException(400, { message: 'Organization ID and new owner DID required' });
+  }
+
+  // Get organization
+  const orgResult = await db
+    .select()
+    .from(organizations)
+    .where(eq(organizations.id, body.organizationId))
+    .limit(1);
+
+  const org = orgResult[0];
+  if (!org) {
+    throw new HTTPException(404, { message: 'Organization not found' });
+  }
+
+  // Only current owner can transfer
+  if (org.ownerDid !== userDid) {
+    throw new HTTPException(403, { message: 'Only the owner can transfer ownership' });
+  }
+
+  // Check new owner is a member
+  const newOwnerMember = await db
+    .select()
+    .from(organizationMembers)
+    .where(
+      and(
+        eq(organizationMembers.organizationId, body.organizationId),
+        eq(organizationMembers.userDid, body.newOwnerDid)
+      )
+    )
+    .limit(1);
+
+  if (!newOwnerMember[0]) {
+    throw new HTTPException(400, { message: 'New owner must be a member of the organization' });
+  }
+
+  // Transfer ownership
+  await db
+    .update(organizations)
+    .set({ ownerDid: body.newOwnerDid, updatedAt: new Date() })
+    .where(eq(organizations.id, body.organizationId));
+
+  // Update old owner to admin
+  await db
+    .update(organizationMembers)
+    .set({
+      role: 'admin',
+      permissions: ['bulk_import', 'manage_members', 'edit_settings'],
+    })
+    .where(
+      and(
+        eq(organizationMembers.organizationId, body.organizationId),
+        eq(organizationMembers.userDid, userDid)
+      )
+    );
+
+  // Update new owner to owner
+  await db
+    .update(organizationMembers)
+    .set({
+      role: 'owner',
+      permissions: ['bulk_import', 'manage_members', 'edit_settings', 'delete_org'],
+    })
+    .where(
+      and(
+        eq(organizationMembers.organizationId, body.organizationId),
+        eq(organizationMembers.userDid, body.newOwnerDid)
+      )
+    );
+
+  // Log activity
+  await db.insert(organizationActivity).values({
+    id: nanoid(),
+    organizationId: body.organizationId,
+    actorDid: userDid,
+    action: 'ownership_transferred',
+    targetType: 'member',
+    targetId: body.newOwnerDid,
+  });
+
+  return c.json({ success: true });
+});
+
+// Delete organization
+organizationRoutes.post('/io.exprsn.org.delete', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const body = await c.req.json<{
+    organizationId: string;
+    confirmName: string;
+  }>();
+
+  if (!body.organizationId || !body.confirmName) {
+    throw new HTTPException(400, { message: 'Organization ID and confirmation required' });
+  }
+
+  // Get organization
+  const orgResult = await db
+    .select()
+    .from(organizations)
+    .where(eq(organizations.id, body.organizationId))
+    .limit(1);
+
+  const org = orgResult[0];
+  if (!org) {
+    throw new HTTPException(404, { message: 'Organization not found' });
+  }
+
+  // Only owner can delete
+  if (org.ownerDid !== userDid) {
+    throw new HTTPException(403, { message: 'Only the owner can delete the organization' });
+  }
+
+  // Confirm name matches
+  if (body.confirmName !== org.name) {
+    throw new HTTPException(400, { message: 'Organization name does not match' });
+  }
+
+  // Delete organization (cascade will handle related records)
+  await db.delete(organizations).where(eq(organizations.id, body.organizationId));
 
   return c.json({ success: true });
 });

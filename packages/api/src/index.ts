@@ -24,6 +24,9 @@ import { videoExtendedRouter } from './routes/video-extended.js';
 import { authRouter } from './routes/auth.js';
 import { organizationRoutes } from './routes/organization.js';
 import { liveRoutes } from './routes/live.js';
+import { paymentRoutes } from './routes/payments.js';
+import { caRoutes } from './routes/ca.js';
+import { audioRouter } from './routes/audio.js';
 import { createPdsApp, getPdsConfig } from './pds/index.js';
 
 const app = new Hono();
@@ -99,7 +102,7 @@ app.get('/videos/:filename', async (c) => {
     // Handle range requests for video streaming
     if (range) {
       const parts = range.replace(/bytes=/, '').split('-');
-      const start = parseInt(parts[0], 10);
+      const start = parseInt(parts[0] || '0', 10);
       const end = parts[1] ? parseInt(parts[1], 10) : stat.size - 1;
       const chunkSize = end - start + 1;
 
@@ -150,6 +153,9 @@ app.route('/xrpc', graphRouter);
 app.route('/xrpc', videoExtendedRouter);
 app.route('/xrpc', organizationRoutes);
 app.route('/xrpc', liveRoutes);
+app.route('/xrpc', paymentRoutes);
+app.route('/xrpc', caRoutes);
+app.route('/xrpc', audioRouter);
 // Admin routes last (has wildcard middleware)
 app.route('/xrpc', adminRouter);
 app.route('/oauth', oauthRouter);
