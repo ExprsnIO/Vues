@@ -47,7 +47,7 @@ export default function DiscoverPage() {
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="Search videos, users, or sounds"
-              className="w-full pl-12 pr-4 py-3 bg-zinc-900 border border-zinc-700 rounded-full text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-primary-500"
+              className="w-full pl-12 pr-4 py-3 bg-surface border border-border rounded-full text-text-primary placeholder-text-muted focus:outline-none focus:ring-2 focus:ring-accent"
             />
           </div>
 
@@ -60,8 +60,8 @@ export default function DiscoverPage() {
                   onClick={() => setSearchType(type)}
                   className={`px-4 py-2 rounded-full text-sm font-medium transition-colors ${
                     searchType === type
-                      ? 'bg-white text-black'
-                      : 'bg-zinc-800 text-white hover:bg-zinc-700'
+                      ? 'bg-accent text-white'
+                      : 'bg-surface text-text-primary hover:bg-surface-hover'
                   }`}
                 >
                   {type.charAt(0).toUpperCase() + type.slice(1)}
@@ -107,7 +107,7 @@ export default function DiscoverPage() {
                     <Link
                       key={tag.name}
                       href={`/tag/${encodeURIComponent(tag.name)}`}
-                      className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-white rounded-full text-sm transition-colors flex items-center gap-2"
+                      className="px-4 py-2 bg-surface hover:bg-surface-hover text-text-primary rounded-full text-sm transition-colors flex items-center gap-2"
                     >
                       <span>#{tag.name}</span>
                       {tag.videoCount > 0 && (
@@ -210,7 +210,7 @@ function VideoResults({ results }: { results: VideoView[] }) {
           <Link
             key={video.uri}
             href={`/video/${encodeURIComponent(video.uri)}`}
-            className="relative aspect-[9/16] bg-zinc-900 rounded-lg overflow-hidden group"
+            className="relative aspect-[9/16] bg-surface rounded-lg overflow-hidden group"
           >
             {video.video?.thumbnail || video.thumbnailUrl ? (
               <img
@@ -255,9 +255,9 @@ function UserResults({ results }: { results: UserResult[] }) {
   return (
     <div className="space-y-3">
       {results.map((result) => (
-        <div key={result.did} className="flex items-center gap-4 p-3 bg-zinc-900 rounded-lg">
+        <div key={result.did} className="flex items-center gap-4 p-3 bg-surface rounded-lg">
           <Link href={`/profile/${result.handle}`} className="flex-shrink-0">
-            <div className="w-12 h-12 rounded-full bg-zinc-800 overflow-hidden">
+            <div className="w-12 h-12 rounded-full bg-surface overflow-hidden">
               {result.avatar ? (
                 <img src={result.avatar} alt={result.handle} className="w-full h-full object-cover" />
               ) : (
@@ -300,9 +300,9 @@ function SoundResults({ results }: { results: SoundResult[] }) {
         <Link
           key={sound.id}
           href={`/?feed=sound:${sound.id}`}
-          className="flex items-center gap-4 p-3 bg-zinc-900 rounded-lg hover:bg-zinc-800 transition-colors"
+          className="flex items-center gap-4 p-3 bg-surface rounded-lg hover:bg-surface transition-colors"
         >
-          <div className="w-12 h-12 rounded-lg bg-zinc-800 overflow-hidden flex-shrink-0">
+          <div className="w-12 h-12 rounded-lg bg-surface overflow-hidden flex-shrink-0">
             {sound.coverUrl ? (
               <img src={sound.coverUrl} alt={sound.title} className="w-full h-full object-cover" />
             ) : (

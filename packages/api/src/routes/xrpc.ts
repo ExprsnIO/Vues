@@ -1602,7 +1602,7 @@ async function getHashtagFeed(
   const results = await db
     .select()
     .from(videos)
-    .where(sql`${normalizedTag} = ANY(${videos.tags})`)
+    .where(sql`${videos.tags} @> ${JSON.stringify([normalizedTag])}::jsonb`)
     .orderBy(desc(videos.likeCount), desc(videos.createdAt))
     .limit(limit)
     .offset(offset);
