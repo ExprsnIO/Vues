@@ -203,7 +203,7 @@ export default function AdminContentPage() {
                   </td>
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-2">
-                      {item.author.avatar ? (
+                      {item.author?.avatar ? (
                         <img
                           src={item.author.avatar}
                           alt=""
@@ -211,10 +211,10 @@ export default function AdminContentPage() {
                         />
                       ) : (
                         <div className="w-6 h-6 rounded-full bg-background flex items-center justify-center text-xs text-text-muted">
-                          {item.author.handle[0]?.toUpperCase()}
+                          {item.author?.handle?.[0]?.toUpperCase() || '?'}
                         </div>
                       )}
-                      <span className="text-sm text-text-primary">@{item.author.handle}</span>
+                      <span className="text-sm text-text-primary">@{item.author?.handle || 'unknown'}</span>
                     </div>
                   </td>
                   <td className="px-4 py-3">
