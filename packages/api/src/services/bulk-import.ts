@@ -5,7 +5,7 @@ import { nanoid } from 'nanoid';
 import { db } from '../db/index.js';
 import { users, organizationMembers, bulkImportJobs, actorRepos } from '../db/schema.js';
 import { eq } from 'drizzle-orm';
-import { hash } from 'bcryptjs';
+import bcrypt from 'bcryptjs';
 import * as crypto from 'crypto';
 
 // Reserved handles that cannot be used
@@ -388,7 +388,7 @@ export async function processImportJob(
 
       // Create the user
       const did = `did:plc:${nanoid(24)}`;
-      const passwordHash = await hash(userData.password, 10);
+      const passwordHash = await bcrypt.hash(userData.password, 10);
       const { publicKey, privateKey } = await generateSigningKeys();
       const now = new Date();
 

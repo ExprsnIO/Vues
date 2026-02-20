@@ -1584,6 +1584,238 @@ class ApiClient {
     });
   }
 
+  // Member Management (enhanced)
+  async updateOrganizationMember(
+    orgId: string,
+    memberId: string,
+    data: { displayName?: string; bio?: string; avatar?: string }
+  ): Promise<{ member: OrganizationMemberView }> {
+    return this.fetch('/xrpc/io.exprsn.org.members.update', {
+      method: 'POST',
+      body: JSON.stringify({ organizationId: orgId, memberId, ...data }),
+    });
+  }
+
+  async resetMemberPassword(
+    orgId: string,
+    memberId: string,
+    newPassword?: string
+  ): Promise<{ password: string }> {
+    return this.fetch('/xrpc/io.exprsn.org.members.resetPassword', {
+      method: 'POST',
+      body: JSON.stringify({ organizationId: orgId, memberId, newPassword }),
+    });
+  }
+
+  async suspendOrganizationMember(
+    orgId: string,
+    memberId: string,
+    action: 'suspend' | 'activate',
+    reason?: string
+  ): Promise<{ success: boolean; status: string }> {
+    return this.fetch('/xrpc/io.exprsn.org.members.suspend', {
+      method: 'POST',
+      body: JSON.stringify({ organizationId: orgId, memberId, action, reason }),
+    });
+  }
+
+  async reorderOrganizationMembers(
+    orgId: string,
+    memberOrders: Array<{ memberId: string; displayOrder: number }>
+  ): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.org.members.reorder', {
+      method: 'POST',
+      body: JSON.stringify({ organizationId: orgId, memberOrders }),
+    });
+  }
+
+  async exportOrganizationMembers(
+    orgId: string,
+    format: 'csv' | 'xlsx'
+  ): Promise<Blob> {
+    const params = new URLSearchParams({ organizationId: orgId, format });
+    const headers: HeadersInit = {};
+    if (this.sessionToken) {
+      headers['Authorization'] = `Bearer ${this.sessionToken}`;
+    }
+
+    const response = await fetch(
+      `${this.baseUrl}/xrpc/io.exprsn.org.members.export?${params}`,
+      { headers }
+    );
+
+    if (!response.ok) {
+      throw new Error(`Failed to export members: ${response.status}`);
+    }
+
+    return response.blob();
+  }
+
+  // Tag Management
+  async getOrganizationTags(orgId: string): Promise<{ tags: OrganizationTagView[] }> {
+    const params = new URLSearchParams({ organizationId: orgId });
+    return this.fetch(`/xrpc/io.exprsn.org.tags.list?${params}`);
+  }
+
+  async createOrganizationTag(
+    orgId: string,
+    data: { name: string; color: string; description?: string }
+  ): Promise<{ tag: OrganizationTagView }> {
+    return this.fetch('/xrpc/io.exprsn.org.tags.create', {
+      method: 'POST',
+      body: JSON.stringify({ organizationId: orgId, ...data }),
+    });
+  }
+
+  async updateOrganizationTag(
+    orgId: string,
+    tagId: string,
+    data: { name?: string; color?: string; description?: string }
+  ): Promise<{ tag: OrganizationTagView }> {
+    return this.fetch('/xrpc/io.exprsn.org.tags.update', {
+      method: 'POST',
+      body: JSON.stringify({ organizationId: orgId, tagId, ...data }),
+    });
+  }
+
+  async deleteOrganizationTag(orgId: string, tagId: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.org.tags.delete', {
+      method: 'POST',
+      body: JSON.stringify({ organizationId: orgId, tagId }),
+    });
+  }
+
+  async assignMemberTag(
+    orgId: string,
+    memberId: string,
+    tagId: string
+  ): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.org.members.assignTag', {
+      method: 'POST',
+      body: JSON.stringify({ organizationId: orgId, memberId, tagId }),
+    });
+  }
+
+  async removeMemberTag(
+    orgId: string,
+    memberId: string,
+    tagId: string
+  ): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.org.members.removeTag', {
+      method: 'POST',
+      body: JSON.stringify({ organizationId: orgId, memberId, tagId }),
+    });
+  }
+
+  // Blocked Words Management
+  async getOrganizationBlockedWords(
+    orgId: string
+  ): Promise<{ words: OrganizationBlockedWordView[] }> {
+    const params = new URLSearchParams({ organizationId: orgId });
+    return this.fetch(`/xrpc/io.exprsn.org.blockedWords.list?${params}`);
+  }
+
+  async addOrganizationBlockedWord(
+    orgId: string,
+    data: { word: string; severity?: 'low' | 'medium' | 'high' }
+  ): Promise<{ word: OrganizationBlockedWordView }> {
+    return this.fetch('/xrpc/io.exprsn.org.blockedWords.add', {
+      method: 'POST',
+      body: JSON.stringify({ organizationId: orgId, ...data }),
+    });
+  }
+
+  async updateOrganizationBlockedWord(
+    orgId: string,
+    wordId: string,
+    data: { severity?: 'low' | 'medium' | 'high'; enabled?: boolean }
+  ): Promise<{ word: OrganizationBlockedWordView }> {
+    return this.fetch('/xrpc/io.exprsn.org.blockedWords.update', {
+      method: 'POST',
+      body: JSON.stringify({ organizationId: orgId, wordId, ...data }),
+    });
+  }
+
+  async removeOrganizationBlockedWord(
+    orgId: string,
+    wordId: string
+  ): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.org.blockedWords.remove', {
+      method: 'POST',
+      body: JSON.stringify({ organizationId: orgId, wordId }),
+    });
+  }
+
+  async importOrganizationBlockedWords(
+    orgId: string,
+    words: string[],
+    severity: 'low' | 'medium' | 'high' = 'medium'
+  ): Promise<{ imported: number; duplicates: number }> {
+    return this.fetch('/xrpc/io.exprsn.org.blockedWords.import', {
+      method: 'POST',
+      body: JSON.stringify({ organizationId: orgId, words, severity }),
+    });
+  }
+
+  async exportOrganizationBlockedWords(
+    orgId: string,
+    format: 'txt' | 'json'
+  ): Promise<Blob> {
+    const params = new URLSearchParams({ organizationId: orgId, format });
+    const headers: HeadersInit = {};
+    if (this.sessionToken) {
+      headers['Authorization'] = `Bearer ${this.sessionToken}`;
+    }
+
+    const response = await fetch(
+      `${this.baseUrl}/xrpc/io.exprsn.org.blockedWords.export?${params}`,
+      { headers }
+    );
+
+    if (!response.ok) {
+      throw new Error(`Failed to export blocked words: ${response.status}`);
+    }
+
+    return response.blob();
+  }
+
+  // Stats & Activity
+  async getOrganizationStats(orgId: string): Promise<OrganizationStatsView> {
+    const params = new URLSearchParams({ organizationId: orgId });
+    return this.fetch(`/xrpc/io.exprsn.org.stats?${params}`);
+  }
+
+  async getOrganizationActivity(
+    orgId: string,
+    options: { cursor?: string; limit?: number } = {}
+  ): Promise<{ activity: OrganizationActivityView[]; cursor?: string }> {
+    const { cursor, limit = 50 } = options;
+    const params = new URLSearchParams({ organizationId: orgId, limit: String(limit) });
+    if (cursor) params.set('cursor', cursor);
+    return this.fetch(`/xrpc/io.exprsn.org.activity?${params}`);
+  }
+
+  // Danger Zone
+  async transferOrganizationOwnership(
+    orgId: string,
+    newOwnerDid: string
+  ): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.org.transferOwnership', {
+      method: 'POST',
+      body: JSON.stringify({ organizationId: orgId, newOwnerDid }),
+    });
+  }
+
+  async deleteOrganization(
+    orgId: string,
+    confirmation: string
+  ): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.org.delete', {
+      method: 'POST',
+      body: JSON.stringify({ organizationId: orgId, confirmation }),
+    });
+  }
+
   // =============================================================================
   // Live Streaming API
   // =============================================================================
@@ -2392,6 +2624,61 @@ export interface BulkImportJobView {
     handle: string;
     displayName?: string;
   };
+}
+
+// Organization Tag types
+export interface OrganizationTagView {
+  id: string;
+  name: string;
+  color: string;
+  description?: string;
+  memberCount: number;
+  createdAt: string;
+}
+
+// Organization Blocked Word types
+export interface OrganizationBlockedWordView {
+  id: string;
+  word: string;
+  severity: 'low' | 'medium' | 'high';
+  enabled: boolean;
+  createdAt: string;
+}
+
+// Organization Stats types
+export interface OrganizationStatsView {
+  memberCount: number;
+  activeMembers: number;
+  suspendedMembers: number;
+  membersByRole: Array<{ role: string; count: number }>;
+  memberGrowth: Array<{ date: string; count: number }>;
+  recentImports: Array<{ date: string; count: number; successCount: number }>;
+}
+
+// Organization Activity types
+export interface OrganizationActivityView {
+  id: string;
+  action: string;
+  actor: {
+    did: string;
+    handle: string;
+    displayName?: string;
+    avatar?: string;
+  };
+  targetType?: string;
+  targetId?: string;
+  details?: Record<string, unknown>;
+  createdAt: string;
+}
+
+// Extended member view with tags and status
+export interface OrganizationMemberDetailView extends OrganizationMemberView {
+  status: 'active' | 'suspended';
+  displayOrder: number;
+  suspendedAt?: string;
+  suspendedBy?: string;
+  suspendedReason?: string;
+  tags?: OrganizationTagView[];
 }
 
 // Live Streaming types

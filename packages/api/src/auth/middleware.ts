@@ -60,6 +60,7 @@ declare module 'hono' {
   interface ContextVariableMap {
     session: OAuthSession;
     did: string;
+    userDid: string;
     adminUser: AdminUser;
     adminPermissions: string[];
   }
@@ -67,9 +68,19 @@ declare module 'hono' {
 
 /**
  * Authentication middleware that requires a valid session (local or OAuth)
+ * In development mode, bypasses authentication and uses a default user
  */
 export async function authMiddleware(c: Context, next: Next) {
+  const isDev = process.env.NODE_ENV !== 'production';
   const authHeader = c.req.header('Authorization');
+
+  // Development bypass - use default user when no auth provided
+  if (isDev && (!authHeader || !authHeader.startsWith('Bearer '))) {
+    // Use rickholland as the default dev user
+    c.set('did', 'did:web:exprsn.local:user:rickholland');
+    await next();
+    return;
+  }
 
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     throw new HTTPException(401, { message: 'Missing or invalid authorization header' });
@@ -115,10 +126,34 @@ export async function authMiddleware(c: Context, next: Next) {
 }
 
 /**
+ * Alias for authMiddleware - requires authentication
+ * Also sets userDid for compatibility
+ */
+export async function requireAuth(c: Context, next: Next) {
+  await authMiddleware(c, async () => {
+    // Set userDid from did for compatibility
+    const did = c.get('did');
+    if (did) {
+      c.set('userDid', did);
+    }
+    await next();
+  });
+}
+
+/**
  * Optional authentication middleware - continues even without auth
+ * In development mode, uses a default user when no auth provided
  */
 export async function optionalAuthMiddleware(c: Context, next: Next) {
+  const isDev = process.env.NODE_ENV !== 'production';
   const authHeader = c.req.header('Authorization');
+
+  // Development bypass - use default user when no auth provided
+  if (isDev && (!authHeader || !authHeader.startsWith('Bearer '))) {
+    c.set('did', 'did:web:exprsn.local:user:rickholland');
+    await next();
+    return;
+  }
 
   if (authHeader && authHeader.startsWith('Bearer ')) {
     const token = authHeader.replace('Bearer ', '');

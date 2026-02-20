@@ -1157,13 +1157,109 @@ export const organizationMembers = pgTable(
     role: text('role').notNull(), // 'owner' | 'admin' | 'member'
     permissions: jsonb('permissions').$type<string[]>().default([]), // ['bulk_import', 'manage_members', 'edit_settings']
     invitedBy: text('invited_by'),
+    displayOrder: integer('display_order').default(0).notNull(),
+    status: text('status').default('active').notNull(), // 'active' | 'suspended'
+    suspendedAt: timestamp('suspended_at'),
+    suspendedBy: text('suspended_by'),
+    suspendedReason: text('suspended_reason'),
     joinedAt: timestamp('joined_at').defaultNow().notNull(),
   },
   (table) => ({
     orgIdx: index('org_members_org_idx').on(table.organizationId),
     userIdx: index('org_members_user_idx').on(table.userDid),
     roleIdx: index('org_members_role_idx').on(table.role),
+    statusIdx: index('org_members_status_idx').on(table.status),
+    displayOrderIdx: index('org_members_display_order_idx').on(table.organizationId, table.displayOrder),
     uniqueMember: uniqueIndex('org_members_unique_idx').on(table.organizationId, table.userDid),
+  })
+);
+
+// Organization tags - labels/categories for members
+export const organizationTags = pgTable(
+  'organization_tags',
+  {
+    id: text('id').primaryKey(),
+    organizationId: text('organization_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    color: text('color').default('#6366f1').notNull(), // Hex color
+    description: text('description'),
+    createdBy: text('created_by').references(() => users.did),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    orgIdx: index('org_tags_org_idx').on(table.organizationId),
+    nameIdx: index('org_tags_name_idx').on(table.name),
+    uniqueTag: uniqueIndex('org_tags_unique_idx').on(table.organizationId, table.name),
+  })
+);
+
+// Organization member tags - assign tags to members
+export const organizationMemberTags = pgTable(
+  'organization_member_tags',
+  {
+    id: text('id').primaryKey(),
+    memberId: text('member_id')
+      .notNull()
+      .references(() => organizationMembers.id, { onDelete: 'cascade' }),
+    tagId: text('tag_id')
+      .notNull()
+      .references(() => organizationTags.id, { onDelete: 'cascade' }),
+    assignedBy: text('assigned_by').references(() => users.did),
+    assignedAt: timestamp('assigned_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    memberIdx: index('org_member_tags_member_idx').on(table.memberId),
+    tagIdx: index('org_member_tags_tag_idx').on(table.tagId),
+    uniqueAssignment: uniqueIndex('org_member_tags_unique_idx').on(table.memberId, table.tagId),
+  })
+);
+
+// Organization blocked words - content moderation
+export const organizationBlockedWords = pgTable(
+  'organization_blocked_words',
+  {
+    id: text('id').primaryKey(),
+    organizationId: text('organization_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    word: text('word').notNull(),
+    severity: text('severity').default('medium').notNull(), // 'low' | 'medium' | 'high'
+    enabled: boolean('enabled').default(true).notNull(),
+    createdBy: text('created_by').references(() => users.did),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    orgIdx: index('org_blocked_words_org_idx').on(table.organizationId),
+    wordIdx: index('org_blocked_words_word_idx').on(table.word),
+    uniqueWord: uniqueIndex('org_blocked_words_unique_idx').on(table.organizationId, table.word),
+  })
+);
+
+// Organization activity log - audit trail
+export const organizationActivity = pgTable(
+  'organization_activity',
+  {
+    id: text('id').primaryKey(),
+    organizationId: text('organization_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    actorDid: text('actor_did')
+      .notNull()
+      .references(() => users.did),
+    action: text('action').notNull(), // 'member_joined' | 'member_left' | 'role_changed' | 'import_completed' | etc.
+    targetType: text('target_type'), // 'member' | 'tag' | 'settings' | 'import'
+    targetId: text('target_id'),
+    details: jsonb('details').$type<Record<string, unknown>>(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    orgIdx: index('org_activity_org_idx').on(table.organizationId),
+    actorIdx: index('org_activity_actor_idx').on(table.actorDid),
+    actionIdx: index('org_activity_action_idx').on(table.action),
+    createdIdx: index('org_activity_created_idx').on(table.createdAt),
   })
 );
 
@@ -1345,6 +1441,282 @@ export const streamViewers = pgTable(
   })
 );
 
+// ============================================
+// Payment Processing Tables
+// ============================================
+
+// Payment configurations - per user or organization
+export const paymentConfigs = pgTable(
+  'payment_configs',
+  {
+    id: text('id').primaryKey(),
+    organizationId: text('organization_id').references(() => organizations.id, { onDelete: 'cascade' }),
+    userDid: text('user_did').references(() => users.did, { onDelete: 'cascade' }),
+    provider: text('provider').notNull(), // 'stripe' | 'paypal' | 'authorizenet'
+    providerAccountId: text('provider_account_id'),
+    credentials: jsonb('credentials').$type<Record<string, string>>(), // encrypted
+    testMode: boolean('test_mode').default(true).notNull(),
+    isActive: boolean('is_active').default(true).notNull(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    orgIdx: index('payment_configs_org_idx').on(table.organizationId),
+    userIdx: index('payment_configs_user_idx').on(table.userDid),
+    providerIdx: index('payment_configs_provider_idx').on(table.provider),
+    activeIdx: index('payment_configs_active_idx').on(table.isActive),
+  })
+);
+
+// Payment customers - linked to provider
+export const paymentCustomers = pgTable(
+  'payment_customers',
+  {
+    id: text('id').primaryKey(),
+    userDid: text('user_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    configId: text('config_id')
+      .notNull()
+      .references(() => paymentConfigs.id, { onDelete: 'cascade' }),
+    providerCustomerId: text('provider_customer_id').notNull(),
+    email: text('email'),
+    metadata: jsonb('metadata').$type<Record<string, unknown>>(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    userIdx: index('payment_customers_user_idx').on(table.userDid),
+    configIdx: index('payment_customers_config_idx').on(table.configId),
+    providerIdIdx: uniqueIndex('payment_customers_provider_id_idx').on(table.configId, table.providerCustomerId),
+  })
+);
+
+// Payment transactions
+export const paymentTransactions = pgTable(
+  'payment_transactions',
+  {
+    id: text('id').primaryKey(),
+    configId: text('config_id')
+      .notNull()
+      .references(() => paymentConfigs.id),
+    customerId: text('customer_id').references(() => paymentCustomers.id),
+    providerTransactionId: text('provider_transaction_id'),
+    type: text('type').notNull(), // 'charge' | 'refund' | 'tip' | 'subscription' | 'payout'
+    status: text('status').notNull(), // 'pending' | 'processing' | 'completed' | 'failed' | 'refunded'
+    amount: integer('amount').notNull(), // cents
+    currency: text('currency').default('usd').notNull(),
+    fromDid: text('from_did').references(() => users.did),
+    toDid: text('to_did').references(() => users.did),
+    description: text('description'),
+    metadata: jsonb('metadata').$type<Record<string, unknown>>(),
+    errorMessage: text('error_message'),
+    refundedAmount: integer('refunded_amount'),
+    idempotencyKey: text('idempotency_key'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    configIdx: index('payment_transactions_config_idx').on(table.configId),
+    customerIdx: index('payment_transactions_customer_idx').on(table.customerId),
+    typeIdx: index('payment_transactions_type_idx').on(table.type),
+    statusIdx: index('payment_transactions_status_idx').on(table.status),
+    fromDidIdx: index('payment_transactions_from_did_idx').on(table.fromDid),
+    toDidIdx: index('payment_transactions_to_did_idx').on(table.toDid),
+    createdIdx: index('payment_transactions_created_idx').on(table.createdAt),
+    idempotencyIdx: uniqueIndex('payment_transactions_idempotency_idx').on(table.idempotencyKey),
+    providerIdIdx: index('payment_transactions_provider_id_idx').on(table.providerTransactionId),
+  })
+);
+
+// Payment methods - stored for customers
+export const paymentMethods = pgTable(
+  'payment_methods',
+  {
+    id: text('id').primaryKey(),
+    userDid: text('user_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    configId: text('config_id')
+      .notNull()
+      .references(() => paymentConfigs.id, { onDelete: 'cascade' }),
+    customerId: text('customer_id').references(() => paymentCustomers.id, { onDelete: 'set null' }),
+    providerPaymentMethodId: text('provider_payment_method_id').notNull(),
+    type: text('type').notNull(), // 'card' | 'bank_account' | 'paypal'
+    last4: text('last4'),
+    brand: text('brand'),
+    expiryMonth: integer('expiry_month'),
+    expiryYear: integer('expiry_year'),
+    isDefault: boolean('is_default').default(false).notNull(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    userDidIdx: index('payment_methods_user_did_idx').on(table.userDid),
+    configIdx: index('payment_methods_config_idx').on(table.configId),
+    customerIdx: index('payment_methods_customer_idx').on(table.customerId),
+    defaultIdx: index('payment_methods_default_idx').on(table.userDid, table.isDefault),
+  })
+);
+
+// Creator earnings - aggregated earnings for creators
+export const creatorEarnings = pgTable(
+  'creator_earnings',
+  {
+    userDid: text('user_did')
+      .primaryKey()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    totalEarnings: integer('total_earnings').default(0).notNull(), // cents
+    availableBalance: integer('available_balance').default(0).notNull(),
+    pendingBalance: integer('pending_balance').default(0).notNull(),
+    currency: text('currency').default('usd').notNull(),
+    lastPayoutAt: timestamp('last_payout_at'),
+    lastPayoutAmount: integer('last_payout_amount'),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  }
+);
+
+// ============================================
+// Certificate Authority Tables
+// ============================================
+
+// CA Root certificates
+export const caRootCertificates = pgTable(
+  'ca_root_certificates',
+  {
+    id: text('id').primaryKey(),
+    commonName: text('common_name').notNull(),
+    subject: jsonb('subject').$type<{
+      commonName: string;
+      organization?: string;
+      organizationalUnit?: string;
+      locality?: string;
+      state?: string;
+      country?: string;
+    }>().notNull(),
+    certificate: text('certificate').notNull(), // PEM encoded
+    publicKey: text('public_key').notNull(),
+    privateKey: text('private_key').notNull(), // Encrypted PEM
+    serialNumber: text('serial_number').notNull(),
+    fingerprint: text('fingerprint').notNull(), // SHA-256
+    algorithm: jsonb('algorithm').$type<{
+      name: string;
+      modulusLength: number;
+      hashAlgorithm: string;
+    }>().notNull(),
+    notBefore: timestamp('not_before').notNull(),
+    notAfter: timestamp('not_after').notNull(),
+    status: text('status').default('active').notNull(), // 'active' | 'revoked' | 'expired'
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    serialIdx: uniqueIndex('ca_root_serial_idx').on(table.serialNumber),
+    fingerprintIdx: index('ca_root_fingerprint_idx').on(table.fingerprint),
+    statusIdx: index('ca_root_status_idx').on(table.status),
+  })
+);
+
+// CA Intermediate certificates
+export const caIntermediateCertificates = pgTable(
+  'ca_intermediate_certificates',
+  {
+    id: text('id').primaryKey(),
+    rootId: text('root_id')
+      .notNull()
+      .references(() => caRootCertificates.id, { onDelete: 'cascade' }),
+    commonName: text('common_name').notNull(),
+    subject: jsonb('subject').$type<{
+      commonName: string;
+      organization?: string;
+      organizationalUnit?: string;
+    }>().notNull(),
+    certificate: text('certificate').notNull(),
+    publicKey: text('public_key').notNull(),
+    privateKey: text('private_key').notNull(),
+    serialNumber: text('serial_number').notNull(),
+    fingerprint: text('fingerprint').notNull(),
+    pathLength: integer('path_length').default(0).notNull(),
+    algorithm: jsonb('algorithm').$type<{
+      name: string;
+      modulusLength: number;
+      hashAlgorithm: string;
+    }>().notNull(),
+    notBefore: timestamp('not_before').notNull(),
+    notAfter: timestamp('not_after').notNull(),
+    status: text('status').default('active').notNull(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    rootIdx: index('ca_intermediate_root_idx').on(table.rootId),
+    serialIdx: uniqueIndex('ca_intermediate_serial_idx').on(table.serialNumber),
+    statusIdx: index('ca_intermediate_status_idx').on(table.status),
+  })
+);
+
+// CA Entity certificates (client, server, code signing)
+export const caEntityCertificates = pgTable(
+  'ca_entity_certificates',
+  {
+    id: text('id').primaryKey(),
+    issuerId: text('issuer_id').notNull(),
+    issuerType: text('issuer_type').notNull(), // 'root' | 'intermediate'
+    subjectDid: text('subject_did').references(() => users.did),
+    serviceId: text('service_id'),
+    certType: text('cert_type').notNull(), // 'client' | 'server' | 'code_signing'
+    commonName: text('common_name').notNull(),
+    subject: jsonb('subject').$type<{
+      commonName: string;
+      organization?: string;
+    }>().notNull(),
+    subjectAltNames: jsonb('subject_alt_names').$type<{
+      dnsNames?: string[];
+      ipAddresses?: string[];
+      emails?: string[];
+      uris?: string[];
+    }>(),
+    certificate: text('certificate').notNull(),
+    publicKey: text('public_key').notNull(),
+    privateKey: text('private_key').notNull(),
+    serialNumber: text('serial_number').notNull(),
+    fingerprint: text('fingerprint').notNull(),
+    algorithm: jsonb('algorithm').$type<{
+      name: string;
+      modulusLength: number;
+      hashAlgorithm: string;
+    }>().notNull(),
+    notBefore: timestamp('not_before').notNull(),
+    notAfter: timestamp('not_after').notNull(),
+    status: text('status').default('active').notNull(),
+    revokedAt: timestamp('revoked_at'),
+    revocationReason: text('revocation_reason'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    issuerIdx: index('ca_entity_issuer_idx').on(table.issuerId),
+    subjectDidIdx: index('ca_entity_subject_did_idx').on(table.subjectDid),
+    serviceIdIdx: index('ca_entity_service_id_idx').on(table.serviceId),
+    certTypeIdx: index('ca_entity_cert_type_idx').on(table.certType),
+    serialIdx: uniqueIndex('ca_entity_serial_idx').on(table.serialNumber),
+    statusIdx: index('ca_entity_status_idx').on(table.status),
+  })
+);
+
+// Certificate Revocation Lists
+export const caCertificateRevocationLists = pgTable(
+  'ca_certificate_revocation_lists',
+  {
+    id: text('id').primaryKey(),
+    issuerId: text('issuer_id').notNull(),
+    issuerType: text('issuer_type').notNull(), // 'root' | 'intermediate'
+    crl: text('crl').notNull(), // PEM encoded
+    thisUpdate: timestamp('this_update').notNull(),
+    nextUpdate: timestamp('next_update').notNull(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    issuerIdx: index('ca_crl_issuer_idx').on(table.issuerId),
+    nextUpdateIdx: index('ca_crl_next_update_idx').on(table.nextUpdate),
+  })
+);
+
 // Organization type exports
 export type Organization = typeof organizations.$inferSelect;
 export type NewOrganization = typeof organizations.$inferInsert;
@@ -1352,6 +1724,14 @@ export type OrganizationMember = typeof organizationMembers.$inferSelect;
 export type NewOrganizationMember = typeof organizationMembers.$inferInsert;
 export type BulkImportJob = typeof bulkImportJobs.$inferSelect;
 export type NewBulkImportJob = typeof bulkImportJobs.$inferInsert;
+export type OrganizationTag = typeof organizationTags.$inferSelect;
+export type NewOrganizationTag = typeof organizationTags.$inferInsert;
+export type OrganizationMemberTag = typeof organizationMemberTags.$inferSelect;
+export type NewOrganizationMemberTag = typeof organizationMemberTags.$inferInsert;
+export type OrganizationBlockedWord = typeof organizationBlockedWords.$inferSelect;
+export type NewOrganizationBlockedWord = typeof organizationBlockedWords.$inferInsert;
+export type OrganizationActivityEntry = typeof organizationActivity.$inferSelect;
+export type NewOrganizationActivityEntry = typeof organizationActivity.$inferInsert;
 
 // Live streaming type exports
 export type LiveStream = typeof liveStreams.$inferSelect;
@@ -1364,3 +1744,104 @@ export type StreamBannedUser = typeof streamBannedUsers.$inferSelect;
 export type NewStreamBannedUser = typeof streamBannedUsers.$inferInsert;
 export type StreamViewer = typeof streamViewers.$inferSelect;
 export type NewStreamViewer = typeof streamViewers.$inferInsert;
+
+// Payment type exports
+export type PaymentConfig = typeof paymentConfigs.$inferSelect;
+export type NewPaymentConfig = typeof paymentConfigs.$inferInsert;
+export type PaymentCustomer = typeof paymentCustomers.$inferSelect;
+export type NewPaymentCustomer = typeof paymentCustomers.$inferInsert;
+export type PaymentTransaction = typeof paymentTransactions.$inferSelect;
+export type NewPaymentTransaction = typeof paymentTransactions.$inferInsert;
+export type PaymentMethod = typeof paymentMethods.$inferSelect;
+export type NewPaymentMethod = typeof paymentMethods.$inferInsert;
+export type CreatorEarningsRow = typeof creatorEarnings.$inferSelect;
+export type NewCreatorEarningsRow = typeof creatorEarnings.$inferInsert;
+
+// Certificate Authority type exports
+export type CARootCertificate = typeof caRootCertificates.$inferSelect;
+export type NewCARootCertificate = typeof caRootCertificates.$inferInsert;
+export type CAIntermediateCertificate = typeof caIntermediateCertificates.$inferSelect;
+export type NewCAIntermediateCertificate = typeof caIntermediateCertificates.$inferInsert;
+export type CAEntityCertificate = typeof caEntityCertificates.$inferSelect;
+export type NewCAEntityCertificate = typeof caEntityCertificates.$inferInsert;
+export type CACRL = typeof caCertificateRevocationLists.$inferSelect;
+export type NewCACRL = typeof caCertificateRevocationLists.$inferInsert;
+
+// ============================================
+// Editor Collaboration Tables
+// ============================================
+
+// Editor projects - collaborative editing projects
+export const editorProjects = pgTable(
+  'editor_projects',
+  {
+    id: text('id').primaryKey(),
+    ownerDid: text('owner_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    title: text('title').notNull(),
+    settings: jsonb('settings').$type<{
+      fps: number;
+      width: number;
+      height: number;
+      duration: number;
+      backgroundColor?: string;
+    }>(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    ownerIdx: index('editor_projects_owner_idx').on(table.ownerDid),
+    createdIdx: index('editor_projects_created_idx').on(table.createdAt),
+  })
+);
+
+// Editor collaborators - users with access to projects
+export const editorCollaborators = pgTable(
+  'editor_collaborators',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => editorProjects.id, { onDelete: 'cascade' }),
+    userDid: text('user_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    accessLevel: text('access_level').notNull(), // 'owner' | 'editor' | 'viewer'
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    projectIdx: index('editor_collaborators_project_idx').on(table.projectId),
+    userIdx: index('editor_collaborators_user_idx').on(table.userDid),
+    uniqueCollaborator: uniqueIndex('editor_collaborators_unique_idx').on(
+      table.projectId,
+      table.userDid
+    ),
+  })
+);
+
+// Editor document snapshots - Yjs document versions
+export const editorDocumentSnapshots = pgTable(
+  'editor_document_snapshots',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => editorProjects.id, { onDelete: 'cascade' }),
+    snapshot: text('snapshot').notNull(), // Yjs encoded state as base64
+    version: integer('version').notNull(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    projectIdx: index('editor_snapshots_project_idx').on(table.projectId),
+    versionIdx: index('editor_snapshots_version_idx').on(table.projectId, table.version),
+  })
+);
+
+// Editor Collaboration type exports
+export type EditorProject = typeof editorProjects.$inferSelect;
+export type NewEditorProject = typeof editorProjects.$inferInsert;
+export type EditorCollaborator = typeof editorCollaborators.$inferSelect;
+export type NewEditorCollaborator = typeof editorCollaborators.$inferInsert;
+export type EditorDocumentSnapshot = typeof editorDocumentSnapshots.$inferSelect;
+export type NewEditorDocumentSnapshot = typeof editorDocumentSnapshots.$inferInsert;

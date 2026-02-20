@@ -16,11 +16,12 @@ import {
   getStreamingProvider,
   generateStreamKey,
 } from '../services/streaming/index.js';
+import { authMiddleware, optionalAuthMiddleware } from '../auth/middleware.js';
 
 // Middleware type for authenticated requests
 type AuthContext = {
   Variables: {
-    userDid: string;
+    did: string;
   };
 };
 
@@ -31,8 +32,8 @@ export const liveRoutes = new Hono<AuthContext>();
 // ============================================
 
 // Create a new stream
-liveRoutes.post('/xrpc/io.exprsn.live.createStream', async (c) => {
-  const userDid = c.get('userDid');
+liveRoutes.post('/io.exprsn.live.createStream', authMiddleware, async (c) => {
+  const userDid = c.get('did');
   if (!userDid) {
     throw new HTTPException(401, { message: 'Authentication required' });
   }
@@ -122,8 +123,8 @@ liveRoutes.post('/xrpc/io.exprsn.live.createStream', async (c) => {
 });
 
 // Get stream details
-liveRoutes.get('/xrpc/io.exprsn.live.getStream', async (c) => {
-  const userDid = c.get('userDid');
+liveRoutes.get('/io.exprsn.live.getStream', optionalAuthMiddleware, async (c) => {
+  const userDid = c.get('did');
   const streamId = c.req.query('id');
 
   if (!streamId) {
@@ -251,8 +252,8 @@ liveRoutes.get('/xrpc/io.exprsn.live.getStream', async (c) => {
 });
 
 // Start streaming (mark as live)
-liveRoutes.post('/xrpc/io.exprsn.live.startStream', async (c) => {
-  const userDid = c.get('userDid');
+liveRoutes.post('/io.exprsn.live.startStream', authMiddleware, async (c) => {
+  const userDid = c.get('did');
   if (!userDid) {
     throw new HTTPException(401, { message: 'Authentication required' });
   }
@@ -306,8 +307,8 @@ liveRoutes.post('/xrpc/io.exprsn.live.startStream', async (c) => {
 });
 
 // End stream
-liveRoutes.post('/xrpc/io.exprsn.live.endStream', async (c) => {
-  const userDid = c.get('userDid');
+liveRoutes.post('/io.exprsn.live.endStream', authMiddleware, async (c) => {
+  const userDid = c.get('did');
   if (!userDid) {
     throw new HTTPException(401, { message: 'Authentication required' });
   }
@@ -357,8 +358,8 @@ liveRoutes.post('/xrpc/io.exprsn.live.endStream', async (c) => {
 });
 
 // Update stream settings
-liveRoutes.post('/xrpc/io.exprsn.live.updateStream', async (c) => {
-  const userDid = c.get('userDid');
+liveRoutes.post('/io.exprsn.live.updateStream', authMiddleware, async (c) => {
+  const userDid = c.get('did');
   if (!userDid) {
     throw new HTTPException(401, { message: 'Authentication required' });
   }
@@ -419,8 +420,8 @@ liveRoutes.post('/xrpc/io.exprsn.live.updateStream', async (c) => {
 });
 
 // Delete stream
-liveRoutes.post('/xrpc/io.exprsn.live.deleteStream', async (c) => {
-  const userDid = c.get('userDid');
+liveRoutes.post('/io.exprsn.live.deleteStream', authMiddleware, async (c) => {
+  const userDid = c.get('did');
   if (!userDid) {
     throw new HTTPException(401, { message: 'Authentication required' });
   }
@@ -479,7 +480,7 @@ liveRoutes.post('/xrpc/io.exprsn.live.deleteStream', async (c) => {
 // ============================================
 
 // Get currently live streams
-liveRoutes.get('/xrpc/io.exprsn.live.getLiveNow', async (c) => {
+liveRoutes.get('/io.exprsn.live.getLiveNow', optionalAuthMiddleware, async (c) => {
   const limit = Math.min(parseInt(c.req.query('limit') || '20'), 50);
   const cursor = c.req.query('cursor');
   const category = c.req.query('category');
@@ -548,7 +549,7 @@ liveRoutes.get('/xrpc/io.exprsn.live.getLiveNow', async (c) => {
 });
 
 // Get scheduled streams
-liveRoutes.get('/xrpc/io.exprsn.live.getScheduled', async (c) => {
+liveRoutes.get('/io.exprsn.live.getScheduled', optionalAuthMiddleware, async (c) => {
   const limit = Math.min(parseInt(c.req.query('limit') || '20'), 50);
 
   const results = await db
@@ -588,7 +589,7 @@ liveRoutes.get('/xrpc/io.exprsn.live.getScheduled', async (c) => {
 });
 
 // Get user's streams (past and current)
-liveRoutes.get('/xrpc/io.exprsn.live.getUserStreams', async (c) => {
+liveRoutes.get('/io.exprsn.live.getUserStreams', optionalAuthMiddleware, async (c) => {
   const userDid = c.req.query('userDid');
   const limit = Math.min(parseInt(c.req.query('limit') || '20'), 50);
   const status = c.req.query('status'); // 'live' | 'ended' | 'scheduled'
@@ -634,7 +635,7 @@ liveRoutes.get('/xrpc/io.exprsn.live.getUserStreams', async (c) => {
 // ============================================
 
 // Get chat messages
-liveRoutes.get('/xrpc/io.exprsn.live.chat.messages', async (c) => {
+liveRoutes.get('/io.exprsn.live.chat.messages', optionalAuthMiddleware, async (c) => {
   const streamId = c.req.query('streamId');
   const limit = Math.min(parseInt(c.req.query('limit') || '50'), 100);
   const before = c.req.query('before'); // Message ID for pagination
@@ -689,8 +690,8 @@ liveRoutes.get('/xrpc/io.exprsn.live.chat.messages', async (c) => {
 });
 
 // Send chat message
-liveRoutes.post('/xrpc/io.exprsn.live.chat.send', async (c) => {
-  const userDid = c.get('userDid');
+liveRoutes.post('/io.exprsn.live.chat.send', authMiddleware, async (c) => {
+  const userDid = c.get('did');
   if (!userDid) {
     throw new HTTPException(401, { message: 'Authentication required' });
   }
@@ -781,8 +782,8 @@ liveRoutes.post('/xrpc/io.exprsn.live.chat.send', async (c) => {
 });
 
 // Delete chat message (moderator/owner only)
-liveRoutes.post('/xrpc/io.exprsn.live.chat.delete', async (c) => {
-  const userDid = c.get('userDid');
+liveRoutes.post('/io.exprsn.live.chat.delete', authMiddleware, async (c) => {
+  const userDid = c.get('did');
   if (!userDid) {
     throw new HTTPException(401, { message: 'Authentication required' });
   }
@@ -840,8 +841,8 @@ liveRoutes.post('/xrpc/io.exprsn.live.chat.delete', async (c) => {
 // ============================================
 
 // Add moderator
-liveRoutes.post('/xrpc/io.exprsn.live.moderators.add', async (c) => {
-  const userDid = c.get('userDid');
+liveRoutes.post('/io.exprsn.live.moderators.add', authMiddleware, async (c) => {
+  const userDid = c.get('did');
   if (!userDid) {
     throw new HTTPException(401, { message: 'Authentication required' });
   }
@@ -895,8 +896,8 @@ liveRoutes.post('/xrpc/io.exprsn.live.moderators.add', async (c) => {
 });
 
 // Remove moderator
-liveRoutes.post('/xrpc/io.exprsn.live.moderators.remove', async (c) => {
-  const userDid = c.get('userDid');
+liveRoutes.post('/io.exprsn.live.moderators.remove', authMiddleware, async (c) => {
+  const userDid = c.get('did');
   if (!userDid) {
     throw new HTTPException(401, { message: 'Authentication required' });
   }
@@ -931,8 +932,8 @@ liveRoutes.post('/xrpc/io.exprsn.live.moderators.remove', async (c) => {
 });
 
 // Ban user from stream
-liveRoutes.post('/xrpc/io.exprsn.live.ban', async (c) => {
-  const userDid = c.get('userDid');
+liveRoutes.post('/io.exprsn.live.ban', authMiddleware, async (c) => {
+  const userDid = c.get('did');
   if (!userDid) {
     throw new HTTPException(401, { message: 'Authentication required' });
   }
@@ -1014,8 +1015,8 @@ liveRoutes.post('/xrpc/io.exprsn.live.ban', async (c) => {
 });
 
 // Unban user
-liveRoutes.post('/xrpc/io.exprsn.live.unban', async (c) => {
-  const userDid = c.get('userDid');
+liveRoutes.post('/io.exprsn.live.unban', authMiddleware, async (c) => {
+  const userDid = c.get('did');
   if (!userDid) {
     throw new HTTPException(401, { message: 'Authentication required' });
   }
@@ -1073,8 +1074,8 @@ liveRoutes.post('/xrpc/io.exprsn.live.unban', async (c) => {
 // ============================================
 
 // Join stream (track viewer)
-liveRoutes.post('/xrpc/io.exprsn.live.join', async (c) => {
-  const userDid = c.get('userDid');
+liveRoutes.post('/io.exprsn.live.viewer.join', authMiddleware, async (c) => {
+  const userDid = c.get('did');
   const body = await c.req.json<{
     streamId: string;
     sessionId: string;
@@ -1107,7 +1108,7 @@ liveRoutes.post('/xrpc/io.exprsn.live.join', async (c) => {
 });
 
 // Leave stream
-liveRoutes.post('/xrpc/io.exprsn.live.leave', async (c) => {
+liveRoutes.post('/io.exprsn.live.viewer.leave', authMiddleware, async (c) => {
   const body = await c.req.json<{
     streamId: string;
     sessionId: string;

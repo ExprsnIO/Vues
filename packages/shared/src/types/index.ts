@@ -129,3 +129,9 @@ export interface UserInteraction {
 export * from './settings.js';
 export * from './theme.js';
 export * from './hoster.js';
+
+// Payment processing types
+export * from './payments.js';
+
+// Certificate authority types
+export * from './certificates.js';
