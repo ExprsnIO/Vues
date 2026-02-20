@@ -14,6 +14,7 @@ import { LayoutSettings } from '@/components/settings/LayoutSettings';
 import { SecuritySettings } from '@/components/settings/SecuritySettings';
 import { BlockedMutedSettings } from '@/components/settings/BlockedMutedSettings';
 import { AccountSettings } from '@/components/settings/AccountSettings';
+import { TokensSettings } from '@/components/settings/TokensSettings';
 import type { UserSettings, UserSettingsUpdate } from '@exprsn/shared';
 import { DEFAULT_SETTINGS } from '@exprsn/shared';
 import { cn } from '@/lib/utils';
@@ -225,6 +226,13 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                 description="Sessions and login activity"
               >
                 <SecuritySettings />
+              </SettingsSection>
+
+              <SettingsSection
+                title="Access Tokens"
+                description="Manage API keys and personal access tokens"
+              >
+                <TokensSettings />
               </SettingsSection>
 
               <SettingsSection

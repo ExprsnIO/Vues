@@ -27,6 +27,7 @@ import { liveRoutes } from './routes/live.js';
 import { paymentRoutes } from './routes/payments.js';
 import { caRoutes } from './routes/ca.js';
 import { audioRouter } from './routes/audio.js';
+import configRoutes from './routes/config.js';
 import { createPdsApp, getPdsConfig } from './pds/index.js';
 
 const app = new Hono();
@@ -156,6 +157,7 @@ app.route('/xrpc', liveRoutes);
 app.route('/xrpc', paymentRoutes);
 app.route('/xrpc', caRoutes);
 app.route('/xrpc', audioRouter);
+app.route('/xrpc', configRoutes);
 // Admin routes last (has wildcard middleware)
 app.route('/xrpc', adminRouter);
 app.route('/oauth', oauthRouter);
