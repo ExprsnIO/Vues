@@ -186,6 +186,14 @@ export const useSettingsStore = create<SettingsState>()(
         try {
           const data = await api.getSettings();
           const serverSettings = data.settings;
+          const isAuthenticated = data.isAuthenticated;
+
+          // Only merge server settings if user is authenticated
+          // This prevents unauthenticated defaults from overwriting local settings
+          if (!isAuthenticated) {
+            console.debug('Settings sync skipped: not authenticated');
+            return;
+          }
 
           // Merge server settings with local, taking newer
           const state = get();

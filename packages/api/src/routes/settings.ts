@@ -67,13 +67,15 @@ const defaultSettings: Omit<UserSettings, 'updatedAt'> = {
 settingsRouter.get('/io.exprsn.settings.getSettings', optionalAuthMiddleware, async (c) => {
   const userDid = c.get('did');
 
-  // Return defaults for unauthenticated users
+  // Return defaults for unauthenticated users with isAuthenticated: false
+  // Use epoch timestamp so client knows not to overwrite local settings
   if (!userDid) {
     return c.json({
       settings: {
         ...defaultSettings,
-        updatedAt: new Date().toISOString(),
+        updatedAt: '1970-01-01T00:00:00.000Z', // Epoch - never overwrites local
       },
+      isAuthenticated: false,
     });
   }
 
@@ -82,12 +84,13 @@ settingsRouter.get('/io.exprsn.settings.getSettings', optionalAuthMiddleware, as
   });
 
   if (!existing) {
-    // Return defaults for new users
+    // Return defaults for new users - they are authenticated but have no settings yet
     return c.json({
       settings: {
         ...defaultSettings,
         updatedAt: new Date().toISOString(),
       },
+      isAuthenticated: true,
     });
   }
 
@@ -122,7 +125,7 @@ settingsRouter.get('/io.exprsn.settings.getSettings', optionalAuthMiddleware, as
     updatedAt: existing.updatedAt.toISOString(),
   };
 
-  return c.json({ settings });
+  return c.json({ settings, isAuthenticated: true });
 });
 
 /**

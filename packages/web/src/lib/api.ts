@@ -278,7 +278,7 @@ class ApiClient {
   }
 
   // Settings API
-  async getSettings(): Promise<{ settings: import('@exprsn/shared').UserSettings }> {
+  async getSettings(): Promise<{ settings: import('@exprsn/shared').UserSettings; isAuthenticated: boolean }> {
     return this.fetch('/xrpc/io.exprsn.settings.getSettings');
   }
 
@@ -1434,6 +1434,44 @@ class ApiClient {
     });
   }
 
+  // Add reaction to a message
+  async addReaction(
+    messageId: string,
+    emoji: string
+  ): Promise<{ success: boolean; reactions: MessageReaction[] }> {
+    return this.fetch('/xrpc/io.exprsn.chat.addReaction', {
+      method: 'POST',
+      body: JSON.stringify({ messageId, emoji }),
+    });
+  }
+
+  // Remove reaction from a message
+  async removeReaction(
+    messageId: string,
+    emoji: string
+  ): Promise<{ success: boolean; reactions: MessageReaction[] }> {
+    return this.fetch('/xrpc/io.exprsn.chat.removeReaction', {
+      method: 'POST',
+      body: JSON.stringify({ messageId, emoji }),
+    });
+  }
+
+  // Get reactions for messages
+  async getReactions(messageIds: string[]): Promise<{
+    reactions: Record<string, MessageReaction[]>;
+  }> {
+    const params = new URLSearchParams({ messageIds: messageIds.join(',') });
+    return this.fetch(`/xrpc/io.exprsn.chat.getReactions?${params}`);
+  }
+
+  // Get user presence
+  async getPresence(userDids: string[]): Promise<{
+    presence: Array<{ userDid: string; status: 'online' | 'away' | 'offline'; lastSeen: string | null }>;
+  }> {
+    const params = new URLSearchParams({ userDids: userDids.join(',') });
+    return this.fetch(`/xrpc/io.exprsn.chat.getPresence?${params}`);
+  }
+
   // =============================================================================
   // Actor Preferences API
   // =============================================================================
@@ -2380,6 +2418,13 @@ export interface ConversationView {
   updatedAt: string;
 }
 
+export interface MessageReaction {
+  emoji: string;
+  count: number;
+  users: string[];
+  userReacted: boolean;
+}
+
 export interface MessageView {
   id: string;
   sender: ConversationMember;
@@ -2389,6 +2434,7 @@ export interface MessageView {
   embedUri?: string;
   read: boolean;
   createdAt: string;
+  reactions?: MessageReaction[];
 }
 
 // Actor/Profile types

@@ -96,6 +96,13 @@ export async function authMiddleware(c: Context, next: Next) {
       });
 
       if (!session || session.expiresAt < new Date()) {
+        // In dev mode, fall back to default user for expired sessions
+        if (isDev) {
+          console.warn('Dev mode: using default user for expired session');
+          c.set('did', 'did:web:exprsn.local:user:rickholland');
+          await next();
+          return;
+        }
         throw new HTTPException(401, { message: 'Invalid or expired session' });
       }
 
@@ -109,6 +116,13 @@ export async function authMiddleware(c: Context, next: Next) {
     const session = await oauthClient.restore(token);
 
     if (!session) {
+      // In dev mode, fall back to default user for invalid OAuth
+      if (isDev) {
+        console.warn('Dev mode: using default user for invalid OAuth session');
+        c.set('did', 'did:web:exprsn.local:user:rickholland');
+        await next();
+        return;
+      }
       throw new HTTPException(401, { message: 'Invalid or expired session' });
     }
 
@@ -121,6 +135,13 @@ export async function authMiddleware(c: Context, next: Next) {
       throw error;
     }
     console.error('Auth middleware error:', error);
+    // In dev mode, fall back to default user on auth errors
+    if (isDev) {
+      console.warn('Dev mode: using default user after auth error');
+      c.set('did', 'did:web:exprsn.local:user:rickholland');
+      await next();
+      return;
+    }
     throw new HTTPException(401, { message: 'Authentication failed' });
   }
 }
