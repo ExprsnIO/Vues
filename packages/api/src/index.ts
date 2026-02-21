@@ -29,11 +29,20 @@ import { paymentRoutes } from './routes/payments.js';
 import { caRoutes } from './routes/ca.js';
 import { audioRouter } from './routes/audio.js';
 import configRoutes from './routes/config.js';
-import { createPdsApp, getPdsConfig } from './pds/index.js';
+import { createPdsApp, getPdsConfig, OnCommitCallback } from './pds/index.js';
 import { initializeChatWebSocket } from './websocket/chat.js';
 import { initializeEditorCollab } from './websocket/editorCollab.js';
 import { createWellKnownRouterFromEnv } from './routes/well-known.js';
+import { identityRouter } from './routes/identity.js';
+import { registryRouter, initializeServiceRegistry } from './routes/registry.js';
+import { federationRouter } from './routes/federation.js';
+import { plcRouter } from './routes/plc.js';
+import { initializeIdentityService } from './services/identity/index.js';
 import { Redis } from 'ioredis';
+import { RelayService, CommitEvent as RelayCommitEvent } from '@exprsn/relay';
+
+// Global relay service reference for use by PDS
+let relayService: RelayService | null = null;
 
 const app = new Hono();
 
@@ -163,17 +172,18 @@ app.route('/xrpc', paymentRoutes);
 app.route('/xrpc', caRoutes);
 app.route('/xrpc', audioRouter);
 app.route('/xrpc', configRoutes);
+// Identity, registry, federation, and PLC routes
+app.route('/xrpc', identityRouter);
+app.route('/xrpc', registryRouter);
+app.route('/xrpc', federationRouter);
+app.route('/xrpc', plcRouter); // PLC XRPC endpoints
+app.route('/plc', plcRouter); // Standard PLC directory endpoints (did:plc resolution)
 // Admin routes last (has wildcard middleware)
 app.route('/xrpc', adminRouter);
 app.route('/oauth', oauthRouter);
 
-// Mount PDS routes if enabled
+// PDS will be mounted after relay is initialized in main()
 const pdsConfig = getPdsConfig();
-if (pdsConfig.enabled) {
-  const pdsApp = createPdsApp(pdsConfig);
-  app.route('/', pdsApp);
-  console.log('PDS enabled at', pdsConfig.domain);
-}
 
 // Mount well-known routes for AT Protocol and federation discovery
 const wellKnownRouter = createWellKnownRouterFromEnv();
@@ -202,6 +212,38 @@ app.notFound((c) => {
   );
 });
 
+/**
+ * Create onCommit callback that bridges PDS commits to relay
+ */
+function createRelayBridge(): OnCommitCallback {
+  return async (event) => {
+    if (!relayService) {
+      return;
+    }
+
+    // Convert PDS commit ops to relay commit events
+    for (const op of event.ops) {
+      const [collection, rkey] = op.path.split('/');
+      if (!collection || !rkey) continue;
+
+      const relayCommit: RelayCommitEvent = {
+        rev: event.rev,
+        operation: op.action,
+        collection,
+        rkey,
+        cid: op.cid?.toString(),
+        prev: event.since || undefined,
+      };
+
+      try {
+        await relayService.emitCommit(event.did, relayCommit);
+      } catch (err) {
+        console.error('Failed to emit commit to relay:', err);
+      }
+    }
+  };
+}
+
 // Initialize and start server
 async function main() {
   const port = parseInt(process.env.PORT || '3000', 10);
@@ -221,6 +263,54 @@ async function main() {
     console.log('OAuth client initialized');
   } else {
     console.warn('OAUTH_PRIVATE_KEY not set - OAuth disabled');
+  }
+
+  // Initialize relay service before PDS (so onCommit callback works)
+  const relayEnabled = process.env.RELAY_ENABLED === 'true';
+  let redis: Redis | null = null;
+
+  if (relayEnabled) {
+    try {
+      const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
+      redis = new Redis(redisUrl);
+
+      relayService = new RelayService({
+        redis,
+        maxBackfillEvents: parseInt(process.env.RELAY_MAX_BACKFILL || '10000', 10),
+      });
+
+      console.log('Relay service initialized');
+    } catch (err) {
+      console.warn('Failed to initialize relay service:', err);
+    }
+  }
+
+  // Initialize identity service with Redis for caching
+  initializeIdentityService({
+    redis: redis || undefined,
+    plcUrl: process.env.PLC_URL,
+    cacheTtlMs: parseInt(process.env.DID_CACHE_TTL || '3600', 10) * 1000,
+    staleTtlMs: parseInt(process.env.DID_STALE_TTL || '86400', 10) * 1000,
+    persistToDb: true,
+  });
+  console.log('Identity service initialized');
+
+  // Initialize service registry with health checks
+  const registryEnabled = process.env.REGISTRY_ENABLED !== 'false';
+  if (registryEnabled) {
+    initializeServiceRegistry({ startHealthChecks: true });
+    console.log('Service registry initialized with health checks');
+  }
+
+  // Mount PDS routes with relay callback
+  if (pdsConfig.enabled) {
+    const onCommit = relayEnabled ? createRelayBridge() : undefined;
+    const pdsApp = createPdsApp({ config: pdsConfig, onCommit });
+    app.route('/', pdsApp);
+    console.log('PDS enabled at', pdsConfig.domain);
+    if (onCommit) {
+      console.log('PDS commits will be emitted to relay firehose');
+    }
   }
 
   console.log(`Starting Exprsn API server on ${host}:${port}`);
@@ -245,21 +335,14 @@ async function main() {
   initializeChatWebSocket(io);
   initializeEditorCollab(io);
 
-  // Initialize relay service if enabled
-  const relayEnabled = process.env.RELAY_ENABLED === 'true';
-  if (relayEnabled) {
-    try {
-      const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
-      const redis = new Redis(redisUrl);
+  // Initialize relay firehose WebSocket if enabled
+  if (relayEnabled && relayService) {
+    relayService.initialize(io);
+    console.log('Relay firehose initialized at: /xrpc/com.atproto.sync.subscribeRepos');
 
-      // Import relay service dynamically
-      // Relay functionality is initialized when RELAY_ENABLED=true
-      console.log('Relay service would be initialized here');
-      console.log('Firehose would be available at: /xrpc/com.atproto.sync.subscribeRepos');
-      // Note: Relay integration is handled via the @exprsn/relay package when built and imported
-    } catch (err) {
-      console.warn('Failed to initialize relay service:', err);
-    }
+    // Mount relay HTTP routes
+    const relayRouter = relayService.createRouter();
+    app.route('/xrpc', relayRouter);
   }
 
   console.log(`Server running at http://${host}:${port}`);

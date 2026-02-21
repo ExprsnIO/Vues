@@ -3,6 +3,7 @@ import {
   text,
   timestamp,
   integer,
+  serial,
   real,
   jsonb,
   index,
@@ -2042,6 +2043,89 @@ export const federationSyncState = pgTable(
   })
 );
 
+// ============================================
+// PLC Directory Tables
+// ============================================
+
+// PLC Operations - the append-only operations log (core of PLC)
+export const plcOperations = pgTable(
+  'plc_operations',
+  {
+    id: serial('id').primaryKey(),
+    did: text('did').notNull(),
+    cid: text('cid').notNull(), // CID of the operation
+    operation: jsonb('operation').notNull(), // The signed operation
+    nullified: boolean('nullified').default(false).notNull(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    didIdx: index('plc_operations_did_idx').on(table.did),
+    cidIdx: uniqueIndex('plc_operations_cid_idx').on(table.cid),
+    createdAtIdx: index('plc_operations_created_at_idx').on(table.createdAt),
+  })
+);
+
+// PLC Identities - current resolved state of each DID
+export const plcIdentities = pgTable(
+  'plc_identities',
+  {
+    did: text('did').primaryKey(),
+    handle: text('handle'),
+    pdsEndpoint: text('pds_endpoint'),
+    signingKey: text('signing_key'), // Current signing key (multibase)
+    rotationKeys: jsonb('rotation_keys').$type<string[]>().notNull(), // Array of rotation keys
+    alsoKnownAs: jsonb('also_known_as').$type<string[]>(), // AT-URI aliases
+    services: jsonb('services').$type<Record<string, { type: string; endpoint: string }>>(),
+    lastOperationCid: text('last_operation_cid'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    handleIdx: uniqueIndex('plc_identities_handle_idx').on(table.handle),
+    pdsIdx: index('plc_identities_pds_idx').on(table.pdsEndpoint),
+  })
+);
+
+// PLC Handle Reservations - reserved handles for organizations
+export const plcHandleReservations = pgTable(
+  'plc_handle_reservations',
+  {
+    id: serial('id').primaryKey(),
+    handle: text('handle').notNull().unique(),
+    handleType: text('handle_type').notNull(), // 'user' | 'org'
+    organizationId: text('organization_id'), // Links to organizations table for org handles
+    reservedBy: text('reserved_by'), // DID that reserved this
+    reservedAt: timestamp('reserved_at').defaultNow().notNull(),
+    expiresAt: timestamp('expires_at'), // null = permanent
+    status: text('status').default('active').notNull(), // 'active' | 'expired' | 'released'
+  },
+  (table) => ({
+    handleIdx: uniqueIndex('plc_handle_reservations_handle_idx').on(table.handle),
+    orgIdx: index('plc_handle_reservations_org_idx').on(table.organizationId),
+  })
+);
+
+// PLC Audit Log - track all operations for compliance
+export const plcAuditLog = pgTable(
+  'plc_audit_log',
+  {
+    id: serial('id').primaryKey(),
+    did: text('did').notNull(),
+    action: text('action').notNull(), // 'create' | 'update' | 'rotate_key' | 'update_handle' | 'tombstone'
+    operationCid: text('operation_cid'),
+    previousState: jsonb('previous_state'),
+    newState: jsonb('new_state'),
+    ipAddress: text('ip_address'),
+    userAgent: text('user_agent'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    didIdx: index('plc_audit_log_did_idx').on(table.did),
+    actionIdx: index('plc_audit_log_action_idx').on(table.action),
+    createdAtIdx: index('plc_audit_log_created_at_idx').on(table.createdAt),
+  })
+);
+
 // Relay/Federation type exports
 export type RelayEvent = typeof relayEvents.$inferSelect;
 export type NewRelayEvent = typeof relayEvents.$inferInsert;
@@ -2053,3 +2137,13 @@ export type ServiceRegistryEntry = typeof serviceRegistry.$inferSelect;
 export type NewServiceRegistryEntry = typeof serviceRegistry.$inferInsert;
 export type FederationSyncStateEntry = typeof federationSyncState.$inferSelect;
 export type NewFederationSyncStateEntry = typeof federationSyncState.$inferInsert;
+
+// PLC type exports
+export type PlcOperation = typeof plcOperations.$inferSelect;
+export type NewPlcOperation = typeof plcOperations.$inferInsert;
+export type PlcIdentity = typeof plcIdentities.$inferSelect;
+export type NewPlcIdentity = typeof plcIdentities.$inferInsert;
+export type PlcHandleReservation = typeof plcHandleReservations.$inferSelect;
+export type NewPlcHandleReservation = typeof plcHandleReservations.$inferInsert;
+export type PlcAuditLogEntry = typeof plcAuditLog.$inferSelect;
+export type NewPlcAuditLogEntry = typeof plcAuditLog.$inferInsert;

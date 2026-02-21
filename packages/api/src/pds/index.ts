@@ -3,11 +3,13 @@ import * as bcrypt from 'bcryptjs';
 import { eq } from 'drizzle-orm';
 import { readFile } from 'fs/promises';
 import { existsSync } from 'fs';
-import { createPdsRouter, PdsDependencies, PdsServerConfig } from '@exprsn/pds';
+import { createPdsRouter, PdsDependencies, PdsServerConfig, OnCommitCallback } from '@exprsn/pds';
 import { createDidService, DidWebConfig } from '@exprsn/pds';
 import { createLocalBlobStore, createS3BlobStore } from '@exprsn/pds';
 import { db } from '../db/index.js';
 import { actorRepos, repoCommits, repoRecords, blobs, repoBlocks, sessions } from '../db/schema.js';
+
+export type { OnCommitCallback } from '@exprsn/pds';
 
 /**
  * PDS configuration from environment
@@ -341,9 +343,21 @@ async function getSession(c: { req: { header(name: string): string | undefined }
 }
 
 /**
+ * PDS app options
+ */
+export interface PdsAppOptions {
+  config: PdsConfig;
+  onCommit?: OnCommitCallback;
+}
+
+/**
  * Create PDS router with all dependencies wired up
  */
-export function createPdsApp(config: PdsConfig): Hono {
+export function createPdsApp(configOrOptions: PdsConfig | PdsAppOptions): Hono {
+  // Support both old signature (just config) and new signature (options object)
+  const config = 'config' in configOrOptions ? configOrOptions.config : configOrOptions;
+  const onCommit = 'onCommit' in configOrOptions ? configOrOptions.onCommit : undefined;
+
   const serverConfig: PdsServerConfig = {
     domain: config.domain,
     serviceEndpoint: `https://${config.domain}`,
@@ -376,6 +390,7 @@ export function createPdsApp(config: PdsConfig): Hono {
     verifyPassword: (password: string, hash: string) => bcrypt.compare(password, hash),
     generateKeyPair,
     getSession,
+    onCommit,
   } as PdsDependencies;
 
   const pdsRouter = createPdsRouter(deps);

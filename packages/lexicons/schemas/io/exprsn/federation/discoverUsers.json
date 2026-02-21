@@ -1,0 +1,81 @@
+{
+  "lexicon": 1,
+  "id": "io.exprsn.federation.discoverUsers",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Discover users across the federation",
+      "parameters": {
+        "type": "params",
+        "properties": {
+          "q": {
+            "type": "string",
+            "description": "Search query for user discovery"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 25,
+            "description": "Maximum results to return"
+          },
+          "suggestions": {
+            "type": "boolean",
+            "default": false,
+            "description": "Return suggested users instead of search results"
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["users", "queryTimeMs"],
+          "properties": {
+            "users": {
+              "type": "array",
+              "items": {
+                "type": "ref",
+                "ref": "#userInfo"
+              }
+            },
+            "queryTimeMs": {
+              "type": "integer",
+              "description": "Total query time in milliseconds"
+            }
+          }
+        }
+      }
+    },
+    "userInfo": {
+      "type": "object",
+      "required": ["did", "handle"],
+      "properties": {
+        "did": {
+          "type": "string",
+          "format": "did"
+        },
+        "handle": {
+          "type": "string",
+          "format": "handle"
+        },
+        "displayName": {
+          "type": "string"
+        },
+        "avatar": {
+          "type": "string"
+        },
+        "bio": {
+          "type": "string"
+        },
+        "followerCount": {
+          "type": "integer"
+        },
+        "source": {
+          "type": "string",
+          "description": "Source appview endpoint"
+        }
+      }
+    }
+  }
+}

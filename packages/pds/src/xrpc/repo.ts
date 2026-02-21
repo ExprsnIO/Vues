@@ -1,7 +1,8 @@
 import { Hono, Context, Next } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { CID } from 'multiformats/cid';
-import { Repository, RepoRecord } from '../repo/repo.js';
+import { Repository, RepoRecord, WriteOp } from '../repo/repo.js';
+import { Commit } from '../repo/commit.js';
 import { parseAtUri, isValidCollection, isValidRkey, calculateRecordCid } from '../repo/record.js';
 import { BlobStore, BlobMetadata } from '../storage/blob-store.js';
 
@@ -12,6 +13,33 @@ export interface RepoStoreManager {
   getRepo(did: string): Promise<Repository | null>;
   createRepo(did: string): Promise<Repository>;
 }
+
+/**
+ * Commit event data for relay emission
+ */
+export interface CommitEvent {
+  did: string;
+  commit: Commit;
+  ops: CommitOp[];
+  blobs: CID[];
+  rev: string;
+  since: string | null;
+  tooBig: boolean;
+}
+
+/**
+ * Individual operation within a commit
+ */
+export interface CommitOp {
+  action: 'create' | 'update' | 'delete';
+  path: string;  // collection/rkey
+  cid: CID | null;  // null for deletes
+}
+
+/**
+ * Callback for when commits happen
+ */
+export type OnCommitCallback = (event: CommitEvent) => void | Promise<void>;
 
 /**
  * Session context from auth middleware
@@ -28,14 +56,51 @@ type Variables = {
 };
 
 /**
+ * Repo router options
+ */
+export interface RepoRouterOptions {
+  repoManager: RepoStoreManager;
+  blobStore: BlobStore;
+  getSession: (c: { req: { header(name: string): string | undefined } }) => Promise<SessionContext | null>;
+  onCommit?: OnCommitCallback;
+}
+
+/**
  * Create repo XRPC router
  */
 export function createRepoRouter(
   repoManager: RepoStoreManager,
   blobStore: BlobStore,
-  getSession: (c: { req: { header(name: string): string | undefined } }) => Promise<SessionContext | null>
+  getSession: (c: { req: { header(name: string): string | undefined } }) => Promise<SessionContext | null>,
+  onCommit?: OnCommitCallback
 ) {
   const router = new Hono<{ Variables: Variables }>();
+
+  /**
+   * Helper to emit commit event
+   */
+  const emitCommit = async (
+    did: string,
+    commit: Commit,
+    ops: CommitOp[],
+    prevRev: string | null = null
+  ) => {
+    if (onCommit) {
+      try {
+        await onCommit({
+          did,
+          commit,
+          ops,
+          blobs: [],
+          rev: commit.rev,
+          since: prevRev,
+          tooBig: false,
+        });
+      } catch (err) {
+        console.error('Failed to emit commit event:', err);
+      }
+    }
+  };
 
   /**
    * Require authentication middleware
@@ -91,11 +156,25 @@ export function createRepoRouter(
       repo = await repoManager.createRepo(session.did);
     }
 
+    // Get previous rev for since tracking
+    const prevCommit = repo.getCurrentCommit();
+    const prevRev = prevCommit?.rev || null;
+
     // Create record
     const result = await repo.createRecord(body.collection, body.record, body.rkey);
 
     // Commit changes
-    await repo.commit();
+    const commit = await repo.commit();
+
+    // Emit commit event to relay
+    const rkey = result.uri.split('/').pop() || '';
+    await emitCommit(session.did, commit, [
+      {
+        action: 'create',
+        path: `${body.collection}/${rkey}`,
+        cid: result.cid,
+      },
+    ], prevRev);
 
     return c.json({
       uri: result.uri,
@@ -189,9 +268,26 @@ export function createRepoRouter(
       }
     }
 
+    // Get previous rev for since tracking
+    const prevCommit = repo.getCurrentCommit();
+    const prevRev = prevCommit?.rev || null;
+
+    // Check if this is an update or create
+    const existing = await repo.getRecord(body.collection, body.rkey);
+    const action = existing ? 'update' : 'create';
+
     // Update or create record
     const result = await repo.updateRecord(body.collection, body.rkey, body.record);
-    await repo.commit();
+    const commit = await repo.commit();
+
+    // Emit commit event to relay
+    await emitCommit(session.did, commit, [
+      {
+        action,
+        path: `${body.collection}/${body.rkey}`,
+        cid: result.cid,
+      },
+    ], prevRev);
 
     return c.json({
       uri: result.uri,
@@ -235,8 +331,21 @@ export function createRepoRouter(
       }
     }
 
+    // Get previous rev for since tracking
+    const prevCommit = repo.getCurrentCommit();
+    const prevRev = prevCommit?.rev || null;
+
     await repo.deleteRecord(body.collection, body.rkey);
-    await repo.commit();
+    const commit = await repo.commit();
+
+    // Emit commit event to relay
+    await emitCommit(session.did, commit, [
+      {
+        action: 'delete',
+        path: `${body.collection}/${body.rkey}`,
+        cid: null,
+      },
+    ], prevRev);
 
     return c.json({ success: true });
   });

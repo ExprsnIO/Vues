@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { createServerRouter, PdsServerConfig, AccountStore, SessionStore } from './server.js';
-import { createRepoRouter, RepoStoreManager } from './repo.js';
+import { createRepoRouter, RepoStoreManager, OnCommitCallback } from './repo.js';
 import { createSyncRouter, SyncRepoManager } from './sync.js';
 import { createIdentityRouter, AccountLookup } from './identity.js';
 import { BlobStore } from '../storage/blob-store.js';
@@ -25,6 +25,8 @@ export interface PdsDependencies {
   getSession: (c: {
     req: { header(name: string): string | undefined };
   }) => Promise<{ did: string } | null>;
+  /** Optional callback for when commits happen - used for relay/firehose integration */
+  onCommit?: OnCommitCallback;
 }
 
 /**
@@ -48,7 +50,8 @@ export function createPdsRouter(deps: PdsDependencies): Hono {
   const repoRouter = createRepoRouter(
     deps.repoManager,
     deps.blobStore,
-    deps.getSession
+    deps.getSession,
+    deps.onCommit
   );
   router.route('/', repoRouter);
 

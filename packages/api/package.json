@@ -45,6 +45,7 @@
     "@azure/storage-blob": "^12.31.0",
     "@exprsn/lexicons": "workspace:*",
     "@exprsn/pds": "workspace:*",
+    "@exprsn/relay": "workspace:*",
     "@exprsn/prefetch": "workspace:*",
     "@exprsn/shared": "workspace:*",
     "@hono/node-server": "^1.13.0",

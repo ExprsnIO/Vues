@@ -1570,6 +1570,282 @@ adminRouter.post(
   }
 );
 
+// ============================================
+// PLC Directory Administration
+// ============================================
+
+// Get PLC configuration
+adminRouter.get(
+  '/io.exprsn.admin.plc.getConfig',
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_VIEW),
+  async (c) => {
+    const [config] = await db
+      .select()
+      .from(systemConfig)
+      .where(eq(systemConfig.key, 'plc'))
+      .limit(1);
+
+    const defaultConfig = {
+      enabled: false,
+      mode: 'standalone',
+      externalPlcUrl: null,
+      domain: 'plc.exprsn.io',
+      handleSuffix: 'exprsn',
+      orgHandleSuffix: 'org.exprsn',
+      allowCustomHandles: false,
+      requireInviteCode: false,
+    };
+
+    return c.json({
+      config: config?.value || defaultConfig,
+    });
+  }
+);
+
+// Update PLC configuration
+adminRouter.post(
+  '/io.exprsn.admin.plc.updateConfig',
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_EDIT),
+  async (c) => {
+    const adminUser = c.get('adminUser') as AdminUser;
+    const body = await c.req.json<{
+      enabled?: boolean;
+      mode?: 'standalone' | 'external';
+      externalPlcUrl?: string;
+      domain?: string;
+      handleSuffix?: string;
+      orgHandleSuffix?: string;
+      allowCustomHandles?: boolean;
+      requireInviteCode?: boolean;
+    }>();
+
+    // Get existing config
+    const [existing] = await db
+      .select()
+      .from(systemConfig)
+      .where(eq(systemConfig.key, 'plc'))
+      .limit(1);
+
+    const currentConfig = (existing?.value || {}) as Record<string, unknown>;
+    const newConfig = { ...currentConfig, ...body };
+
+    await db
+      .insert(systemConfig)
+      .values({
+        key: 'plc',
+        value: newConfig,
+        updatedAt: new Date(),
+      })
+      .onConflictDoUpdate({
+        target: systemConfig.key,
+        set: {
+          value: newConfig,
+          updatedAt: new Date(),
+        },
+      });
+
+    // Audit log
+    await db.insert(adminAuditLog).values({
+      id: nanoid(),
+      adminId: adminUser.id,
+      action: 'plc.updateConfig',
+      targetType: 'config',
+      targetId: 'plc',
+      details: { previous: currentConfig, new: newConfig },
+      createdAt: new Date(),
+    });
+
+    return c.json({ success: true, config: newConfig });
+  }
+);
+
+// Get PLC statistics
+adminRouter.get(
+  '/io.exprsn.admin.plc.getStats',
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_VIEW),
+  async (c) => {
+    const { plcIdentities, plcOperations, plcHandleReservations } = await import('../db/schema.js');
+
+    const [identityCount] = await db.select({ count: count() }).from(plcIdentities);
+    const [operationCount] = await db.select({ count: count() }).from(plcOperations);
+    const [reservationCount] = await db
+      .select({ count: count() })
+      .from(plcHandleReservations)
+      .where(eq(plcHandleReservations.status, 'active'));
+
+    // Get recent operations
+    const recentOperations = await db
+      .select()
+      .from(plcOperations)
+      .orderBy(desc(plcOperations.createdAt))
+      .limit(10);
+
+    return c.json({
+      totalIdentities: identityCount?.count || 0,
+      totalOperations: operationCount?.count || 0,
+      activeReservations: reservationCount?.count || 0,
+      recentOperations: recentOperations.map((op) => ({
+        did: op.did,
+        cid: op.cid,
+        createdAt: op.createdAt.toISOString(),
+      })),
+    });
+  }
+);
+
+// List PLC identities
+adminRouter.get(
+  '/io.exprsn.admin.plc.listIdentities',
+  requirePermission(ADMIN_PERMISSIONS.USERS_VIEW),
+  async (c) => {
+    const { plcIdentities } = await import('../db/schema.js');
+
+    const query = c.req.query('q');
+    const limit = Math.min(parseInt(c.req.query('limit') || '50'), 100);
+    const cursor = c.req.query('cursor');
+
+    let dbQuery = db.select().from(plcIdentities);
+
+    if (query) {
+      dbQuery = dbQuery.where(
+        or(ilike(plcIdentities.did, `%${query}%`), ilike(plcIdentities.handle, `%${query}%`))
+      ) as typeof dbQuery;
+    }
+
+    const identities = await dbQuery.orderBy(desc(plcIdentities.createdAt)).limit(limit);
+
+    return c.json({
+      identities: identities.map((id) => ({
+        did: id.did,
+        handle: id.handle,
+        pdsEndpoint: id.pdsEndpoint,
+        createdAt: id.createdAt.toISOString(),
+        updatedAt: id.updatedAt.toISOString(),
+      })),
+    });
+  }
+);
+
+// List handle reservations
+adminRouter.get(
+  '/io.exprsn.admin.plc.listReservations',
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_VIEW),
+  async (c) => {
+    const { plcHandleReservations } = await import('../db/schema.js');
+
+    const reservations = await db
+      .select()
+      .from(plcHandleReservations)
+      .orderBy(desc(plcHandleReservations.reservedAt))
+      .limit(100);
+
+    return c.json({
+      reservations: reservations.map((r) => ({
+        id: r.id,
+        handle: r.handle,
+        handleType: r.handleType,
+        organizationId: r.organizationId,
+        status: r.status,
+        reservedAt: r.reservedAt.toISOString(),
+        expiresAt: r.expiresAt?.toISOString(),
+      })),
+    });
+  }
+);
+
+// ============================================
+// Content Limits Configuration
+// ============================================
+
+// Get content limits configuration
+adminRouter.get(
+  '/io.exprsn.admin.config.getContentLimits',
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_VIEW),
+  async (c) => {
+    const [config] = await db
+      .select()
+      .from(systemConfig)
+      .where(eq(systemConfig.key, 'contentLimits'))
+      .limit(1);
+
+    const defaultLimits = {
+      maxPostLength: 300, // Characters for text posts
+      maxVideoLength: 180, // Seconds
+      maxVideoSize: 500, // MB
+      maxBioLength: 160,
+      maxDisplayNameLength: 64,
+      maxHashtagsPerPost: 10,
+      maxMentionsPerPost: 20,
+      maxLinksPerPost: 5,
+      maxUploadsPerDay: 50,
+      maxVideosPerDay: 10,
+    };
+
+    return c.json({
+      limits: config?.value || defaultLimits,
+    });
+  }
+);
+
+// Update content limits configuration
+adminRouter.post(
+  '/io.exprsn.admin.config.updateContentLimits',
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_EDIT),
+  async (c) => {
+    const adminUser = c.get('adminUser') as AdminUser;
+    const body = await c.req.json<{
+      maxPostLength?: number;
+      maxVideoLength?: number;
+      maxVideoSize?: number;
+      maxBioLength?: number;
+      maxDisplayNameLength?: number;
+      maxHashtagsPerPost?: number;
+      maxMentionsPerPost?: number;
+      maxLinksPerPost?: number;
+      maxUploadsPerDay?: number;
+      maxVideosPerDay?: number;
+    }>();
+
+    // Get existing config
+    const [existing] = await db
+      .select()
+      .from(systemConfig)
+      .where(eq(systemConfig.key, 'contentLimits'))
+      .limit(1);
+
+    const currentLimits = (existing?.value || {}) as Record<string, unknown>;
+    const newLimits = { ...currentLimits, ...body };
+
+    await db
+      .insert(systemConfig)
+      .values({
+        key: 'contentLimits',
+        value: newLimits,
+        updatedAt: new Date(),
+      })
+      .onConflictDoUpdate({
+        target: systemConfig.key,
+        set: {
+          value: newLimits,
+          updatedAt: new Date(),
+        },
+      });
+
+    // Audit log
+    await db.insert(adminAuditLog).values({
+      id: nanoid(),
+      adminId: adminUser.id,
+      action: 'config.updateContentLimits',
+      targetType: 'config',
+      targetId: 'contentLimits',
+      details: { previous: currentLimits, new: newLimits },
+      createdAt: new Date(),
+    });
+
+    return c.json({ success: true, limits: newLimits });
+  }
+);
+
 // Helper function for sanction severity ordering
 function severityOrder(sanctionType: string): number {
   const order: Record<string, number> = {

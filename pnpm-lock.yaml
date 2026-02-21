@@ -53,6 +53,9 @@ importers:
       '@exprsn/prefetch':
         specifier: workspace:*
         version: link:../prefetch
+      '@exprsn/relay':
+        specifier: workspace:*
+        version: link:../relay
       '@exprsn/shared':
         specifier: workspace:*
         version: link:../shared
