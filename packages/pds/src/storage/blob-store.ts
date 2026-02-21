@@ -251,6 +251,67 @@ export class BlobStore {
     const blobPath = this.getBlobPath(did, cid);
     await this.backend.delete(blobPath);
   }
+
+  /**
+   * List blobs for a DID with pagination
+   */
+  async listBlobs(
+    did: string,
+    options: { limit: number; cursor?: string; since?: string }
+  ): Promise<{ cids: string[]; cursor?: string }> {
+    // This is a basic implementation - in production, would use database index
+    const cids: string[] = [];
+
+    // Check if using local storage backend by checking if backend exists
+    // For local backend, we can list directory contents
+    try {
+      // Try to list blobs from the default path structure
+      const basePath = './data/blobs';
+      const didPath = `${basePath}/${did}`;
+
+      const subdirs = await fs.readdir(didPath).catch(() => []);
+      const allCids: string[] = [];
+
+      for (const subdir of subdirs) {
+        const files = await fs.readdir(`${didPath}/${subdir}`).catch(() => []);
+        allCids.push(...files);
+      }
+
+      // Sort CIDs for consistent ordering
+      allCids.sort();
+
+      // Apply cursor
+      let startIndex = 0;
+      if (options.cursor) {
+        const cursorIndex = allCids.indexOf(options.cursor);
+        if (cursorIndex >= 0) {
+          startIndex = cursorIndex + 1;
+        }
+      }
+
+      // Apply limit
+      const sliced = allCids.slice(startIndex, startIndex + options.limit);
+      cids.push(...sliced);
+
+      // Calculate next cursor
+      const nextCursor = sliced.length === options.limit && startIndex + options.limit < allCids.length
+        ? sliced[sliced.length - 1]
+        : undefined;
+
+      return { cids, cursor: nextCursor };
+    } catch {
+      return { cids: [] };
+    }
+  }
+
+  /**
+   * Get MIME type for a blob (would typically be stored in metadata)
+   */
+  async getBlobMimeType(did: string, cid: CID): Promise<string | null> {
+    // In a full implementation, this would look up metadata
+    // For now, return null to indicate unknown
+    return null;
+  }
 }
 
 /**

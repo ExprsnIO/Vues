@@ -1243,6 +1243,333 @@ adminRouter.get(
   }
 );
 
+// ============================================
+// Federation Management
+// ============================================
+
+// Get federation settings
+adminRouter.get(
+  '/io.exprsn.admin.federation.getSettings',
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_VIEW),
+  async (c) => {
+    const [federation] = await db
+      .select()
+      .from(systemConfig)
+      .where(eq(systemConfig.key, 'federation'))
+      .limit(1);
+
+    const [cache] = await db
+      .select()
+      .from(systemConfig)
+      .where(eq(systemConfig.key, 'cache'))
+      .limit(1);
+
+    const [serviceAuth] = await db
+      .select()
+      .from(systemConfig)
+      .where(eq(systemConfig.key, 'serviceAuth'))
+      .limit(1);
+
+    return c.json({
+      federation: federation?.value || null,
+      cache: cache?.value || null,
+      serviceAuth: serviceAuth?.value || null,
+    });
+  }
+);
+
+// Update federation settings
+adminRouter.post(
+  '/io.exprsn.admin.federation.updateSettings',
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_EDIT),
+  async (c) => {
+    const body = await c.req.json<{
+      federation?: unknown;
+      cache?: unknown;
+      serviceAuth?: unknown;
+    }>();
+    const adminUser = c.get('adminUser');
+
+    const updates: string[] = [];
+
+    if (body.federation !== undefined) {
+      await db
+        .update(systemConfig)
+        .set({ value: body.federation, updatedBy: adminUser.id, updatedAt: new Date() })
+        .where(eq(systemConfig.key, 'federation'));
+      updates.push('federation');
+    }
+
+    if (body.cache !== undefined) {
+      await db
+        .update(systemConfig)
+        .set({ value: body.cache, updatedBy: adminUser.id, updatedAt: new Date() })
+        .where(eq(systemConfig.key, 'cache'));
+      updates.push('cache');
+    }
+
+    if (body.serviceAuth !== undefined) {
+      await db
+        .update(systemConfig)
+        .set({ value: body.serviceAuth, updatedBy: adminUser.id, updatedAt: new Date() })
+        .where(eq(systemConfig.key, 'serviceAuth'));
+      updates.push('serviceAuth');
+    }
+
+    // Audit log
+    await db.insert(adminAuditLog).values({
+      id: nanoid(),
+      adminId: adminUser.id,
+      action: 'federation.updateSettings',
+      targetType: 'config',
+      targetId: 'federation',
+      details: { updatedKeys: updates },
+      createdAt: new Date(),
+    });
+
+    return c.json({ success: true, updated: updates });
+  }
+);
+
+// Get service registry
+adminRouter.get(
+  '/io.exprsn.admin.federation.getServices',
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_VIEW),
+  async (c) => {
+    const type = c.req.query('type');
+    const status = c.req.query('status');
+    const limit = Math.min(parseInt(c.req.query('limit') || '50'), 100);
+
+    // Import serviceRegistry table
+    const { serviceRegistry } = await import('../db/schema.js');
+
+    let conditions = [];
+    if (type) conditions.push(eq(serviceRegistry.type, type));
+    if (status) conditions.push(eq(serviceRegistry.status, status));
+
+    const services = await db
+      .select()
+      .from(serviceRegistry)
+      .where(conditions.length > 0 ? and(...conditions) : undefined)
+      .orderBy(desc(serviceRegistry.createdAt))
+      .limit(limit);
+
+    return c.json({ services });
+  }
+);
+
+// Register a service
+adminRouter.post(
+  '/io.exprsn.admin.federation.registerService',
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_EDIT),
+  async (c) => {
+    const body = await c.req.json<{
+      type: 'pds' | 'relay' | 'appview' | 'labeler';
+      endpoint: string;
+      did?: string;
+      certificateId?: string;
+      region?: string;
+      capabilities?: string[];
+    }>();
+    const adminUser = c.get('adminUser');
+
+    if (!body.type || !body.endpoint) {
+      return c.json({ error: 'InvalidRequest', message: 'type and endpoint are required' }, 400);
+    }
+
+    const { serviceRegistry } = await import('../db/schema.js');
+
+    const serviceId = nanoid();
+    await db.insert(serviceRegistry).values({
+      id: serviceId,
+      type: body.type,
+      endpoint: body.endpoint,
+      did: body.did,
+      certificateId: body.certificateId,
+      region: body.region,
+      capabilities: body.capabilities || [],
+      status: 'active',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    // Audit log
+    await db.insert(adminAuditLog).values({
+      id: nanoid(),
+      adminId: adminUser.id,
+      action: 'federation.registerService',
+      targetType: 'service',
+      targetId: serviceId,
+      details: { type: body.type, endpoint: body.endpoint },
+      createdAt: new Date(),
+    });
+
+    return c.json({ success: true, serviceId });
+  }
+);
+
+// Update service status
+adminRouter.post(
+  '/io.exprsn.admin.federation.updateService',
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_EDIT),
+  async (c) => {
+    const body = await c.req.json<{
+      serviceId: string;
+      status?: 'active' | 'inactive' | 'unhealthy';
+      certificateId?: string;
+      capabilities?: string[];
+    }>();
+    const adminUser = c.get('adminUser');
+
+    if (!body.serviceId) {
+      return c.json({ error: 'InvalidRequest', message: 'serviceId is required' }, 400);
+    }
+
+    const { serviceRegistry } = await import('../db/schema.js');
+
+    const updates: Record<string, unknown> = { updatedAt: new Date() };
+    if (body.status) updates.status = body.status;
+    if (body.certificateId) updates.certificateId = body.certificateId;
+    if (body.capabilities) updates.capabilities = body.capabilities;
+
+    await db
+      .update(serviceRegistry)
+      .set(updates)
+      .where(eq(serviceRegistry.id, body.serviceId));
+
+    // Audit log
+    await db.insert(adminAuditLog).values({
+      id: nanoid(),
+      adminId: adminUser.id,
+      action: 'federation.updateService',
+      targetType: 'service',
+      targetId: body.serviceId,
+      details: updates,
+      createdAt: new Date(),
+    });
+
+    return c.json({ success: true });
+  }
+);
+
+// Get relay subscribers
+adminRouter.get(
+  '/io.exprsn.admin.federation.getSubscribers',
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_VIEW),
+  async (c) => {
+    const status = c.req.query('status');
+    const limit = Math.min(parseInt(c.req.query('limit') || '50'), 100);
+
+    const { relaySubscribers } = await import('../db/schema.js');
+
+    let conditions = [];
+    if (status) conditions.push(eq(relaySubscribers.status, status));
+
+    const subscribers = await db
+      .select()
+      .from(relaySubscribers)
+      .where(conditions.length > 0 ? and(...conditions) : undefined)
+      .orderBy(desc(relaySubscribers.createdAt))
+      .limit(limit);
+
+    return c.json({ subscribers });
+  }
+);
+
+// Get federation sync state
+adminRouter.get(
+  '/io.exprsn.admin.federation.getSyncState',
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_VIEW),
+  async (c) => {
+    const { federationSyncState } = await import('../db/schema.js');
+
+    const syncStates = await db
+      .select()
+      .from(federationSyncState)
+      .orderBy(desc(federationSyncState.updatedAt))
+      .limit(50);
+
+    return c.json({ syncStates });
+  }
+);
+
+// Get DID cache stats
+adminRouter.get(
+  '/io.exprsn.admin.federation.getDidCacheStats',
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_VIEW),
+  async (c) => {
+    const { didCache } = await import('../db/schema.js');
+
+    const [totalCount] = await db.select({ count: count() }).from(didCache);
+
+    const now = new Date();
+    const [expiredCount] = await db
+      .select({ count: count() })
+      .from(didCache)
+      .where(lte(didCache.expiresAt, now));
+
+    // Get sample of recent entries
+    const recentEntries = await db
+      .select({
+        did: didCache.did,
+        handle: didCache.handle,
+        pdsEndpoint: didCache.pdsEndpoint,
+        resolvedAt: didCache.resolvedAt,
+        expiresAt: didCache.expiresAt,
+      })
+      .from(didCache)
+      .orderBy(desc(didCache.resolvedAt))
+      .limit(10);
+
+    return c.json({
+      stats: {
+        totalEntries: totalCount?.count || 0,
+        expiredEntries: expiredCount?.count || 0,
+        activeEntries: (totalCount?.count || 0) - (expiredCount?.count || 0),
+      },
+      recentEntries,
+    });
+  }
+);
+
+// Clear DID cache
+adminRouter.post(
+  '/io.exprsn.admin.federation.clearDidCache',
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_EDIT),
+  async (c) => {
+    const body = await c.req.json<{ expiredOnly?: boolean }>();
+    const adminUser = c.get('adminUser');
+
+    const { didCache } = await import('../db/schema.js');
+
+    let deletedCount = 0;
+    if (body.expiredOnly) {
+      // Count before deleting
+      const [countResult] = await db.select({ count: count() }).from(didCache).where(lte(didCache.expiresAt, new Date()));
+      deletedCount = countResult?.count || 0;
+      await db.delete(didCache).where(lte(didCache.expiresAt, new Date()));
+    } else {
+      // Count before deleting
+      const [countResult] = await db.select({ count: count() }).from(didCache);
+      deletedCount = countResult?.count || 0;
+      await db.delete(didCache);
+    }
+
+    // Audit log
+    await db.insert(adminAuditLog).values({
+      id: nanoid(),
+      adminId: adminUser.id,
+      action: 'federation.clearDidCache',
+      targetType: 'cache',
+      targetId: 'didCache',
+      details: { expiredOnly: body.expiredOnly, deletedCount },
+      createdAt: new Date(),
+    });
+
+    return c.json({ success: true, deletedCount });
+  }
+);
+
 // Helper function for sanction severity ordering
 function severityOrder(sanctionType: string): number {
   const order: Record<string, number> = {

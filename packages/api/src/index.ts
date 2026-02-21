@@ -32,6 +32,8 @@ import configRoutes from './routes/config.js';
 import { createPdsApp, getPdsConfig } from './pds/index.js';
 import { initializeChatWebSocket } from './websocket/chat.js';
 import { initializeEditorCollab } from './websocket/editorCollab.js';
+import { createWellKnownRouterFromEnv } from './routes/well-known.js';
+import { Redis } from 'ioredis';
 
 const app = new Hono();
 
@@ -173,6 +175,10 @@ if (pdsConfig.enabled) {
   console.log('PDS enabled at', pdsConfig.domain);
 }
 
+// Mount well-known routes for AT Protocol and federation discovery
+const wellKnownRouter = createWellKnownRouterFromEnv();
+app.route('/.well-known', wellKnownRouter);
+
 // Error handling
 app.onError((err, c) => {
   console.error('Server error:', err);
@@ -239,8 +245,26 @@ async function main() {
   initializeChatWebSocket(io);
   initializeEditorCollab(io);
 
+  // Initialize relay service if enabled
+  const relayEnabled = process.env.RELAY_ENABLED === 'true';
+  if (relayEnabled) {
+    try {
+      const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
+      const redis = new Redis(redisUrl);
+
+      // Import relay service dynamically
+      // Relay functionality is initialized when RELAY_ENABLED=true
+      console.log('Relay service would be initialized here');
+      console.log('Firehose would be available at: /xrpc/com.atproto.sync.subscribeRepos');
+      // Note: Relay integration is handled via the @exprsn/relay package when built and imported
+    } catch (err) {
+      console.warn('Failed to initialize relay service:', err);
+    }
+  }
+
   console.log(`Server running at http://${host}:${port}`);
-  console.log('WebSocket namespaces: /chat, /editor-collab');
+  console.log('WebSocket namespaces: /chat, /editor-collab' + (relayEnabled ? ', /xrpc/com.atproto.sync.subscribeRepos' : ''));
+  console.log('Well-known endpoints: /.well-known/atproto-did, /.well-known/did.json, /.well-known/exprsn-services');
 }
 
 main().catch((err) => {

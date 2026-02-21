@@ -291,11 +291,11 @@ function createRepoManager() {
       };
     },
 
-    async listBlobs(did: string, since?: string, limit?: number) {
+    async listBlobs(did: string, options: { limit: number; cursor?: string; since?: string }): Promise<{ cids: string[]; cursor?: string }> {
       const results = await db.select({ cid: blobs.cid }).from(blobs)
         .where(eq(blobs.did, did))
-        .limit(limit || 100);
-      return results.map(r => r.cid);
+        .limit(options.limit);
+      return { cids: results.map(r => r.cid), cursor: undefined };
     },
   };
 }

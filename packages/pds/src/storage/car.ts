@@ -141,6 +141,42 @@ export async function getCommitBlocks(
 }
 
 /**
+ * Export an incremental CAR with specific blocks
+ */
+export async function exportIncrementalCar(
+  rootCid: CID,
+  blocks: Array<{ cid: CID; bytes: Uint8Array }>
+): Promise<Uint8Array> {
+  const { writer, out } = CarWriter.create([rootCid]);
+
+  // Collect output chunks
+  const chunks: Uint8Array[] = [];
+  const outPromise = (async () => {
+    for await (const chunk of out) {
+      chunks.push(chunk);
+    }
+  })();
+
+  // Write blocks
+  for (const block of blocks) {
+    await writer.put(block);
+  }
+  await writer.close();
+  await outPromise;
+
+  // Concatenate chunks
+  const totalLength = chunks.reduce((acc, chunk) => acc + chunk.length, 0);
+  const result = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.length;
+  }
+
+  return result;
+}
+
+/**
  * Verify CAR file integrity
  */
 export async function verifyCarIntegrity(

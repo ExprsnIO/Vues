@@ -1926,3 +1926,130 @@ export type EditorCollaborator = typeof editorCollaborators.$inferSelect;
 export type NewEditorCollaborator = typeof editorCollaborators.$inferInsert;
 export type EditorDocumentSnapshot = typeof editorDocumentSnapshots.$inferSelect;
 export type NewEditorDocumentSnapshot = typeof editorDocumentSnapshots.$inferInsert;
+
+// ============================================
+// Relay/Federation Tables
+// ============================================
+
+// Relay events - persisted firehose events
+export const relayEvents = pgTable(
+  'relay_events',
+  {
+    seq: integer('seq').primaryKey(),
+    did: text('did').notNull(),
+    commit: jsonb('commit').$type<{
+      rev: string;
+      operation: 'create' | 'update' | 'delete';
+      collection: string;
+      rkey: string;
+      record?: unknown;
+      cid?: string;
+      prev?: string;
+    }>().notNull(),
+    time: timestamp('time').defaultNow().notNull(),
+  },
+  (table) => ({
+    didIdx: index('relay_events_did_idx').on(table.did),
+    timeIdx: index('relay_events_time_idx').on(table.time),
+    collectionIdx: index('relay_events_collection_idx').on(table.did),
+  })
+);
+
+// Relay subscribers - external services subscribing to firehose
+export const relaySubscribers = pgTable(
+  'relay_subscribers',
+  {
+    id: text('id').primaryKey(),
+    endpoint: text('endpoint').notNull(),
+    cursor: integer('cursor'),
+    wantedCollections: jsonb('wanted_collections').$type<string[]>(),
+    status: text('status').default('active').notNull(), // 'active' | 'inactive' | 'disconnected'
+    lastHeartbeat: timestamp('last_heartbeat'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    statusIdx: index('relay_subscribers_status_idx').on(table.status),
+    endpointIdx: index('relay_subscribers_endpoint_idx').on(table.endpoint),
+  })
+);
+
+// DID cache - cached DID documents
+export const didCache = pgTable(
+  'did_cache',
+  {
+    did: text('did').primaryKey(),
+    document: jsonb('document').notNull(),
+    handle: text('handle'),
+    pdsEndpoint: text('pds_endpoint'),
+    signingKey: text('signing_key'),
+    resolvedAt: timestamp('resolved_at').notNull(),
+    expiresAt: timestamp('expires_at').notNull(),
+    staleAt: timestamp('stale_at'),
+  },
+  (table) => ({
+    handleIdx: index('did_cache_handle_idx').on(table.handle),
+    pdsEndpointIdx: index('did_cache_pds_endpoint_idx').on(table.pdsEndpoint),
+    expiresAtIdx: index('did_cache_expires_at_idx').on(table.expiresAt),
+  })
+);
+
+// Service registry - known federation services
+export const serviceRegistry = pgTable(
+  'service_registry',
+  {
+    id: text('id').primaryKey(),
+    type: text('type').notNull(), // 'pds' | 'relay' | 'appview' | 'labeler'
+    endpoint: text('endpoint').notNull(),
+    did: text('did'),
+    certificateId: text('certificate_id'),
+    region: text('region'),
+    capabilities: jsonb('capabilities').$type<string[]>(),
+    status: text('status').default('active').notNull(), // 'active' | 'inactive' | 'unhealthy'
+    lastHealthCheck: timestamp('last_health_check'),
+    healthCheckFailures: integer('health_check_failures').default(0).notNull(),
+    metadata: jsonb('metadata').$type<Record<string, unknown>>(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    typeIdx: index('service_registry_type_idx').on(table.type),
+    statusIdx: index('service_registry_status_idx').on(table.status),
+    endpointIdx: uniqueIndex('service_registry_endpoint_idx').on(table.endpoint),
+    didIdx: index('service_registry_did_idx').on(table.did),
+    regionIdx: index('service_registry_region_idx').on(table.region),
+  })
+);
+
+// Federation sync state - tracking sync with remote servers
+export const federationSyncState = pgTable(
+  'federation_sync_state',
+  {
+    id: text('id').primaryKey(),
+    remoteEndpoint: text('remote_endpoint').notNull(),
+    remoteDid: text('remote_did'),
+    lastSyncedSeq: integer('last_synced_seq'),
+    lastSyncedAt: timestamp('last_synced_at'),
+    syncDirection: text('sync_direction').notNull(), // 'pull' | 'push' | 'both'
+    status: text('status').default('active').notNull(), // 'active' | 'paused' | 'error'
+    errorMessage: text('error_message'),
+    errorCount: integer('error_count').default(0).notNull(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    remoteEndpointIdx: uniqueIndex('federation_sync_state_endpoint_idx').on(table.remoteEndpoint),
+    statusIdx: index('federation_sync_state_status_idx').on(table.status),
+  })
+);
+
+// Relay/Federation type exports
+export type RelayEvent = typeof relayEvents.$inferSelect;
+export type NewRelayEvent = typeof relayEvents.$inferInsert;
+export type RelaySubscriber = typeof relaySubscribers.$inferSelect;
+export type NewRelaySubscriber = typeof relaySubscribers.$inferInsert;
+export type DidCacheEntry = typeof didCache.$inferSelect;
+export type NewDidCacheEntry = typeof didCache.$inferInsert;
+export type ServiceRegistryEntry = typeof serviceRegistry.$inferSelect;
+export type NewServiceRegistryEntry = typeof serviceRegistry.$inferInsert;
+export type FederationSyncStateEntry = typeof federationSyncState.$inferSelect;
+export type NewFederationSyncStateEntry = typeof federationSyncState.$inferInsert;

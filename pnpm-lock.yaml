@@ -360,6 +360,40 @@ importers:
         specifier: ^5.7.0
         version: 5.9.3
 
+  packages/relay:
+    dependencies:
+      '@exprsn/pds':
+        specifier: workspace:*
+        version: link:../pds
+      '@exprsn/shared':
+        specifier: workspace:*
+        version: link:../shared
+      '@ipld/car':
+        specifier: ^5.2.0
+        version: 5.4.2
+      '@ipld/dag-cbor':
+        specifier: ^9.0.0
+        version: 9.2.5
+      hono:
+        specifier: ^4.6.0
+        version: 4.11.9
+      ioredis:
+        specifier: ^5.4.0
+        version: 5.9.3
+      multiformats:
+        specifier: ^13.0.0
+        version: 13.4.2
+      socket.io:
+        specifier: ^4.7.0
+        version: 4.8.3
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.0
+        version: 22.19.11
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+
   packages/shared:
     dependencies:
       nanoid:

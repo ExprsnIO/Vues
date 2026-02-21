@@ -1,0 +1,72 @@
+{
+  "lexicon": 1,
+  "id": "io.exprsn.sync.pushRecords",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Push records to a remote server for synchronization",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["records"],
+          "properties": {
+            "records": {
+              "type": "array",
+              "maxLength": 100,
+              "description": "Records to push",
+              "items": {
+                "type": "ref",
+                "ref": "io.exprsn.sync.getRecords#syncRecord"
+              }
+            }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["processed", "failed"],
+          "properties": {
+            "processed": {
+              "type": "integer",
+              "description": "Number of records successfully processed"
+            },
+            "failed": {
+              "type": "integer",
+              "description": "Number of records that failed"
+            },
+            "errors": {
+              "type": "array",
+              "description": "Details of failed records",
+              "items": {
+                "type": "object",
+                "required": ["uri", "error"],
+                "properties": {
+                  "uri": {
+                    "type": "string",
+                    "format": "at-uri"
+                  },
+                  "error": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "errors": [
+        {
+          "name": "RateLimitExceeded",
+          "description": "Too many records pushed in a short time"
+        },
+        {
+          "name": "Unauthorized",
+          "description": "Service authentication failed"
+        }
+      ]
+    }
+  }
+}
