@@ -1787,6 +1787,371 @@ adminRouter.get(
   }
 );
 
+// Get detailed identity information
+adminRouter.get(
+  '/io.exprsn.admin.plc.getIdentity',
+  requirePermission(ADMIN_PERMISSIONS.USERS_VIEW),
+  async (c) => {
+    const did = c.req.query('did');
+
+    if (!did) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing did' }, 400);
+    }
+
+    const { plcIdentities, plcOperations, plcAuditLog } = await import('../db/schema.js');
+
+    // Get identity
+    const [identity] = await db
+      .select()
+      .from(plcIdentities)
+      .where(eq(plcIdentities.did, did))
+      .limit(1);
+
+    if (!identity) {
+      return c.json({ error: 'NotFound', message: 'Identity not found' }, 404);
+    }
+
+    // Get operation count
+    const [opCount] = await db
+      .select({ count: count() })
+      .from(plcOperations)
+      .where(eq(plcOperations.did, did));
+
+    // Get recent operations
+    const operations = await db
+      .select()
+      .from(plcOperations)
+      .where(eq(plcOperations.did, did))
+      .orderBy(desc(plcOperations.createdAt))
+      .limit(10);
+
+    // Get audit log entries
+    const auditEntries = await db
+      .select()
+      .from(plcAuditLog)
+      .where(eq(plcAuditLog.did, did))
+      .orderBy(desc(plcAuditLog.createdAt))
+      .limit(20);
+
+    // Check if linked to a user
+    const [user] = await db
+      .select({
+        handle: users.handle,
+        displayName: users.displayName,
+        avatar: users.avatar,
+        followerCount: users.followerCount,
+        videoCount: users.videoCount,
+        createdAt: users.createdAt,
+      })
+      .from(users)
+      .where(eq(users.did, did))
+      .limit(1);
+
+    return c.json({
+      identity: {
+        did: identity.did,
+        handle: identity.handle,
+        pdsEndpoint: identity.pdsEndpoint,
+        signingKey: identity.signingKey,
+        rotationKeys: identity.rotationKeys,
+        alsoKnownAs: identity.alsoKnownAs,
+        services: identity.services,
+        lastOperationCid: identity.lastOperationCid,
+        status: identity.status,
+        tombstonedAt: identity.tombstonedAt?.toISOString(),
+        tombstonedBy: identity.tombstonedBy,
+        tombstoneReason: identity.tombstoneReason,
+        createdAt: identity.createdAt.toISOString(),
+        updatedAt: identity.updatedAt.toISOString(),
+      },
+      user: user || null,
+      operationCount: opCount?.count || 0,
+      recentOperations: operations.map((op) => ({
+        id: op.id,
+        cid: op.cid,
+        operation: op.operation,
+        nullified: op.nullified,
+        createdAt: op.createdAt.toISOString(),
+      })),
+      auditLog: auditEntries.map((e) => ({
+        id: e.id,
+        action: e.action,
+        operationCid: e.operationCid,
+        previousState: e.previousState,
+        newState: e.newState,
+        ipAddress: e.ipAddress,
+        userAgent: e.userAgent,
+        createdAt: e.createdAt.toISOString(),
+      })),
+    });
+  }
+);
+
+// Get operation details
+adminRouter.get(
+  '/io.exprsn.admin.plc.getOperation',
+  requirePermission(ADMIN_PERMISSIONS.USERS_VIEW),
+  async (c) => {
+    const cid = c.req.query('cid');
+    const id = c.req.query('id');
+
+    if (!cid && !id) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing cid or id' }, 400);
+    }
+
+    const { plcOperations } = await import('../db/schema.js');
+
+    let query = db.select().from(plcOperations);
+    if (cid) {
+      query = query.where(eq(plcOperations.cid, cid)) as typeof query;
+    } else if (id) {
+      query = query.where(eq(plcOperations.id, parseInt(id, 10))) as typeof query;
+    }
+
+    const [operation] = await query.limit(1);
+
+    if (!operation) {
+      return c.json({ error: 'NotFound', message: 'Operation not found' }, 404);
+    }
+
+    // Get previous and next operations in the chain
+    const [prevOp] = await db
+      .select()
+      .from(plcOperations)
+      .where(
+        and(
+          eq(plcOperations.did, operation.did),
+          sql`${plcOperations.id} < ${operation.id}`
+        )
+      )
+      .orderBy(desc(plcOperations.id))
+      .limit(1);
+
+    const [nextOp] = await db
+      .select()
+      .from(plcOperations)
+      .where(
+        and(
+          eq(plcOperations.did, operation.did),
+          sql`${plcOperations.id} > ${operation.id}`
+        )
+      )
+      .orderBy(asc(plcOperations.id))
+      .limit(1);
+
+    return c.json({
+      operation: {
+        id: operation.id,
+        did: operation.did,
+        cid: operation.cid,
+        operation: operation.operation,
+        nullified: operation.nullified,
+        createdAt: operation.createdAt.toISOString(),
+      },
+      previousOperation: prevOp
+        ? {
+            id: prevOp.id,
+            cid: prevOp.cid,
+            createdAt: prevOp.createdAt.toISOString(),
+          }
+        : null,
+      nextOperation: nextOp
+        ? {
+            id: nextOp.id,
+            cid: nextOp.cid,
+            createdAt: nextOp.createdAt.toISOString(),
+          }
+        : null,
+    });
+  }
+);
+
+// List all operations for a DID
+adminRouter.get(
+  '/io.exprsn.admin.plc.listOperations',
+  requirePermission(ADMIN_PERMISSIONS.USERS_VIEW),
+  async (c) => {
+    const did = c.req.query('did');
+    const limit = Math.min(parseInt(c.req.query('limit') || '50'), 200);
+    const offset = parseInt(c.req.query('offset') || '0', 10);
+
+    if (!did) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing did' }, 400);
+    }
+
+    const { plcOperations } = await import('../db/schema.js');
+
+    const operations = await db
+      .select()
+      .from(plcOperations)
+      .where(eq(plcOperations.did, did))
+      .orderBy(desc(plcOperations.createdAt))
+      .limit(limit)
+      .offset(offset);
+
+    const [totalCount] = await db
+      .select({ count: count() })
+      .from(plcOperations)
+      .where(eq(plcOperations.did, did));
+
+    return c.json({
+      operations: operations.map((op) => ({
+        id: op.id,
+        cid: op.cid,
+        operation: op.operation,
+        nullified: op.nullified,
+        createdAt: op.createdAt.toISOString(),
+      })),
+      total: totalCount?.count || 0,
+      hasMore: offset + operations.length < (totalCount?.count || 0),
+    });
+  }
+);
+
+// Tombstone an identity (admin action)
+adminRouter.post(
+  '/io.exprsn.admin.plc.tombstoneIdentity',
+  requirePermission(ADMIN_PERMISSIONS.USERS_BAN),
+  async (c) => {
+    const adminUser = c.get('adminUser') as AdminUser;
+    const body = await c.req.json<{
+      did: string;
+      reason: string;
+    }>();
+
+    if (!body.did || !body.reason) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing did or reason' }, 400);
+    }
+
+    const { plcIdentities, plcAuditLog } = await import('../db/schema.js');
+
+    // Get existing identity
+    const [identity] = await db
+      .select()
+      .from(plcIdentities)
+      .where(eq(plcIdentities.did, body.did))
+      .limit(1);
+
+    if (!identity) {
+      return c.json({ error: 'NotFound', message: 'Identity not found' }, 404);
+    }
+
+    if (identity.status === 'tombstoned') {
+      return c.json({ error: 'AlreadyTombstoned', message: 'Identity is already tombstoned' }, 400);
+    }
+
+    const ipAddress = c.req.header('x-forwarded-for') || c.req.header('x-real-ip');
+    const userAgent = c.req.header('user-agent');
+
+    // Update identity status
+    await db
+      .update(plcIdentities)
+      .set({
+        status: 'tombstoned',
+        tombstonedAt: new Date(),
+        tombstonedBy: adminUser.id,
+        tombstoneReason: body.reason,
+        updatedAt: new Date(),
+      })
+      .where(eq(plcIdentities.did, body.did));
+
+    // Add audit log entry
+    await db.insert(plcAuditLog).values({
+      did: body.did,
+      action: 'admin_tombstone',
+      previousState: { status: identity.status },
+      newState: { status: 'tombstoned', reason: body.reason },
+      ipAddress,
+      userAgent,
+    });
+
+    // Add to admin audit log
+    await db.insert(adminAuditLog).values({
+      id: nanoid(),
+      adminId: adminUser.id,
+      action: 'plc.tombstoneIdentity',
+      targetType: 'identity',
+      targetId: body.did,
+      details: { reason: body.reason },
+      createdAt: new Date(),
+    });
+
+    return c.json({ success: true });
+  }
+);
+
+// Reactivate a tombstoned identity (admin action)
+adminRouter.post(
+  '/io.exprsn.admin.plc.reactivateIdentity',
+  requirePermission(ADMIN_PERMISSIONS.USERS_BAN),
+  async (c) => {
+    const adminUser = c.get('adminUser') as AdminUser;
+    const body = await c.req.json<{
+      did: string;
+      reason: string;
+    }>();
+
+    if (!body.did || !body.reason) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing did or reason' }, 400);
+    }
+
+    const { plcIdentities, plcAuditLog } = await import('../db/schema.js');
+
+    // Get existing identity
+    const [identity] = await db
+      .select()
+      .from(plcIdentities)
+      .where(eq(plcIdentities.did, body.did))
+      .limit(1);
+
+    if (!identity) {
+      return c.json({ error: 'NotFound', message: 'Identity not found' }, 404);
+    }
+
+    if (identity.status === 'active') {
+      return c.json({ error: 'AlreadyActive', message: 'Identity is already active' }, 400);
+    }
+
+    const ipAddress = c.req.header('x-forwarded-for') || c.req.header('x-real-ip');
+    const userAgent = c.req.header('user-agent');
+
+    // Update identity status
+    await db
+      .update(plcIdentities)
+      .set({
+        status: 'active',
+        tombstonedAt: null,
+        tombstonedBy: null,
+        tombstoneReason: null,
+        updatedAt: new Date(),
+      })
+      .where(eq(plcIdentities.did, body.did));
+
+    // Add audit log entry
+    await db.insert(plcAuditLog).values({
+      did: body.did,
+      action: 'admin_reactivate',
+      previousState: { status: identity.status, reason: identity.tombstoneReason },
+      newState: { status: 'active', reason: body.reason },
+      ipAddress,
+      userAgent,
+    });
+
+    // Add to admin audit log
+    await db.insert(adminAuditLog).values({
+      id: nanoid(),
+      adminId: adminUser.id,
+      action: 'plc.reactivateIdentity',
+      targetType: 'identity',
+      targetId: body.did,
+      details: { reason: body.reason, previousStatus: identity.status },
+      createdAt: new Date(),
+    });
+
+    return c.json({ success: true });
+  }
+);
+
 // ============================================
 // Content Limits Configuration
 // ============================================

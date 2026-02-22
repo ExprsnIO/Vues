@@ -290,6 +290,9 @@ export class AWSIVSProvider implements StreamingProvider {
     }
   }
 
+  // Cache recording configuration ARN
+  private recordingConfigArn?: string;
+
   /**
    * Get or create recording configuration ARN
    * This is needed for auto-recording streams to S3
@@ -299,8 +302,188 @@ export class AWSIVSProvider implements StreamingProvider {
       return undefined;
     }
 
-    // In production, this would create/retrieve a recording configuration
-    // For now, return undefined to disable recording
-    return undefined;
+    // Return cached ARN if available
+    if (this.recordingConfigArn) {
+      return this.recordingConfigArn;
+    }
+
+    const client = await this.getClient();
+    const { ListRecordingConfigurationsCommand, CreateRecordingConfigurationCommand } = await import('@aws-sdk/client-ivs');
+
+    const configName = 'exprsn-recording-config';
+
+    try {
+      // List existing recording configurations
+      const listResponse = await client.send(new ListRecordingConfigurationsCommand({
+        maxResults: 100,
+      }));
+
+      // Find existing config with our name
+      const existingConfig = listResponse.recordingConfigurations?.find(
+        (config) => config.name === configName
+      );
+
+      if (existingConfig?.arn) {
+        this.recordingConfigArn = existingConfig.arn;
+        return this.recordingConfigArn;
+      }
+
+      // Create new recording configuration
+      const createResponse = await client.send(new CreateRecordingConfigurationCommand({
+        name: configName,
+        destinationConfiguration: {
+          s3: {
+            bucketName: this.recordingBucket,
+          },
+        },
+        // Optional: Configure thumbnail generation
+        thumbnailConfiguration: {
+          recordingMode: 'INTERVAL',
+          targetIntervalSeconds: 60, // Generate thumbnail every 60 seconds
+          storage: ['LATEST', 'SEQUENTIAL'], // Store latest and sequential thumbnails
+        },
+        // Recording configuration
+        recordingReconnectWindowSeconds: 60, // Auto-reconnect window
+        tags: {
+          application: 'exprsn',
+        },
+      }));
+
+      this.recordingConfigArn = createResponse.recordingConfiguration?.arn;
+      return this.recordingConfigArn;
+    } catch (error: unknown) {
+      console.error('Failed to get/create recording configuration:', error);
+      return undefined;
+    }
+  }
+
+  /**
+   * Get recording status for a stream
+   */
+  async getRecordingStatus(streamId: string): Promise<{
+    isRecording: boolean;
+    s3Location?: string;
+    recordingDuration?: number;
+  }> {
+    const mapping = this.streamToChannel.get(streamId);
+    if (!mapping) {
+      return { isRecording: false };
+    }
+
+    const client = await this.getClient();
+    const { ListStreamSessionsCommand } = await import('@aws-sdk/client-ivs');
+
+    try {
+      const response = await client.send(new ListStreamSessionsCommand({
+        channelArn: mapping.channelArn,
+        maxResults: 1,
+      }));
+
+      const session = response.streamSessions?.[0];
+      if (!session) {
+        return { isRecording: false };
+      }
+
+      // IVS automatically records to S3 when recording config is attached
+      const startTime = session.startTime ? new Date(session.startTime) : undefined;
+      const recordingDuration = startTime
+        ? Math.floor((Date.now() - startTime.getTime()) / 1000)
+        : undefined;
+
+      return {
+        isRecording: true,
+        s3Location: this.recordingBucket
+          ? `s3://${this.recordingBucket}/ivs/${mapping.channelArn.split('/').pop()}`
+          : undefined,
+        recordingDuration,
+      };
+    } catch {
+      return { isRecording: false };
+    }
+  }
+
+  /**
+   * List past recordings for a channel
+   */
+  async listRecordings(streamId: string, limit: number = 10): Promise<Array<{
+    sessionId: string;
+    startTime: Date;
+    endTime?: Date;
+    s3Location: string;
+    recordingDuration: number;
+  }>> {
+    const mapping = this.streamToChannel.get(streamId);
+    if (!mapping || !this.recordingBucket) {
+      return [];
+    }
+
+    const client = await this.getClient();
+    const { ListStreamSessionsCommand } = await import('@aws-sdk/client-ivs');
+
+    try {
+      const response = await client.send(new ListStreamSessionsCommand({
+        channelArn: mapping.channelArn,
+        maxResults: limit,
+      }));
+
+      return (response.streamSessions || [])
+        .filter((session) => session.startTime && session.endTime)
+        .map((session) => ({
+          sessionId: session.streamId || '',
+          startTime: new Date(session.startTime!),
+          endTime: session.endTime ? new Date(session.endTime) : undefined,
+          s3Location: `s3://${this.recordingBucket}/ivs/${mapping.channelArn.split('/').pop()}/${session.streamId}`,
+          recordingDuration: session.endTime && session.startTime
+            ? Math.floor((new Date(session.endTime).getTime() - new Date(session.startTime).getTime()) / 1000)
+            : 0,
+        }));
+    } catch (error) {
+      console.error('Failed to list recordings:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Get stream metrics
+   */
+  async getStreamMetrics(streamId: string): Promise<{
+    ingestBitrate?: number;
+    ingestFramerate?: number;
+    keyframeInterval?: number;
+    videoHeight?: number;
+    videoWidth?: number;
+    audioChannels?: number;
+    audioSampleRate?: number;
+  }> {
+    const mapping = this.streamToChannel.get(streamId);
+    if (!mapping) {
+      return {};
+    }
+
+    const client = await this.getClient();
+    const { GetStreamSessionCommand } = await import('@aws-sdk/client-ivs');
+
+    try {
+      const response = await client.send(new GetStreamSessionCommand({
+        channelArn: mapping.channelArn,
+        streamId,
+      }));
+
+      const ingestConfig = response.streamSession?.ingestConfiguration;
+      const videoConfig = ingestConfig?.video as Record<string, unknown> | undefined;
+      const audioConfig = ingestConfig?.audio as Record<string, unknown> | undefined;
+
+      return {
+        ingestBitrate: videoConfig?.bitrate as number | undefined,
+        ingestFramerate: videoConfig?.framerate as number | undefined,
+        keyframeInterval: videoConfig?.keyframeInterval as number | undefined,
+        videoHeight: videoConfig?.height as number | undefined,
+        videoWidth: videoConfig?.width as number | undefined,
+        audioChannels: audioConfig?.channels as number | undefined,
+        audioSampleRate: audioConfig?.sampleRate as number | undefined,
+      };
+    } catch {
+      return {};
+    }
   }
 }

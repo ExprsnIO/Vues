@@ -1070,6 +1070,228 @@ liveRoutes.post('/io.exprsn.live.unban', authMiddleware, async (c) => {
 });
 
 // ============================================
+// Stream Status & Recording
+// ============================================
+
+// Get stream status from provider
+liveRoutes.get('/io.exprsn.live.getStreamStatus', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const streamId = c.req.query('streamId');
+  if (!streamId) {
+    throw new HTTPException(400, { message: 'Stream ID required' });
+  }
+
+  // Verify ownership
+  const result = await db
+    .select()
+    .from(liveStreams)
+    .where(eq(liveStreams.id, streamId))
+    .limit(1);
+
+  const stream = result[0];
+  if (!stream) {
+    throw new HTTPException(404, { message: 'Stream not found' });
+  }
+
+  if (stream.userDid !== userDid) {
+    throw new HTTPException(403, { message: 'Not your stream' });
+  }
+
+  try {
+    const provider = await getStreamingProvider();
+    const status = await provider.getStreamStatus(streamId);
+
+    return c.json({
+      streamId,
+      providerStatus: status,
+      dbStatus: stream.status,
+      viewerCount: stream.viewerCount,
+      peakViewers: stream.peakViewers,
+    });
+  } catch (error) {
+    return c.json({
+      streamId,
+      providerStatus: null,
+      dbStatus: stream.status,
+      viewerCount: stream.viewerCount,
+      peakViewers: stream.peakViewers,
+      error: 'Failed to get provider status',
+    });
+  }
+});
+
+// Get recording status (AWS IVS specific)
+liveRoutes.get('/io.exprsn.live.getRecordingStatus', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const streamId = c.req.query('streamId');
+  if (!streamId) {
+    throw new HTTPException(400, { message: 'Stream ID required' });
+  }
+
+  // Verify ownership
+  const result = await db
+    .select()
+    .from(liveStreams)
+    .where(eq(liveStreams.id, streamId))
+    .limit(1);
+
+  const stream = result[0];
+  if (!stream) {
+    throw new HTTPException(404, { message: 'Stream not found' });
+  }
+
+  if (stream.userDid !== userDid) {
+    throw new HTTPException(403, { message: 'Not your stream' });
+  }
+
+  try {
+    const provider = await getStreamingProvider();
+
+    // Check if provider supports recording status
+    if ('getRecordingStatus' in provider && typeof provider.getRecordingStatus === 'function') {
+      const recordingStatus = await provider.getRecordingStatus(streamId);
+      return c.json({
+        streamId,
+        recordingEnabled: stream.recordingEnabled,
+        ...recordingStatus,
+      });
+    }
+
+    return c.json({
+      streamId,
+      recordingEnabled: stream.recordingEnabled,
+      isRecording: false,
+      message: 'Recording status not available for this provider',
+    });
+  } catch (error) {
+    return c.json({
+      streamId,
+      recordingEnabled: stream.recordingEnabled,
+      isRecording: false,
+      error: 'Failed to get recording status',
+    });
+  }
+});
+
+// List past recordings
+liveRoutes.get('/io.exprsn.live.listRecordings', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const streamId = c.req.query('streamId');
+  const limit = Math.min(parseInt(c.req.query('limit') || '10'), 50);
+
+  if (!streamId) {
+    throw new HTTPException(400, { message: 'Stream ID required' });
+  }
+
+  // Verify ownership
+  const result = await db
+    .select()
+    .from(liveStreams)
+    .where(eq(liveStreams.id, streamId))
+    .limit(1);
+
+  const stream = result[0];
+  if (!stream) {
+    throw new HTTPException(404, { message: 'Stream not found' });
+  }
+
+  if (stream.userDid !== userDid) {
+    throw new HTTPException(403, { message: 'Not your stream' });
+  }
+
+  try {
+    const provider = await getStreamingProvider();
+
+    // Check if provider supports listing recordings
+    if ('listRecordings' in provider && typeof provider.listRecordings === 'function') {
+      const recordings = await provider.listRecordings(streamId, limit);
+      return c.json({
+        streamId,
+        recordings,
+      });
+    }
+
+    return c.json({
+      streamId,
+      recordings: [],
+      message: 'Recording list not available for this provider',
+    });
+  } catch (error) {
+    return c.json({
+      streamId,
+      recordings: [],
+      error: 'Failed to list recordings',
+    });
+  }
+});
+
+// Get stream metrics (bitrate, resolution, etc.)
+liveRoutes.get('/io.exprsn.live.getStreamMetrics', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const streamId = c.req.query('streamId');
+  if (!streamId) {
+    throw new HTTPException(400, { message: 'Stream ID required' });
+  }
+
+  // Verify ownership
+  const result = await db
+    .select()
+    .from(liveStreams)
+    .where(eq(liveStreams.id, streamId))
+    .limit(1);
+
+  const stream = result[0];
+  if (!stream) {
+    throw new HTTPException(404, { message: 'Stream not found' });
+  }
+
+  if (stream.userDid !== userDid) {
+    throw new HTTPException(403, { message: 'Not your stream' });
+  }
+
+  try {
+    const provider = await getStreamingProvider();
+
+    // Check if provider supports metrics
+    if ('getStreamMetrics' in provider && typeof provider.getStreamMetrics === 'function') {
+      const metrics = await provider.getStreamMetrics(streamId);
+      return c.json({
+        streamId,
+        metrics,
+      });
+    }
+
+    return c.json({
+      streamId,
+      metrics: null,
+      message: 'Stream metrics not available for this provider',
+    });
+  } catch (error) {
+    return c.json({
+      streamId,
+      metrics: null,
+      error: 'Failed to get stream metrics',
+    });
+  }
+});
+
+// ============================================
 // Viewer Tracking
 // ============================================
 

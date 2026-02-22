@@ -37,6 +37,7 @@ import { identityRouter } from './routes/identity.js';
 import { registryRouter, initializeServiceRegistry } from './routes/registry.js';
 import { federationRouter } from './routes/federation.js';
 import { plcRouter } from './routes/plc.js';
+import { syncRouter } from './routes/sync.js';
 import { announcementsRouter } from './routes/announcements.js';
 import { paymentsAdminRouter } from './routes/payments-admin.js';
 import { liveAdminRouter } from './routes/live-admin.js';
@@ -176,10 +177,11 @@ app.route('/xrpc', paymentRoutes);
 app.route('/xrpc', caRoutes);
 app.route('/xrpc', audioRouter);
 app.route('/xrpc', configRoutes);
-// Identity, registry, federation, and PLC routes
+// Identity, registry, federation, sync, and PLC routes
 app.route('/xrpc', identityRouter);
 app.route('/xrpc', registryRouter);
 app.route('/xrpc', federationRouter);
+app.route('/', syncRouter); // Sync routes for federation
 // Admin routes (must be before PLC to avoid /:did catch-all)
 app.route('/xrpc', adminRouter);
 app.route('/xrpc', announcementsRouter);
