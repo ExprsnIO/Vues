@@ -6,6 +6,7 @@ import { getServiceRegistry } from './registry.js';
 import { db } from '../db/index.js';
 import { eq, and, desc, gt } from 'drizzle-orm';
 import { repoRecords } from '../db/schema.js';
+import { adminAuthMiddleware, requirePermission, ADMIN_PERMISSIONS } from '../auth/middleware.js';
 
 // Singleton instances
 let contentSync: ContentSync | null = null;
@@ -188,57 +189,60 @@ federationRouter.post('/io.exprsn.sync.pushRecords', async (c) => {
  * POST io.exprsn.sync.triggerSync
  * Trigger a sync from remote endpoints (admin only)
  */
-federationRouter.post('/io.exprsn.sync.triggerSync', async (c) => {
-  // TODO: Add admin auth check
+federationRouter.post(
+  '/io.exprsn.sync.triggerSync',
+  adminAuthMiddleware,
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_EDIT),
+  async (c) => {
+    const body = await c.req.json<{
+      endpoint?: string;
+      collections?: string[];
+      all?: boolean;
+    }>();
 
-  const body = await c.req.json<{
-    endpoint?: string;
-    collections?: string[];
-    all?: boolean;
-  }>();
+    try {
+      const sync = getContentSync();
 
-  try {
-    const sync = getContentSync();
+      if (body.all || !body.endpoint) {
+        // Full sync from all relays
+        const collections = body.collections || [
+          'io.exprsn.video.post',
+          'io.exprsn.feed.like',
+          'io.exprsn.feed.repost',
+          'io.exprsn.graph.follow',
+        ];
 
-    if (body.all || !body.endpoint) {
-      // Full sync from all relays
-      const collections = body.collections || [
-        'io.exprsn.video.post',
-        'io.exprsn.feed.like',
-        'io.exprsn.feed.repost',
-        'io.exprsn.graph.follow',
-      ];
+        const results = await sync.fullSync(collections);
 
-      const results = await sync.fullSync(collections);
+        const summary: Record<string, { processed: number; failed: number; errors: number }> = {};
+        for (const [endpoint, result] of results) {
+          summary[endpoint] = {
+            processed: result.recordsProcessed,
+            failed: result.recordsFailed,
+            errors: result.errors.length,
+          };
+        }
 
-      const summary: Record<string, { processed: number; failed: number; errors: number }> = {};
-      for (const [endpoint, result] of results) {
-        summary[endpoint] = {
-          processed: result.recordsProcessed,
-          failed: result.recordsFailed,
-          errors: result.errors.length,
-        };
+        return c.json({ success: true, results: summary });
       }
 
-      return c.json({ success: true, results: summary });
+      // Single endpoint sync
+      const result = await sync.syncFromRemote(body.endpoint, {
+        collection: body.collections?.[0],
+      });
+
+      return c.json({
+        success: result.success,
+        processed: result.recordsProcessed,
+        failed: result.recordsFailed,
+        errors: result.errors,
+      });
+    } catch (error) {
+      console.error('Trigger sync error:', error);
+      return c.json({ error: 'InternalError', message: 'Failed to trigger sync' }, 500);
     }
-
-    // Single endpoint sync
-    const result = await sync.syncFromRemote(body.endpoint, {
-      collection: body.collections?.[0],
-    });
-
-    return c.json({
-      success: result.success,
-      processed: result.recordsProcessed,
-      failed: result.recordsFailed,
-      errors: result.errors,
-    });
-  } catch (error) {
-    console.error('Trigger sync error:', error);
-    return c.json({ error: 'InternalError', message: 'Failed to trigger sync' }, 500);
   }
-});
+);
 
 // ===========================================
 // Federated Search Endpoints

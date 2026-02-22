@@ -2,8 +2,9 @@ import { Hono } from 'hono';
 import { eq, desc, and, sql, count, sum } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import { db } from '../db/index.js';
-import { liveStreams, streamViewers, users } from '../db/schema.js';
+import { liveStreams, streamViewers, users, notifications } from '../db/schema.js';
 import { adminAuthMiddleware, requirePermission, ADMIN_PERMISSIONS } from '../auth/middleware.js';
+import { getStreamingProvider } from '../services/streaming/index.js';
 
 export const liveAdminRouter = new Hono();
 
@@ -203,6 +204,7 @@ liveAdminRouter.post(
   '/io.exprsn.admin.live.endStream',
   requirePermission(ADMIN_PERMISSIONS.CONTENT_MODERATE),
   async (c) => {
+    const adminUser = c.get('adminUser');
     const { id, reason } = await c.req.json<{ id: string; reason?: string }>();
 
     if (!id) {
@@ -223,6 +225,7 @@ liveAdminRouter.post(
       return c.json({ error: 'InvalidState', message: 'Stream is not live' }, 400);
     }
 
+    // Update stream status in database
     await db
       .update(liveStreams)
       .set({
@@ -231,8 +234,34 @@ liveAdminRouter.post(
       })
       .where(eq(liveStreams.id, id));
 
-    // TODO: Send notification to streamer
-    // TODO: Actually terminate the stream via media server
+    // Terminate the stream via media server
+    try {
+      const streamingProvider = await getStreamingProvider();
+      await streamingProvider.endStream(stream.id);
+      console.log(`Stream ${id} terminated via media server`);
+    } catch (error) {
+      console.error('Failed to terminate stream via media server:', error);
+      // Continue - stream is marked as ended even if media server termination fails
+    }
+
+    // Send notification to streamer
+    try {
+      await db.insert(notifications).values({
+        id: nanoid(),
+        userDid: stream.userDid,
+        actorDid: adminUser.userDid,
+        reason: 'stream_ended',
+        reasonSubject: reason || 'Your stream was ended by a moderator',
+        targetUri: `at://${stream.userDid}/io.exprsn.live.stream/${stream.id}`,
+        isRead: false,
+        indexedAt: new Date(),
+        createdAt: new Date(),
+      });
+      console.log(`Notification sent to streamer ${stream.userDid}`);
+    } catch (error) {
+      console.error('Failed to send notification to streamer:', error);
+      // Continue - notification failure shouldn't block the operation
+    }
 
     return c.json({ success: true });
   }

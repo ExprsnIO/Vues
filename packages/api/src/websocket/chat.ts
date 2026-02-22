@@ -5,9 +5,10 @@
 
 import type { Server as SocketIOServer, Socket } from 'socket.io';
 import { Redis } from 'ioredis';
-import { db, users, messages, conversations, conversationParticipants, userPresence, messageReactions } from '../db/index.js';
+import { db, users, messages, conversations, conversationParticipants, userPresence, messageReactions, sessions } from '../db/index.js';
 import { eq, and, or, sql } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
+import { getOAuthClient } from '../auth/oauth-client.js';
 
 type NextFunction = (err?: Error) => void;
 
@@ -134,24 +135,55 @@ export function initializeChatWebSocket(io: SocketIOServer): void {
   // Authentication middleware
   namespace.use(async (socket: Socket, next: NextFunction) => {
     const token = socket.handshake.auth.token;
-    const userDid = socket.handshake.auth.userDid;
 
-    if (!token || !userDid) {
+    if (!token) {
       return next(new Error('Authentication required'));
     }
 
-    // TODO: Verify JWT token properly
-    // For now, fetch user info from database
     try {
+      let authenticatedDid: string | null = null;
+
+      // Check for local session token (prefixed with exp_)
+      if (token.startsWith('exp_')) {
+        const session = await db.query.sessions.findFirst({
+          where: eq(sessions.accessJwt, token),
+        });
+
+        if (!session || session.expiresAt < new Date()) {
+          return next(new Error('Invalid or expired session'));
+        }
+
+        authenticatedDid = session.did;
+      } else {
+        // Try OAuth token
+        try {
+          const oauthClient = getOAuthClient();
+          const oauthSession = await oauthClient.restore(token);
+
+          if (!oauthSession) {
+            return next(new Error('Invalid or expired OAuth session'));
+          }
+
+          authenticatedDid = oauthSession.did;
+        } catch {
+          return next(new Error('Authentication failed'));
+        }
+      }
+
+      if (!authenticatedDid) {
+        return next(new Error('Authentication failed'));
+      }
+
+      // Fetch user info from database
       const user = await db.query.users.findFirst({
-        where: eq(users.did, userDid),
+        where: eq(users.did, authenticatedDid),
       });
 
       if (!user) {
         return next(new Error('User not found'));
       }
 
-      (socket as any).userDid = userDid;
+      (socket as any).userDid = authenticatedDid;
       socketToUser.set(socket.id, {
         did: user.did,
         handle: user.handle,
@@ -161,6 +193,7 @@ export function initializeChatWebSocket(io: SocketIOServer): void {
 
       next();
     } catch (error) {
+      console.error('WebSocket auth error:', error);
       next(new Error('Authentication failed'));
     }
   });
