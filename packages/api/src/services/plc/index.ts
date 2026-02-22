@@ -8,6 +8,12 @@ import {
   plcAuditLog,
   systemConfig,
 } from '../../db/schema.js';
+import {
+  verifyOperationSignedByRotationKey,
+  validateOperationChain,
+  validateOperation,
+  calculateOperationCid,
+} from './crypto.js';
 
 /**
  * PLC Operation types
@@ -455,14 +461,12 @@ export class PlcService {
       throw new Error('Unauthorized rotation key');
     }
 
-    // TODO: Verify signature in production
-
+    // Build the operation to verify signature
     const newSigningKey = input.newSigningKey || identity.signingKey;
     const newRotationKeys = input.newRotationKeys || rotationKeys;
 
-    // Create rotation operation
-    const operation: PlcOperationData = {
-      type: 'plc_operation',
+    const operationToVerify = {
+      type: 'plc_operation' as const,
       rotationKeys: newRotationKeys,
       verificationMethods: {
         atproto: newSigningKey || '',
@@ -478,6 +482,18 @@ export class PlcService {
       sig: input.signature,
     };
 
+    // Verify signature using the rotation key
+    const sigResult = verifyOperationSignedByRotationKey(
+      operationToVerify,
+      [input.rotationKeyUsed]
+    );
+
+    if (!sigResult.valid) {
+      throw new Error(`Signature verification failed: ${sigResult.error || 'Invalid signature'}`);
+    }
+
+    // Use the verified operation
+    const operation: PlcOperationData = operationToVerify;
     const cid = this.generateOperationCid(operation);
 
     // Store operation
@@ -905,6 +921,192 @@ export class PlcService {
 
     return stats;
   }
+
+  /**
+   * Validate operation chain for a DID
+   * Checks that all operations form a valid hash chain with correct prev references
+   */
+  static async validateOperationChain(did: string): Promise<{
+    valid: boolean;
+    errors: string[];
+    operationCount: number;
+  }> {
+    const operations = await db
+      .select()
+      .from(plcOperations)
+      .where(eq(plcOperations.did, did))
+      .orderBy(desc(plcOperations.createdAt));
+
+    if (operations.length === 0) {
+      return { valid: true, errors: [], operationCount: 0 };
+    }
+
+    const opsToValidate = operations.map(op => ({
+      cid: op.cid,
+      operation: op.operation as Record<string, unknown>,
+    }));
+
+    const result = validateOperationChain(opsToValidate);
+
+    return {
+      valid: result.valid,
+      errors: result.errors,
+      operationCount: operations.length,
+    };
+  }
+
+  /**
+   * Validate a single operation with signature verification
+   */
+  static async validateOperationWithSignature(
+    did: string,
+    operation: Record<string, unknown>
+  ): Promise<{
+    valid: boolean;
+    signatureValid: boolean;
+    chainValid: boolean;
+    signingKey?: string;
+    errors: string[];
+  }> {
+    // Get identity to get rotation keys
+    const identity = await db
+      .select()
+      .from(plcIdentities)
+      .where(eq(plcIdentities.did, did))
+      .limit(1);
+
+    if (identity.length === 0) {
+      // For genesis operations, check if this is a create operation
+      const opType = operation.type as string;
+      if (opType === 'create') {
+        // For genesis, use the rotation keys from the operation itself
+        const rotationKeys = operation.rotationKeys as string[];
+        return validateOperation(operation, rotationKeys, null);
+      }
+      return {
+        valid: false,
+        signatureValid: false,
+        chainValid: false,
+        errors: ['DID not found'],
+      };
+    }
+
+    const id = identity[0];
+    if (!id) {
+      return {
+        valid: false,
+        signatureValid: false,
+        chainValid: false,
+        errors: ['DID not found'],
+      };
+    }
+
+    const rotationKeys = id.rotationKeys as string[];
+    const previousCid = id.lastOperationCid;
+
+    return validateOperation(operation, rotationKeys, previousCid);
+  }
+
+  /**
+   * Full validation of all operations for a DID
+   * Validates both chain integrity and signatures
+   */
+  static async fullValidation(did: string): Promise<{
+    valid: boolean;
+    chainValid: boolean;
+    signatureResults: Array<{
+      cid: string;
+      signatureValid: boolean;
+      signingKey?: string;
+      error?: string;
+    }>;
+    errors: string[];
+  }> {
+    const operations = await db
+      .select()
+      .from(plcOperations)
+      .where(eq(plcOperations.did, did))
+      .orderBy(desc(plcOperations.createdAt));
+
+    if (operations.length === 0) {
+      return {
+        valid: true,
+        chainValid: true,
+        signatureResults: [],
+        errors: [],
+      };
+    }
+
+    // Validate chain
+    const opsToValidate = operations.map(op => ({
+      cid: op.cid,
+      operation: op.operation as Record<string, unknown>,
+    }));
+
+    const chainResult = validateOperationChain(opsToValidate);
+
+    // Validate signatures
+    const signatureResults: Array<{
+      cid: string;
+      signatureValid: boolean;
+      signingKey?: string;
+      error?: string;
+    }> = [];
+
+    // Process in reverse (oldest first for signature validation)
+    const sortedOps = [...operations].reverse();
+    let currentRotationKeys: string[] = [];
+
+    for (const op of sortedOps) {
+      const operation = op.operation as Record<string, unknown>;
+      const opType = operation.type as string;
+
+      // For create operation, use keys from the operation
+      if (opType === 'create') {
+        currentRotationKeys = operation.rotationKeys as string[];
+      }
+
+      const sigResult = verifyOperationSignedByRotationKey(
+        operation,
+        currentRotationKeys
+      );
+
+      signatureResults.push({
+        cid: op.cid,
+        signatureValid: sigResult.valid,
+        signingKey: sigResult.signingKey,
+        error: sigResult.error,
+      });
+
+      // Update rotation keys if this operation changed them
+      if (operation.rotationKeys) {
+        currentRotationKeys = operation.rotationKeys as string[];
+      }
+    }
+
+    const allSignaturesValid = signatureResults.every(r => r.signatureValid);
+    const errors = [
+      ...chainResult.errors,
+      ...signatureResults
+        .filter(r => !r.signatureValid)
+        .map(r => `Operation ${r.cid}: ${r.error || 'Invalid signature'}`),
+    ];
+
+    return {
+      valid: chainResult.valid && allSignaturesValid,
+      chainValid: chainResult.valid,
+      signatureResults,
+      errors,
+    };
+  }
 }
 
 export default PlcService;
+
+// Re-export crypto utilities for external use
+export {
+  verifyOperationSignedByRotationKey,
+  validateOperationChain,
+  validateOperation,
+  calculateOperationCid,
+} from './crypto.js';

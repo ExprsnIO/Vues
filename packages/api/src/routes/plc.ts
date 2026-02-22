@@ -432,5 +432,63 @@ plcRouter.get('/xrpc/io.exprsn.plc.isTombstoned', async (c) => {
   return c.json({ tombstoned });
 });
 
+/**
+ * GET io.exprsn.plc.validateChain
+ * Validate the operation chain for a DID
+ */
+plcRouter.get('/xrpc/io.exprsn.plc.validateChain', async (c) => {
+  const did = c.req.query('did');
+
+  if (!did) {
+    return c.json({ error: 'InvalidRequest', message: 'Missing did' }, 400);
+  }
+
+  if (!did.startsWith('did:plc:')) {
+    return c.json({ error: 'InvalidDid', message: 'Invalid DID format' }, 400);
+  }
+
+  const result = await PlcService.validateOperationChain(did);
+  return c.json(result);
+});
+
+/**
+ * GET io.exprsn.plc.fullValidation
+ * Perform full validation (chain + signatures) for a DID
+ */
+plcRouter.get('/xrpc/io.exprsn.plc.fullValidation', async (c) => {
+  // TODO: Add admin auth check
+
+  const did = c.req.query('did');
+
+  if (!did) {
+    return c.json({ error: 'InvalidRequest', message: 'Missing did' }, 400);
+  }
+
+  if (!did.startsWith('did:plc:')) {
+    return c.json({ error: 'InvalidDid', message: 'Invalid DID format' }, 400);
+  }
+
+  const result = await PlcService.fullValidation(did);
+  return c.json(result);
+});
+
+/**
+ * POST io.exprsn.plc.validateOperation
+ * Validate a single operation (useful before submission)
+ */
+plcRouter.post('/xrpc/io.exprsn.plc.validateOperation', async (c) => {
+  const body = await c.req.json<{
+    did: string;
+    operation: Record<string, unknown>;
+  }>();
+
+  if (!body.did || !body.operation) {
+    return c.json({ error: 'InvalidRequest', message: 'Missing did or operation' }, 400);
+  }
+
+  const result = await PlcService.validateOperationWithSignature(body.did, body.operation);
+  return c.json(result);
+});
+
 export { plcRouter };
 export default plcRouter;
