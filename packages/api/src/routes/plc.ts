@@ -353,5 +353,84 @@ plcRouter.post('/xrpc/io.exprsn.plc.updateConfig', async (c) => {
   return c.json(newConfig);
 });
 
+/**
+ * POST io.exprsn.plc.tombstoneDid
+ * Permanently deactivate a DID (admin only, irreversible)
+ */
+plcRouter.post('/xrpc/io.exprsn.plc.tombstoneDid', async (c) => {
+  // TODO: Add admin auth check
+
+  const body = await c.req.json<{
+    did: string;
+    reason: string;
+    performedBy: string;
+  }>();
+
+  if (!body.did || !body.reason || !body.performedBy) {
+    return c.json({ error: 'InvalidRequest', message: 'Missing required fields' }, 400);
+  }
+
+  try {
+    const ipAddress = c.req.header('x-forwarded-for') || c.req.header('x-real-ip');
+    const userAgent = c.req.header('user-agent');
+
+    const result = await PlcService.tombstoneDid(
+      body.did,
+      body.reason,
+      body.performedBy,
+      ipAddress,
+      userAgent
+    );
+
+    return c.json({ success: true, ...result });
+  } catch (error) {
+    return c.json({
+      error: 'TombstoneFailed',
+      message: error instanceof Error ? error.message : 'Failed to tombstone DID',
+    }, 400);
+  }
+});
+
+/**
+ * GET io.exprsn.plc.listIdentities
+ * List all identities with optional filters (admin)
+ */
+plcRouter.get('/xrpc/io.exprsn.plc.listIdentities', async (c) => {
+  // TODO: Add admin auth check
+
+  const status = c.req.query('status') as 'active' | 'tombstoned' | 'deactivated' | undefined;
+  const limit = parseInt(c.req.query('limit') || '50', 10);
+  const offset = parseInt(c.req.query('offset') || '0', 10);
+
+  const identities = await PlcService.listIdentities({ status, limit, offset });
+  return c.json({ identities });
+});
+
+/**
+ * GET io.exprsn.plc.getStats
+ * Get identity statistics (admin)
+ */
+plcRouter.get('/xrpc/io.exprsn.plc.getStats', async (c) => {
+  // TODO: Add admin auth check
+
+  const stats = await PlcService.getIdentityStats();
+  return c.json(stats);
+});
+
+/**
+ * GET io.exprsn.plc.isTombstoned
+ * Check if a DID is tombstoned
+ */
+plcRouter.get('/xrpc/io.exprsn.plc.isTombstoned', async (c) => {
+  const did = c.req.query('did');
+
+  if (!did) {
+    return c.json({ error: 'InvalidRequest', message: 'Missing did' }, 400);
+  }
+
+  const tombstoned = await PlcService.isTombstoned(did);
+  return c.json({ tombstoned });
+});
+
 export { plcRouter };
 export default plcRouter;

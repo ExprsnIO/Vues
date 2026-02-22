@@ -521,6 +521,7 @@ export class PlcService {
 
   /**
    * Get DID document
+   * Returns a tombstone document if the DID has been tombstoned
    */
   static async getDidDocument(did: string): Promise<{
     '@context': string[];
@@ -537,6 +538,7 @@ export class PlcService {
       type: string;
       serviceEndpoint: string;
     }>;
+    deactivated?: boolean;
   } | null> {
     const identity = await db
       .select()
@@ -551,6 +553,17 @@ export class PlcService {
     const id = identity[0];
     if (!id) {
       return null;
+    }
+
+    // If tombstoned, return minimal document with deactivated flag
+    if (id.status === 'tombstoned') {
+      return {
+        '@context': [
+          'https://www.w3.org/ns/did/v1',
+        ],
+        id: did,
+        deactivated: true,
+      };
     }
 
     const services = id.services as Record<string, { type: string; endpoint: string }> | null;
@@ -608,15 +621,21 @@ export class PlcService {
 
   /**
    * Resolve handle to DID
+   * Returns null for tombstoned DIDs
    */
   static async resolveHandle(handle: string): Promise<string | null> {
     const normalizedHandle = handle.toLowerCase().replace(/^@/, '');
 
     const identity = await db
-      .select({ did: plcIdentities.did })
+      .select({ did: plcIdentities.did, status: plcIdentities.status })
       .from(plcIdentities)
       .where(eq(plcIdentities.handle, normalizedHandle))
       .limit(1);
+
+    // Don't resolve tombstoned identities
+    if (identity[0]?.status === 'tombstoned') {
+      return null;
+    }
 
     return identity[0]?.did || null;
   }
@@ -721,6 +740,170 @@ export class PlcService {
       newState: log.newState,
       createdAt: log.createdAt,
     }));
+  }
+
+  /**
+   * Tombstone a DID (permanently deactivate)
+   * This is an irreversible operation - the DID can no longer be used
+   */
+  static async tombstoneDid(
+    did: string,
+    reason: string,
+    performedBy: string,
+    ipAddress?: string,
+    userAgent?: string
+  ): Promise<{ operationCid: string }> {
+    // Get current state
+    const current = await db
+      .select()
+      .from(plcIdentities)
+      .where(eq(plcIdentities.did, did))
+      .limit(1);
+
+    if (current.length === 0) {
+      throw new Error('DID not found');
+    }
+
+    const identity = current[0];
+    if (!identity) {
+      throw new Error('DID not found');
+    }
+
+    // Check if already tombstoned
+    if (identity.status === 'tombstoned') {
+      throw new Error('DID is already tombstoned');
+    }
+
+    // Create tombstone operation (per AT Protocol spec)
+    const operation = {
+      type: 'plc_tombstone' as const,
+      prev: identity.lastOperationCid,
+    };
+
+    const cid = this.generateOperationCid(operation);
+
+    // Store tombstone operation
+    await db.insert(plcOperations).values({
+      did,
+      cid,
+      operation,
+      nullified: false,
+    });
+
+    // Update identity status
+    await db
+      .update(plcIdentities)
+      .set({
+        status: 'tombstoned',
+        tombstonedAt: new Date(),
+        tombstonedBy: performedBy,
+        tombstoneReason: reason,
+        lastOperationCid: cid,
+        // Clear sensitive data but keep for audit
+        signingKey: null,
+        services: null,
+        updatedAt: new Date(),
+      })
+      .where(eq(plcIdentities.did, did));
+
+    // Audit log
+    await db.insert(plcAuditLog).values({
+      did,
+      action: 'tombstone',
+      operationCid: cid,
+      previousState: {
+        status: identity.status || 'active',
+        handle: identity.handle,
+        signingKey: identity.signingKey,
+      },
+      newState: {
+        status: 'tombstoned',
+        reason,
+      },
+      ipAddress,
+      userAgent,
+    });
+
+    return { operationCid: cid };
+  }
+
+  /**
+   * Check if a DID is tombstoned
+   */
+  static async isTombstoned(did: string): Promise<boolean> {
+    const identity = await db
+      .select({ status: plcIdentities.status })
+      .from(plcIdentities)
+      .where(eq(plcIdentities.did, did))
+      .limit(1);
+
+    return identity[0]?.status === 'tombstoned';
+  }
+
+  /**
+   * List identities with optional filters
+   */
+  static async listIdentities(options: {
+    status?: 'active' | 'tombstoned' | 'deactivated';
+    limit?: number;
+    offset?: number;
+  } = {}): Promise<Array<{
+    did: string;
+    handle: string | null;
+    status: string;
+    pdsEndpoint: string | null;
+    createdAt: Date;
+    updatedAt: Date;
+  }>> {
+    const limit = options.limit || 50;
+    const offset = options.offset || 0;
+
+    let query = db
+      .select({
+        did: plcIdentities.did,
+        handle: plcIdentities.handle,
+        status: plcIdentities.status,
+        pdsEndpoint: plcIdentities.pdsEndpoint,
+        createdAt: plcIdentities.createdAt,
+        updatedAt: plcIdentities.updatedAt,
+      })
+      .from(plcIdentities)
+      .orderBy(desc(plcIdentities.createdAt))
+      .limit(limit)
+      .offset(offset);
+
+    if (options.status) {
+      query = query.where(eq(plcIdentities.status, options.status)) as typeof query;
+    }
+
+    return await query;
+  }
+
+  /**
+   * Get identity count by status
+   */
+  static async getIdentityStats(): Promise<{
+    total: number;
+    active: number;
+    tombstoned: number;
+    deactivated: number;
+  }> {
+    const all = await db.select().from(plcIdentities);
+
+    const stats = {
+      total: all.length,
+      active: 0,
+      tombstoned: 0,
+      deactivated: 0,
+    };
+
+    for (const id of all) {
+      if (id.status === 'active') stats.active++;
+      else if (id.status === 'tombstoned') stats.tombstoned++;
+      else if (id.status === 'deactivated') stats.deactivated++;
+    }
+
+    return stats;
   }
 }
 

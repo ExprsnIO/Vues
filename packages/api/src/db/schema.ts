@@ -2077,12 +2077,17 @@ export const plcIdentities = pgTable(
     alsoKnownAs: jsonb('also_known_as').$type<string[]>(), // AT-URI aliases
     services: jsonb('services').$type<Record<string, { type: string; endpoint: string }>>(),
     lastOperationCid: text('last_operation_cid'),
+    status: text('status').default('active').notNull(), // 'active' | 'tombstoned' | 'deactivated'
+    tombstonedAt: timestamp('tombstoned_at'),
+    tombstonedBy: text('tombstoned_by'), // Admin/user who performed the tombstone
+    tombstoneReason: text('tombstone_reason'),
     createdAt: timestamp('created_at').defaultNow().notNull(),
     updatedAt: timestamp('updated_at').defaultNow().notNull(),
   },
   (table) => ({
     handleIdx: uniqueIndex('plc_identities_handle_idx').on(table.handle),
     pdsIdx: index('plc_identities_pds_idx').on(table.pdsEndpoint),
+    statusIdx: index('plc_identities_status_idx').on(table.status),
   })
 );
 
