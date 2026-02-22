@@ -2590,3 +2590,174 @@ export type NewModerationBannedWord = typeof moderationBannedWords.$inferInsert;
 export type ModerationBannedTag = typeof moderationBannedTags.$inferSelect;
 export type NewModerationBannedTag = typeof moderationBannedTags.$inferInsert;
 
+// ============================================
+// Admin Settings & Audit Tables
+// ============================================
+
+// Admin permission changes audit - tracks who changed what permissions
+export const adminPermissionAudit = pgTable(
+  'admin_permission_audit',
+  {
+    id: text('id').primaryKey(),
+    targetAdminId: text('target_admin_id')
+      .notNull()
+      .references(() => adminUsers.id, { onDelete: 'cascade' }),
+    performedBy: text('performed_by')
+      .notNull()
+      .references(() => adminUsers.id),
+    action: text('action').notNull(), // 'grant' | 'revoke' | 'role_change'
+    previousRole: text('previous_role'),
+    newRole: text('new_role'),
+    previousPermissions: jsonb('previous_permissions').$type<string[]>(),
+    newPermissions: jsonb('new_permissions').$type<string[]>(),
+    reason: text('reason'),
+    ipAddress: text('ip_address'),
+    userAgent: text('user_agent'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    targetAdminIdx: index('admin_permission_audit_target_idx').on(table.targetAdminId),
+    performedByIdx: index('admin_permission_audit_performed_by_idx').on(table.performedBy),
+    actionIdx: index('admin_permission_audit_action_idx').on(table.action),
+    createdAtIdx: index('admin_permission_audit_created_at_idx').on(table.createdAt),
+  })
+);
+
+// Admin sessions - track active admin sessions
+export const adminSessions = pgTable(
+  'admin_sessions',
+  {
+    id: text('id').primaryKey(),
+    adminId: text('admin_id')
+      .notNull()
+      .references(() => adminUsers.id, { onDelete: 'cascade' }),
+    sessionToken: text('session_token').notNull(),
+    ipAddress: text('ip_address'),
+    userAgent: text('user_agent'),
+    deviceInfo: jsonb('device_info').$type<{
+      browser?: string;
+      os?: string;
+      device?: string;
+    }>(),
+    lastActivityAt: timestamp('last_activity_at').defaultNow().notNull(),
+    expiresAt: timestamp('expires_at').notNull(),
+    revokedAt: timestamp('revoked_at'),
+    revokedReason: text('revoked_reason'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    adminIdIdx: index('admin_sessions_admin_id_idx').on(table.adminId),
+    sessionTokenIdx: uniqueIndex('admin_sessions_token_idx').on(table.sessionToken),
+    expiresAtIdx: index('admin_sessions_expires_at_idx').on(table.expiresAt),
+    lastActivityIdx: index('admin_sessions_last_activity_idx').on(table.lastActivityAt),
+  })
+);
+
+// CA configuration settings
+export const caConfig = pgTable('ca_config', {
+  id: text('id').primaryKey().default('default'),
+  // Certificate validity settings
+  rootCertValidityDays: integer('root_cert_validity_days').default(7300).notNull(), // 20 years
+  intermediateCertValidityDays: integer('intermediate_cert_validity_days').default(3650).notNull(), // 10 years
+  entityCertValidityDays: integer('entity_cert_validity_days').default(365).notNull(), // 1 year
+  // Algorithm settings
+  defaultKeySize: integer('default_key_size').default(4096).notNull(),
+  defaultHashAlgorithm: text('default_hash_algorithm').default('SHA-256').notNull(),
+  // CRL settings
+  crlAutoGenerate: boolean('crl_auto_generate').default(true).notNull(),
+  crlGenerationIntervalHours: integer('crl_generation_interval_hours').default(24).notNull(),
+  crlValidityHours: integer('crl_validity_hours').default(168).notNull(), // 7 days
+  lastCrlGeneratedAt: timestamp('last_crl_generated_at'),
+  // Certificate renewal settings
+  renewalReminderDays: integer('renewal_reminder_days').default(30).notNull(),
+  autoRenewalEnabled: boolean('auto_renewal_enabled').default(false).notNull(),
+  // Rate limiting
+  maxCertsPerUserPerDay: integer('max_certs_per_user_per_day').default(5).notNull(),
+  maxServiceCertsPerDay: integer('max_service_certs_per_day').default(50).notNull(),
+  // OCSP settings (future)
+  ocspEnabled: boolean('ocsp_enabled').default(false).notNull(),
+  ocspResponderUrl: text('ocsp_responder_url'),
+  // Audit
+  updatedBy: text('updated_by'),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+// Moderation configuration settings
+export const moderationConfig = pgTable('moderation_config', {
+  id: text('id').primaryKey().default('default'),
+  // Risk threshold settings
+  autoApproveThreshold: integer('auto_approve_threshold').default(20).notNull(), // 0-100
+  autoRejectThreshold: integer('auto_reject_threshold').default(80).notNull(),
+  requireReviewThreshold: integer('require_review_threshold').default(50).notNull(),
+  // Category weights for risk calculation
+  toxicityWeight: integer('toxicity_weight').default(100).notNull(),
+  nsfwWeight: integer('nsfw_weight').default(100).notNull(),
+  spamWeight: integer('spam_weight').default(80).notNull(),
+  violenceWeight: integer('violence_weight').default(100).notNull(),
+  hateSpeechWeight: integer('hate_speech_weight').default(100).notNull(),
+  // AI provider settings
+  primaryAiProvider: text('primary_ai_provider').default('claude').notNull(),
+  fallbackAiProvider: text('fallback_ai_provider'),
+  aiTimeoutMs: integer('ai_timeout_ms').default(30000).notNull(),
+  aiRetryAttempts: integer('ai_retry_attempts').default(2).notNull(),
+  // Queue settings
+  maxQueueSize: integer('max_queue_size').default(10000).notNull(),
+  escalationThresholdHours: integer('escalation_threshold_hours').default(24).notNull(),
+  autoAssignEnabled: boolean('auto_assign_enabled').default(false).notNull(),
+  // Appeal settings
+  appealWindowDays: integer('appeal_window_days').default(30).notNull(),
+  maxAppealsPerUser: integer('max_appeals_per_user').default(3).notNull(),
+  appealCooldownDays: integer('appeal_cooldown_days').default(7).notNull(),
+  // User action defaults
+  defaultWarnExpiryDays: integer('default_warn_expiry_days').default(90).notNull(),
+  defaultSuspensionDays: integer('default_suspension_days').default(7).notNull(),
+  // Notification settings
+  notifyOnHighRisk: boolean('notify_on_high_risk').default(true).notNull(),
+  notifyOnAppeal: boolean('notify_on_appeal').default(true).notNull(),
+  notifyOnEscalation: boolean('notify_on_escalation').default(true).notNull(),
+  // Audit
+  updatedBy: text('updated_by'),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+// Auth configuration settings
+export const authConfig = pgTable('auth_config', {
+  id: text('id').primaryKey().default('default'),
+  // Session settings
+  sessionDurationHours: integer('session_duration_hours').default(24).notNull(),
+  adminSessionDurationHours: integer('admin_session_duration_hours').default(8).notNull(),
+  maxConcurrentSessions: integer('max_concurrent_sessions').default(5).notNull(),
+  maxConcurrentAdminSessions: integer('max_concurrent_admin_sessions').default(3).notNull(),
+  // Token settings
+  accessTokenExpiryMinutes: integer('access_token_expiry_minutes').default(60).notNull(),
+  refreshTokenExpiryDays: integer('refresh_token_expiry_days').default(30).notNull(),
+  // Security settings
+  requireMfaForAdmins: boolean('require_mfa_for_admins').default(false).notNull(),
+  allowedMfaMethods: jsonb('allowed_mfa_methods').$type<string[]>().default(['totp', 'webauthn']),
+  passwordMinLength: integer('password_min_length').default(12).notNull(),
+  passwordRequireUppercase: boolean('password_require_uppercase').default(true).notNull(),
+  passwordRequireNumbers: boolean('password_require_numbers').default(true).notNull(),
+  passwordRequireSymbols: boolean('password_require_symbols').default(false).notNull(),
+  // Rate limiting
+  maxLoginAttempts: integer('max_login_attempts').default(5).notNull(),
+  lockoutDurationMinutes: integer('lockout_duration_minutes').default(15).notNull(),
+  // OAuth settings
+  oauthEnabled: boolean('oauth_enabled').default(true).notNull(),
+  allowedOauthProviders: jsonb('allowed_oauth_providers').$type<string[]>().default(['atproto']),
+  // Audit
+  updatedBy: text('updated_by'),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+// Admin Settings type exports
+export type AdminPermissionAuditEntry = typeof adminPermissionAudit.$inferSelect;
+export type NewAdminPermissionAuditEntry = typeof adminPermissionAudit.$inferInsert;
+export type AdminSession = typeof adminSessions.$inferSelect;
+export type NewAdminSession = typeof adminSessions.$inferInsert;
+export type CAConfig = typeof caConfig.$inferSelect;
+export type NewCAConfig = typeof caConfig.$inferInsert;
+export type ModerationConfig = typeof moderationConfig.$inferSelect;
+export type NewModerationConfig = typeof moderationConfig.$inferInsert;
+export type AuthConfig = typeof authConfig.$inferSelect;
+export type NewAuthConfig = typeof authConfig.$inferInsert;
+

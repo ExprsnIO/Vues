@@ -85,6 +85,13 @@
       "when": 1771768649677,
       "tag": "0011_classy_virginia_dare",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1771799782123,
+      "tag": "0012_light_roland_deschain",
+      "breakpoints": true
     }
   ]
 }

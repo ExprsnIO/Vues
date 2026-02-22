@@ -42,6 +42,7 @@ import { announcementsRouter } from './routes/announcements.js';
 import { paymentsAdminRouter } from './routes/payments-admin.js';
 import { liveAdminRouter } from './routes/live-admin.js';
 import { moderationAdminRouter } from './routes/moderation-admin.js';
+import { adminSettingsRouter } from './routes/admin-settings.js';
 import { analyticsRoutes } from './routes/analytics.js';
 import { initializeIdentityService } from './services/identity/index.js';
 import { Redis } from 'ioredis';
@@ -189,6 +190,7 @@ app.route('/xrpc', announcementsRouter);
 app.route('/xrpc', paymentsAdminRouter);
 app.route('/xrpc', liveAdminRouter);
 app.route('/xrpc', moderationAdminRouter);
+app.route('/xrpc', adminSettingsRouter); // Admin settings for auth/CA/moderation
 app.route('/xrpc', analyticsRoutes); // Creator analytics
 // PLC routes - standard directory at /plc, XRPC routes already have /xrpc prefix
 app.route('/plc', plcRouter); // Standard PLC directory endpoints (did:plc resolution)

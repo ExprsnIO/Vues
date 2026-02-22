@@ -26,7 +26,7 @@ export const ADMIN_PERMISSIONS = {
 } as const;
 
 // Role-based default permissions
-const ROLE_PERMISSIONS: Record<AdminRole, string[]> = {
+export const ROLE_PERMISSIONS: Record<AdminRole, string[]> = {
   super_admin: Object.values(ADMIN_PERMISSIONS),
   admin: [
     ADMIN_PERMISSIONS.USERS_VIEW,
