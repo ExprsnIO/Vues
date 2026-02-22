@@ -92,6 +92,13 @@
       "when": 1771799782123,
       "tag": "0012_light_roland_deschain",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1771800612501,
+      "tag": "0013_kind_mariko_yashida",
+      "breakpoints": true
     }
   ]
 }

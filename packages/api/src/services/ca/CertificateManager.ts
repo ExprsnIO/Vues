@@ -442,6 +442,210 @@ export class CertificateManager {
   }
 
   /**
+   * Renew an existing certificate
+   * Issues a new certificate with the same properties, optionally revoking the old one
+   */
+  async renewCertificate(options: {
+    certificateId: string;
+    revokeOld?: boolean;
+    validityDays?: number;
+  }): Promise<{
+    id: string;
+    certificate: string;
+    privateKey: string;
+    serialNumber: string;
+    fingerprint: string;
+    oldCertificateId: string;
+  }> {
+    // Get the existing certificate
+    const existingCert = await db
+      .select()
+      .from(caEntityCertificates)
+      .where(eq(caEntityCertificates.id, options.certificateId))
+      .limit(1);
+
+    if (!existingCert[0]) {
+      throw new Error('Certificate not found');
+    }
+
+    const cert = existingCert[0];
+
+    if (cert.status === 'revoked') {
+      throw new Error('Cannot renew a revoked certificate');
+    }
+
+    // Parse the subject from existing certificate
+    const subject = cert.subject as { commonName?: string; organization?: string } | null;
+
+    // Issue new certificate with same properties
+    const newCert = await this.issueEntityCertificate({
+      commonName: cert.commonName,
+      subjectDid: cert.subjectDid || undefined,
+      serviceId: cert.serviceId || undefined,
+      type: cert.certType as CertificateType,
+      organization: subject?.organization,
+      validityDays: options.validityDays || 365,
+      intermediateId: cert.issuerType === 'intermediate' ? cert.issuerId : undefined,
+    });
+
+    // Link renewal in database
+    await db
+      .update(caEntityCertificates)
+      .set({ renewedBy: newCert.id })
+      .where(eq(caEntityCertificates.id, options.certificateId));
+
+    // Optionally revoke the old certificate
+    if (options.revokeOld) {
+      await this.revokeCertificate(options.certificateId, 'superseded');
+    }
+
+    return {
+      ...newCert,
+      oldCertificateId: options.certificateId,
+    };
+  }
+
+  /**
+   * Get certificate status for OCSP
+   */
+  async getCertificateStatus(serialNumber: string): Promise<{
+    status: 'good' | 'revoked' | 'unknown';
+    revocationTime?: Date;
+    revocationReason?: string;
+    thisUpdate: Date;
+    nextUpdate: Date;
+  }> {
+    const thisUpdate = new Date();
+    const nextUpdate = new Date(thisUpdate.getTime() + 24 * 60 * 60 * 1000); // 24 hours
+
+    // Check entity certificates
+    const entityCert = await db
+      .select()
+      .from(caEntityCertificates)
+      .where(eq(caEntityCertificates.serialNumber, serialNumber))
+      .limit(1);
+
+    if (entityCert[0]) {
+      if (entityCert[0].status === 'revoked') {
+        return {
+          status: 'revoked',
+          revocationTime: entityCert[0].revokedAt || undefined,
+          revocationReason: entityCert[0].revocationReason || undefined,
+          thisUpdate,
+          nextUpdate,
+        };
+      }
+
+      // Check if certificate is expired
+      if (entityCert[0].notAfter < new Date()) {
+        return {
+          status: 'revoked',
+          revocationTime: entityCert[0].notAfter,
+          revocationReason: 'expired',
+          thisUpdate,
+          nextUpdate,
+        };
+      }
+
+      return {
+        status: 'good',
+        thisUpdate,
+        nextUpdate,
+      };
+    }
+
+    // Check intermediate certificates
+    const intermediateCert = await db
+      .select()
+      .from(caIntermediateCertificates)
+      .where(eq(caIntermediateCertificates.serialNumber, serialNumber))
+      .limit(1);
+
+    if (intermediateCert[0]) {
+      if (intermediateCert[0].status === 'revoked') {
+        return {
+          status: 'revoked',
+          thisUpdate,
+          nextUpdate,
+        };
+      }
+      return {
+        status: 'good',
+        thisUpdate,
+        nextUpdate,
+      };
+    }
+
+    // Check root certificate
+    const rootCert = await db
+      .select()
+      .from(caRootCertificates)
+      .where(eq(caRootCertificates.serialNumber, serialNumber))
+      .limit(1);
+
+    if (rootCert[0]) {
+      if (rootCert[0].status === 'revoked') {
+        return {
+          status: 'revoked',
+          thisUpdate,
+          nextUpdate,
+        };
+      }
+      return {
+        status: 'good',
+        thisUpdate,
+        nextUpdate,
+      };
+    }
+
+    return {
+      status: 'unknown',
+      thisUpdate,
+      nextUpdate,
+    };
+  }
+
+  /**
+   * Get certificates expiring soon (for renewal reminders)
+   */
+  async getCertificatesExpiringSoon(daysUntilExpiry: number): Promise<
+    Array<{
+      id: string;
+      commonName: string;
+      subjectDid: string | null;
+      serviceId: string | null;
+      notAfter: Date;
+      daysRemaining: number;
+    }>
+  > {
+    const expiryThreshold = new Date();
+    expiryThreshold.setDate(expiryThreshold.getDate() + daysUntilExpiry);
+
+    const results = await db
+      .select({
+        id: caEntityCertificates.id,
+        commonName: caEntityCertificates.commonName,
+        subjectDid: caEntityCertificates.subjectDid,
+        serviceId: caEntityCertificates.serviceId,
+        notAfter: caEntityCertificates.notAfter,
+      })
+      .from(caEntityCertificates)
+      .where(
+        and(
+          eq(caEntityCertificates.status, 'active'),
+          sql`${caEntityCertificates.notAfter} <= ${expiryThreshold}`,
+          sql`${caEntityCertificates.notAfter} > NOW()`
+        )
+      )
+      .orderBy(caEntityCertificates.notAfter);
+
+    return results.map((cert) => ({
+      ...cert,
+      daysRemaining: Math.ceil((cert.notAfter.getTime() - Date.now()) / (24 * 60 * 60 * 1000)),
+    }));
+  }
+
+  /**
    * Verify a certificate
    */
   async verifyCertificate(certificatePem: string): Promise<{

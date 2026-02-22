@@ -1957,14 +1957,14 @@ liveRoutes.post('/io.exprsn.live.guest.reorder', authMiddleware, async (c) => {
   }
 
   // Update positions
-  for (let i = 0; i < body.guestOrder.length; i++) {
+  for (const [i, guestDid] of body.guestOrder.entries()) {
     await db
       .update(streamGuests)
       .set({ position: i })
       .where(
         and(
           eq(streamGuests.streamId, body.streamId),
-          eq(streamGuests.userDid, body.guestOrder[i]),
+          eq(streamGuests.userDid, guestDid),
           eq(streamGuests.status, 'active')
         )
       );

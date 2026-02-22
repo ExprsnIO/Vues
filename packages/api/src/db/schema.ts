@@ -1871,6 +1871,7 @@ export const caEntityCertificates = pgTable(
     status: text('status').default('active').notNull(),
     revokedAt: timestamp('revoked_at'),
     revocationReason: text('revocation_reason'),
+    renewedBy: text('renewed_by'), // ID of the certificate that replaced this one
     createdAt: timestamp('created_at').defaultNow().notNull(),
   },
   (table) => ({

@@ -45,6 +45,7 @@ import { moderationAdminRouter } from './routes/moderation-admin.js';
 import { adminSettingsRouter } from './routes/admin-settings.js';
 import { analyticsRoutes } from './routes/analytics.js';
 import { initializeIdentityService } from './services/identity/index.js';
+import { cronService } from './services/cron/index.js';
 import { Redis } from 'ioredis';
 import { RelayService, CommitEvent as RelayCommitEvent } from '@exprsn/relay';
 
@@ -315,6 +316,12 @@ async function main() {
   if (registryEnabled) {
     initializeServiceRegistry({ startHealthChecks: true });
     console.log('Service registry initialized with health checks');
+  }
+
+  // Initialize cron service for scheduled tasks (CRL generation, etc.)
+  const cronEnabled = process.env.CRON_ENABLED !== 'false';
+  if (cronEnabled) {
+    await cronService.initialize();
   }
 
   // Mount PDS routes with relay callback

@@ -269,6 +269,83 @@ caRoutes.post('/io.exprsn.ca.revokeCertificate', authMiddleware, async (c) => {
   return c.json({ success: true });
 });
 
+// Renew certificate
+caRoutes.post('/io.exprsn.ca.renewCertificate', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const body = await c.req.json<{
+    certificateId: string;
+    revokeOld?: boolean;
+    validityDays?: number;
+  }>();
+
+  if (!body.certificateId) {
+    throw new HTTPException(400, { message: 'Certificate ID required' });
+  }
+
+  // Verify ownership
+  const cert = await certificateManager.getEntityCertificate(body.certificateId);
+  if (!cert) {
+    throw new HTTPException(404, { message: 'Certificate not found' });
+  }
+
+  if (cert.subjectDid !== userDid) {
+    throw new HTTPException(403, { message: 'Permission denied' });
+  }
+
+  if (cert.status === 'revoked') {
+    throw new HTTPException(400, { message: 'Cannot renew a revoked certificate' });
+  }
+
+  try {
+    const result = await certificateManager.renewCertificate({
+      certificateId: body.certificateId,
+      revokeOld: body.revokeOld,
+      validityDays: body.validityDays,
+    });
+
+    return c.json({
+      id: result.id,
+      certificate: result.certificate,
+      privateKey: result.privateKey,
+      serialNumber: result.serialNumber,
+      fingerprint: result.fingerprint,
+      previousCertificateId: result.oldCertificateId,
+    });
+  } catch (error) {
+    throw new HTTPException(500, {
+      message: error instanceof Error ? error.message : 'Failed to renew certificate',
+    });
+  }
+});
+
+// Get certificates expiring soon
+caRoutes.get('/io.exprsn.ca.getExpiringCertificates', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const days = parseInt(c.req.query('days') || '30');
+
+  const certificates = await certificateManager.getCertificatesExpiringSoon(days);
+
+  // Filter to only return user's certificates
+  const userCerts = certificates.filter((cert) => cert.subjectDid === userDid);
+
+  return c.json({
+    certificates: userCerts.map((cert) => ({
+      id: cert.id,
+      commonName: cert.commonName,
+      notAfter: cert.notAfter.toISOString(),
+      daysRemaining: cert.daysRemaining,
+    })),
+  });
+});
+
 // ============================================
 // Certificate Verification
 // ============================================
@@ -411,6 +488,50 @@ caRoutes.post(
     }
   }
 );
+
+// ============================================
+// OCSP Responder
+// ============================================
+
+// OCSP status check (public)
+caRoutes.post('/io.exprsn.ca.ocspCheck', async (c) => {
+  const body = await c.req.json<{
+    serialNumber: string;
+  }>();
+
+  if (!body.serialNumber) {
+    throw new HTTPException(400, { message: 'Serial number required' });
+  }
+
+  const status = await certificateManager.getCertificateStatus(body.serialNumber);
+
+  return c.json({
+    status: status.status,
+    revocationTime: status.revocationTime?.toISOString(),
+    revocationReason: status.revocationReason,
+    thisUpdate: status.thisUpdate.toISOString(),
+    nextUpdate: status.nextUpdate.toISOString(),
+  });
+});
+
+// OCSP GET endpoint (for browser/standard OCSP clients)
+caRoutes.get('/io.exprsn.ca.ocsp/:serial', async (c) => {
+  const serialNumber = c.req.param('serial');
+
+  if (!serialNumber) {
+    throw new HTTPException(400, { message: 'Serial number required' });
+  }
+
+  const status = await certificateManager.getCertificateStatus(serialNumber);
+
+  return c.json({
+    status: status.status,
+    revocationTime: status.revocationTime?.toISOString(),
+    revocationReason: status.revocationReason,
+    thisUpdate: status.thisUpdate.toISOString(),
+    nextUpdate: status.nextUpdate.toISOString(),
+  });
+});
 
 // ============================================
 // Service Certificate Endpoints

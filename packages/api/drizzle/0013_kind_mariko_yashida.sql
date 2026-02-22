@@ -1,0 +1,1 @@
+ALTER TABLE "ca_entity_certificates" ADD COLUMN "renewed_by" text;

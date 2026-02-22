@@ -74,7 +74,7 @@ analyticsRoutes.get('/io.exprsn.analytics.overview', authMiddleware, async (c) =
       count: count(),
     })
     .from(likes)
-    .innerJoin(videos, eq(videos.id, likes.videoId))
+    .innerJoin(videos, eq(videos.uri, likes.videoUri))
     .where(
       and(
         eq(videos.authorDid, userDid),
@@ -88,7 +88,7 @@ analyticsRoutes.get('/io.exprsn.analytics.overview', authMiddleware, async (c) =
       count: count(),
     })
     .from(comments)
-    .innerJoin(videos, eq(videos.id, comments.videoId))
+    .innerJoin(videos, eq(videos.uri, comments.videoUri))
     .where(
       and(
         eq(videos.authorDid, userDid),
@@ -115,7 +115,7 @@ analyticsRoutes.get('/io.exprsn.analytics.overview', authMiddleware, async (c) =
       count: count(),
     })
     .from(reposts)
-    .innerJoin(videos, eq(videos.id, reposts.videoId))
+    .innerJoin(videos, eq(videos.uri, reposts.videoUri))
     .where(
       and(
         eq(videos.authorDid, userDid),
@@ -129,7 +129,7 @@ analyticsRoutes.get('/io.exprsn.analytics.overview', authMiddleware, async (c) =
       count: count(),
     })
     .from(shares)
-    .innerJoin(videos, eq(videos.id, shares.videoId))
+    .innerJoin(videos, eq(videos.uri, shares.videoUri))
     .where(
       and(
         eq(videos.authorDid, userDid),
@@ -201,7 +201,7 @@ analyticsRoutes.get('/io.exprsn.analytics.videos', authMiddleware, async (c) => 
 
   let query = db
     .select({
-      id: videos.id,
+      uri: videos.uri,
       caption: videos.caption,
       thumbnailUrl: videos.thumbnailUrl,
       duration: videos.duration,
@@ -222,7 +222,7 @@ analyticsRoutes.get('/io.exprsn.analytics.videos', authMiddleware, async (c) => 
     query = query.where(
       and(
         eq(videos.authorDid, userDid),
-        sql`${videos.id} < ${cursor}`
+        sql`${videos.uri} < ${cursor}`
       )
     ) as typeof query;
   }
@@ -242,7 +242,7 @@ analyticsRoutes.get('/io.exprsn.analytics.videos', authMiddleware, async (c) => 
         video.shareCount
       ),
     })),
-    cursor: hasMore ? videoList[videoList.length - 1]?.id : undefined,
+    cursor: hasMore ? videoList[videoList.length - 1]?.uri : undefined,
   });
 });
 
@@ -262,7 +262,7 @@ analyticsRoutes.get('/io.exprsn.analytics.video', authMiddleware, async (c) => {
   const videoResult = await db
     .select()
     .from(videos)
-    .where(eq(videos.id, videoId))
+    .where(eq(videos.uri, videoId))
     .limit(1);
 
   const video = videoResult[0];
@@ -283,7 +283,7 @@ analyticsRoutes.get('/io.exprsn.analytics.video', authMiddleware, async (c) => {
     .from(likes)
     .where(
       and(
-        eq(likes.videoId, videoId),
+        eq(likes.videoUri, videoId),
         gte(likes.createdAt, new Date(Date.now() - 30 * 24 * 60 * 60 * 1000))
       )
     )
@@ -299,7 +299,7 @@ analyticsRoutes.get('/io.exprsn.analytics.video', authMiddleware, async (c) => {
     .from(comments)
     .where(
       and(
-        eq(comments.videoId, videoId),
+        eq(comments.videoUri, videoId),
         gte(comments.createdAt, new Date(Date.now() - 30 * 24 * 60 * 60 * 1000))
       )
     )
@@ -310,23 +310,22 @@ analyticsRoutes.get('/io.exprsn.analytics.video', authMiddleware, async (c) => {
   const bookmarkResult = await db
     .select({ count: count() })
     .from(bookmarks)
-    .where(eq(bookmarks.videoId, videoId));
+    .where(eq(bookmarks.videoUri, videoId));
 
   // Get share count
   const shareResult = await db
     .select({ count: count() })
     .from(shares)
-    .where(eq(shares.videoId, videoId));
+    .where(eq(shares.videoUri, videoId));
 
   return c.json({
     video: {
-      id: video.id,
+      uri: video.uri,
       caption: video.caption,
       thumbnailUrl: video.thumbnailUrl,
-      videoUrl: video.videoUrl,
+      cdnUrl: video.cdnUrl,
       duration: video.duration,
-      width: video.width,
-      height: video.height,
+      aspectRatio: video.aspectRatio,
       createdAt: video.createdAt.toISOString(),
     },
     metrics: {
@@ -643,7 +642,7 @@ analyticsRoutes.get('/io.exprsn.analytics.topContent', authMiddleware, async (c)
 
   const topVideos = await db
     .select({
-      id: videos.id,
+      uri: videos.uri,
       caption: videos.caption,
       thumbnailUrl: videos.thumbnailUrl,
       viewCount: videos.viewCount,
