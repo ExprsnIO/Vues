@@ -1,6 +1,8 @@
 import { Hono } from 'hono';
 import { ServiceRegistry, ServiceType, ServiceStatus } from '../services/registry/ServiceRegistry.js';
 import { db } from '../db/index.js';
+import { adminAuthMiddleware, requirePermission, ADMIN_PERMISSIONS } from '../auth/middleware.js';
+import { getServiceAuth } from './federation.js';
 
 // Create registry singleton
 let registry: ServiceRegistry | null = null;
@@ -102,12 +104,19 @@ registryRouter.get('/io.exprsn.registry.getService', async (c) => {
 
 /**
  * POST io.exprsn.registry.register
- * Register a new federated service (requires auth)
+ * Register a new federated service (requires service auth or admin auth)
  */
 registryRouter.post('/io.exprsn.registry.register', async (c) => {
-  // TODO: Add service auth or admin auth check
+  // Check for service auth (CA certificate) or admin auth
+  const serviceAuth = getServiceAuth();
+  const headers: Record<string, string> = {};
+  for (const [key, value] of Object.entries(c.req.header())) {
+    if (typeof value === 'string') {
+      headers[key.toLowerCase()] = value;
+    }
+  }
 
-  const body = await c.req.json<{
+  let body: {
     type: ServiceType;
     endpoint: string;
     did?: string;
@@ -115,7 +124,29 @@ registryRouter.post('/io.exprsn.registry.register', async (c) => {
     region?: string;
     capabilities?: string[];
     metadata?: Record<string, unknown>;
-  }>();
+  };
+
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'InvalidRequest', message: 'Invalid JSON body' }, 400);
+  }
+
+  // Check for service auth header
+  if (headers['x-exprsn-certificate']) {
+    const authResult = await serviceAuth.verifyRequest(headers, 'POST', c.req.path, body);
+    if (!authResult) {
+      return c.json({ error: 'Unauthorized', message: 'Service authentication failed' }, 401);
+    }
+    // Service is authenticated via certificate
+  } else {
+    // Fall back to admin auth check via Bearer token
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return c.json({ error: 'Unauthorized', message: 'Service or admin authentication required' }, 401);
+    }
+    // Admin auth will be checked below
+  }
 
   if (!body.type || !body.endpoint) {
     return c.json({ error: 'InvalidRequest', message: 'Missing type or endpoint' }, 400);
@@ -155,12 +186,19 @@ registryRouter.post('/io.exprsn.registry.register', async (c) => {
 
 /**
  * POST io.exprsn.registry.update
- * Update a registered service
+ * Update a registered service (requires service auth or admin auth)
  */
 registryRouter.post('/io.exprsn.registry.update', async (c) => {
-  // TODO: Add service auth or admin auth check
+  // Check for service auth (CA certificate) or admin auth
+  const serviceAuth = getServiceAuth();
+  const headers: Record<string, string> = {};
+  for (const [key, value] of Object.entries(c.req.header())) {
+    if (typeof value === 'string') {
+      headers[key.toLowerCase()] = value;
+    }
+  }
 
-  const body = await c.req.json<{
+  let body: {
     id: string;
     endpoint?: string;
     did?: string;
@@ -169,7 +207,27 @@ registryRouter.post('/io.exprsn.registry.update', async (c) => {
     capabilities?: string[];
     status?: ServiceStatus;
     metadata?: Record<string, unknown>;
-  }>();
+  };
+
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'InvalidRequest', message: 'Invalid JSON body' }, 400);
+  }
+
+  // Check for service auth header
+  if (headers['x-exprsn-certificate']) {
+    const authResult = await serviceAuth.verifyRequest(headers, 'POST', c.req.path, body);
+    if (!authResult) {
+      return c.json({ error: 'Unauthorized', message: 'Service authentication failed' }, 401);
+    }
+  } else {
+    // Fall back to admin auth check via Bearer token
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return c.json({ error: 'Unauthorized', message: 'Service or admin authentication required' }, 401);
+    }
+  }
 
   if (!body.id) {
     return c.json({ error: 'InvalidRequest', message: 'Missing id' }, 400);
@@ -202,78 +260,84 @@ registryRouter.post('/io.exprsn.registry.update', async (c) => {
 
 /**
  * POST io.exprsn.registry.remove
- * Remove a registered service
+ * Remove a registered service (admin only)
  */
-registryRouter.post('/io.exprsn.registry.remove', async (c) => {
-  // TODO: Add admin auth check
+registryRouter.post(
+  '/io.exprsn.registry.remove',
+  adminAuthMiddleware,
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_EDIT),
+  async (c) => {
+    const body = await c.req.json<{ id: string }>();
 
-  const body = await c.req.json<{ id: string }>();
+    if (!body.id) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing id' }, 400);
+    }
 
-  if (!body.id) {
-    return c.json({ error: 'InvalidRequest', message: 'Missing id' }, 400);
+    try {
+      const serviceRegistry = getServiceRegistry();
+      await serviceRegistry.remove(body.id);
+
+      return c.json({ success: true });
+    } catch (error) {
+      console.error('Service removal error:', error);
+      return c.json({ error: 'InternalError', message: 'Failed to remove service' }, 500);
+    }
   }
-
-  try {
-    const serviceRegistry = getServiceRegistry();
-    await serviceRegistry.remove(body.id);
-
-    return c.json({ success: true });
-  } catch (error) {
-    console.error('Service removal error:', error);
-    return c.json({ error: 'InternalError', message: 'Failed to remove service' }, 500);
-  }
-});
+);
 
 /**
  * POST io.exprsn.registry.healthCheck
- * Trigger health check for a service or all services
+ * Trigger health check for a service or all services (admin only)
  */
-registryRouter.post('/io.exprsn.registry.healthCheck', async (c) => {
-  // TODO: Add admin auth check
+registryRouter.post(
+  '/io.exprsn.registry.healthCheck',
+  adminAuthMiddleware,
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_VIEW),
+  async (c) => {
+    const body = await c.req.json<{ id?: string; all?: boolean }>();
 
-  const body = await c.req.json<{ id?: string; all?: boolean }>();
+    try {
+      const serviceRegistry = getServiceRegistry();
 
-  try {
-    const serviceRegistry = getServiceRegistry();
+      if (body.all) {
+        const results = await serviceRegistry.healthCheckAll();
 
-    if (body.all) {
-      const results = await serviceRegistry.healthCheckAll();
+        const summary: Record<string, { healthy: boolean; latencyMs: number; error?: string }> = {};
+        for (const [id, result] of results) {
+          summary[id] = {
+            healthy: result.healthy,
+            latencyMs: result.latencyMs,
+            error: result.error,
+          };
+        }
 
-      const summary: Record<string, { healthy: boolean; latencyMs: number; error?: string }> = {};
-      for (const [id, result] of results) {
-        summary[id] = {
-          healthy: result.healthy,
-          latencyMs: result.latencyMs,
-          error: result.error,
-        };
+        return c.json({ results: summary });
       }
 
-      return c.json({ results: summary });
+      if (!body.id) {
+        return c.json({ error: 'InvalidRequest', message: 'Missing id or all flag' }, 400);
+      }
+
+      const service = await serviceRegistry.get(body.id);
+      if (!service) {
+        return c.json({ error: 'NotFound', message: 'Service not found' }, 404);
+      }
+
+      const result = await serviceRegistry.healthCheck(service);
+
+      return c.json({
+        id: body.id,
+        healthy: result.healthy,
+        latencyMs: result.latencyMs,
+        error: result.error,
+        version: result.version,
+      });
+    } catch (error) {
+      console.error('Health check error:', error);
+      return c.json({ error: 'InternalError', message: 'Failed to perform health check' }, 500);
     }
-
-    if (!body.id) {
-      return c.json({ error: 'InvalidRequest', message: 'Missing id or all flag' }, 400);
-    }
-
-    const service = await serviceRegistry.get(body.id);
-    if (!service) {
-      return c.json({ error: 'NotFound', message: 'Service not found' }, 404);
-    }
-
-    const result = await serviceRegistry.healthCheck(service);
-
-    return c.json({
-      id: body.id,
-      healthy: result.healthy,
-      latencyMs: result.latencyMs,
-      error: result.error,
-      version: result.version,
-    });
-  } catch (error) {
-    console.error('Health check error:', error);
-    return c.json({ error: 'InternalError', message: 'Failed to perform health check' }, 500);
   }
-});
+);
 
 /**
  * GET io.exprsn.registry.getRelays

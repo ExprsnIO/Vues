@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import { getIdentityService } from '../services/identity/index.js';
+import { adminAuthMiddleware, requirePermission, ADMIN_PERMISSIONS } from '../auth/middleware.js';
 
 const identityRouter = new Hono();
 
@@ -101,46 +102,54 @@ identityRouter.get('/io.exprsn.identity.getDidDocument', async (c) => {
  * POST io.exprsn.identity.invalidateCache
  * Invalidate cached DID resolution (admin only)
  */
-identityRouter.post('/io.exprsn.identity.invalidateCache', async (c) => {
-  // TODO: Add admin auth check
-  const body = await c.req.json<{ did?: string; all?: boolean }>();
+identityRouter.post(
+  '/io.exprsn.identity.invalidateCache',
+  adminAuthMiddleware,
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_EDIT),
+  async (c) => {
+    const body = await c.req.json<{ did?: string; all?: boolean }>();
 
-  try {
-    const identityService = getIdentityService();
+    try {
+      const identityService = getIdentityService();
 
-    if (body.all) {
-      await identityService.clearCache();
-      return c.json({ success: true, message: 'All cache cleared' });
+      if (body.all) {
+        await identityService.clearCache();
+        return c.json({ success: true, message: 'All cache cleared' });
+      }
+
+      if (!body.did) {
+        return c.json({ error: 'InvalidRequest', message: 'Missing did parameter' }, 400);
+      }
+
+      await identityService.invalidate(body.did);
+      return c.json({ success: true, did: body.did });
+    } catch (error) {
+      console.error('Cache invalidation error:', error);
+      return c.json({ error: 'InternalError', message: 'Failed to invalidate cache' }, 500);
     }
-
-    if (!body.did) {
-      return c.json({ error: 'InvalidRequest', message: 'Missing did parameter' }, 400);
-    }
-
-    await identityService.invalidate(body.did);
-    return c.json({ success: true, did: body.did });
-  } catch (error) {
-    console.error('Cache invalidation error:', error);
-    return c.json({ error: 'InternalError', message: 'Failed to invalidate cache' }, 500);
   }
-});
+);
 
 /**
  * GET io.exprsn.identity.getCacheStats
  * Get identity cache statistics (admin only)
  */
-identityRouter.get('/io.exprsn.identity.getCacheStats', async (c) => {
-  // TODO: Add admin auth check
-  try {
-    const identityService = getIdentityService();
-    const stats = await identityService.getStats();
+identityRouter.get(
+  '/io.exprsn.identity.getCacheStats',
+  adminAuthMiddleware,
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_VIEW),
+  async (c) => {
+    try {
+      const identityService = getIdentityService();
+      const stats = await identityService.getStats();
 
-    return c.json(stats);
-  } catch (error) {
-    console.error('Cache stats error:', error);
-    return c.json({ error: 'InternalError', message: 'Failed to get cache stats' }, 500);
+      return c.json(stats);
+    } catch (error) {
+      console.error('Cache stats error:', error);
+      return c.json({ error: 'InternalError', message: 'Failed to get cache stats' }, 500);
+    }
   }
-});
+);
 
 export { identityRouter };
 export default identityRouter;

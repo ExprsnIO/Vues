@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
-import { authMiddleware } from '../auth/middleware.js';
+import { authMiddleware, adminAuthMiddleware, requirePermission, ADMIN_PERMISSIONS } from '../auth/middleware.js';
 import { certificateManager } from '../services/ca/index.js';
 import type { CertificateType } from '@exprsn/shared/types';
 
@@ -16,43 +16,40 @@ export const caRoutes = new Hono<AuthContext>();
 // Root CA Management (Admin only)
 // ============================================
 
-// Initialize or get root CA
-caRoutes.post('/io.exprsn.ca.initializeRoot', authMiddleware, async (c) => {
-  const userDid = c.get('did');
-  if (!userDid) {
-    throw new HTTPException(401, { message: 'Authentication required' });
+// Initialize or get root CA (super admin only)
+caRoutes.post(
+  '/io.exprsn.ca.initializeRoot',
+  adminAuthMiddleware,
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_EDIT),
+  async (c) => {
+    const body = await c.req.json<{
+      commonName?: string;
+      organization?: string;
+      country?: string;
+      validityDays?: number;
+    }>();
+
+    try {
+      const result = await certificateManager.ensureRootCA({
+        commonName: body.commonName,
+        organization: body.organization,
+        country: body.country,
+        validityDays: body.validityDays,
+      });
+
+      return c.json({
+        id: result.id,
+        certificate: result.certificate,
+        serialNumber: result.serialNumber,
+        fingerprint: result.fingerprint,
+      });
+    } catch (error) {
+      throw new HTTPException(500, {
+        message: error instanceof Error ? error.message : 'Failed to initialize root CA',
+      });
+    }
   }
-
-  // TODO: Add admin check here
-  // For now, allow any authenticated user in development
-
-  const body = await c.req.json<{
-    commonName?: string;
-    organization?: string;
-    country?: string;
-    validityDays?: number;
-  }>();
-
-  try {
-    const result = await certificateManager.ensureRootCA({
-      commonName: body.commonName,
-      organization: body.organization,
-      country: body.country,
-      validityDays: body.validityDays,
-    });
-
-    return c.json({
-      id: result.id,
-      certificate: result.certificate,
-      serialNumber: result.serialNumber,
-      fingerprint: result.fingerprint,
-    });
-  } catch (error) {
-    throw new HTTPException(500, {
-      message: error instanceof Error ? error.message : 'Failed to initialize root CA',
-    });
-  }
-});
+);
 
 // Get root CA certificate (public)
 caRoutes.get('/io.exprsn.ca.getRootCertificate', async (c) => {
@@ -75,46 +72,46 @@ caRoutes.get('/io.exprsn.ca.getRootCertificate', async (c) => {
 // Intermediate CA Management
 // ============================================
 
-// Create intermediate CA
-caRoutes.post('/io.exprsn.ca.createIntermediate', authMiddleware, async (c) => {
-  const userDid = c.get('did');
-  if (!userDid) {
-    throw new HTTPException(401, { message: 'Authentication required' });
+// Create intermediate CA (admin only)
+caRoutes.post(
+  '/io.exprsn.ca.createIntermediate',
+  adminAuthMiddleware,
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_EDIT),
+  async (c) => {
+    const body = await c.req.json<{
+      commonName: string;
+      organization?: string;
+      organizationalUnit?: string;
+      validityDays?: number;
+      pathLen?: number;
+    }>();
+
+    if (!body.commonName) {
+      throw new HTTPException(400, { message: 'Common name required' });
+    }
+
+    try {
+      const result = await certificateManager.createIntermediateCA({
+        commonName: body.commonName,
+        organization: body.organization,
+        organizationalUnit: body.organizationalUnit,
+        validityDays: body.validityDays,
+        pathLen: body.pathLen,
+      });
+
+      return c.json({
+        id: result.id,
+        certificate: result.certificate,
+        serialNumber: result.serialNumber,
+        fingerprint: result.fingerprint,
+      });
+    } catch (error) {
+      throw new HTTPException(500, {
+        message: error instanceof Error ? error.message : 'Failed to create intermediate CA',
+      });
+    }
   }
-
-  const body = await c.req.json<{
-    commonName: string;
-    organization?: string;
-    organizationalUnit?: string;
-    validityDays?: number;
-    pathLen?: number;
-  }>();
-
-  if (!body.commonName) {
-    throw new HTTPException(400, { message: 'Common name required' });
-  }
-
-  try {
-    const result = await certificateManager.createIntermediateCA({
-      commonName: body.commonName,
-      organization: body.organization,
-      organizationalUnit: body.organizationalUnit,
-      validityDays: body.validityDays,
-      pathLen: body.pathLen,
-    });
-
-    return c.json({
-      id: result.id,
-      certificate: result.certificate,
-      serialNumber: result.serialNumber,
-      fingerprint: result.fingerprint,
-    });
-  } catch (error) {
-    throw new HTTPException(500, {
-      message: error instanceof Error ? error.message : 'Failed to create intermediate CA',
-    });
-  }
-});
+);
 
 // ============================================
 // Entity Certificate Management
@@ -394,72 +391,70 @@ caRoutes.get('/io.exprsn.ca.getCRL', async (c) => {
   });
 });
 
-// Generate new CRL (admin)
-caRoutes.post('/io.exprsn.ca.generateCRL', authMiddleware, async (c) => {
-  const userDid = c.get('did');
-  if (!userDid) {
-    throw new HTTPException(401, { message: 'Authentication required' });
+// Generate new CRL (admin only)
+caRoutes.post(
+  '/io.exprsn.ca.generateCRL',
+  adminAuthMiddleware,
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_EDIT),
+  async (c) => {
+    try {
+      const result = await certificateManager.generateCRL();
+
+      return c.json({
+        id: result.id,
+        crl: result.crl,
+      });
+    } catch (error) {
+      throw new HTTPException(500, {
+        message: error instanceof Error ? error.message : 'Failed to generate CRL',
+      });
+    }
   }
-
-  // TODO: Add admin check
-
-  try {
-    const result = await certificateManager.generateCRL();
-
-    return c.json({
-      id: result.id,
-      crl: result.crl,
-    });
-  } catch (error) {
-    throw new HTTPException(500, {
-      message: error instanceof Error ? error.message : 'Failed to generate CRL',
-    });
-  }
-});
+);
 
 // ============================================
 // Service Certificate Endpoints
 // ============================================
 
-// Issue service certificate (for inter-service auth)
-caRoutes.post('/io.exprsn.ca.issueServiceCertificate', authMiddleware, async (c) => {
-  const userDid = c.get('did');
-  if (!userDid) {
-    throw new HTTPException(401, { message: 'Authentication required' });
+// Issue service certificate (for inter-service auth, admin only)
+caRoutes.post(
+  '/io.exprsn.ca.issueServiceCertificate',
+  adminAuthMiddleware,
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_EDIT),
+  async (c) => {
+    const body = await c.req.json<{
+      serviceId: string;
+      serviceName: string;
+      subjectAltNames?: string[];
+      validityDays?: number;
+    }>();
+
+    if (!body.serviceId || !body.serviceName) {
+      throw new HTTPException(400, { message: 'Service ID and name required' });
+    }
+
+    try {
+      const result = await certificateManager.issueEntityCertificate({
+        commonName: body.serviceName,
+        serviceId: body.serviceId,
+        type: 'server',
+        subjectAltNames: body.subjectAltNames || [`DNS:${body.serviceId}.internal`],
+        validityDays: body.validityDays || 365,
+      });
+
+      return c.json({
+        id: result.id,
+        certificate: result.certificate,
+        privateKey: result.privateKey,
+        serialNumber: result.serialNumber,
+        fingerprint: result.fingerprint,
+      });
+    } catch (error) {
+      throw new HTTPException(500, {
+        message: error instanceof Error ? error.message : 'Failed to issue service certificate',
+      });
+    }
   }
-
-  const body = await c.req.json<{
-    serviceId: string;
-    serviceName: string;
-    subjectAltNames?: string[];
-    validityDays?: number;
-  }>();
-
-  if (!body.serviceId || !body.serviceName) {
-    throw new HTTPException(400, { message: 'Service ID and name required' });
-  }
-
-  try {
-    const result = await certificateManager.issueEntityCertificate({
-      commonName: body.serviceName,
-      serviceId: body.serviceId,
-      type: 'server',
-      subjectAltNames: body.subjectAltNames || [`DNS:${body.serviceId}.internal`],
-      validityDays: body.validityDays || 365,
-    });
-
-    return c.json({
-      id: result.id,
-      certificate: result.certificate,
-      privateKey: result.privateKey,
-      serialNumber: result.serialNumber,
-      fingerprint: result.fingerprint,
-    });
-  } catch (error) {
-    throw new HTTPException(500, {
-      message: error instanceof Error ? error.message : 'Failed to issue service certificate',
-    });
-  }
-});
+);
 
 export default caRoutes;
