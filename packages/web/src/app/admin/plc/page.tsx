@@ -210,6 +210,31 @@ function IdentitiesTab() {
   );
 }
 
+interface DetailedIdentity extends PlcIdentity {
+  tombstoned?: boolean;
+  operationCount?: number;
+  latestOperationCid?: string;
+}
+
+interface PlcOperation {
+  cid: string;
+  operation: {
+    type: string;
+    prev: string | null;
+    [key: string]: unknown;
+  };
+  createdAt: string;
+  nullified: boolean;
+  prev?: {
+    cid: string;
+    createdAt: string;
+  } | null;
+  next?: {
+    cid: string;
+    createdAt: string;
+  } | null;
+}
+
 function IdentityDetailModal({
   identity,
   onClose,
@@ -217,97 +242,362 @@ function IdentityDetailModal({
   identity: PlcIdentity;
   onClose: () => void;
 }) {
-  const { data: operationsData } = useQuery({
-    queryKey: ['admin', 'plc', 'operations', identity.did],
+  const queryClient = useQueryClient();
+  const [selectedOp, setSelectedOp] = useState<PlcOperation | null>(null);
+  const [activeSubTab, setActiveSubTab] = useState<'overview' | 'operations'>('overview');
+
+  // Get detailed identity info
+  const { data: detailedData } = useQuery({
+    queryKey: ['admin', 'plc', 'identity', identity.did],
     queryFn: async () => {
-      const response = await fetch(`/api/plc/${identity.did}/log`);
+      const response = await fetch(
+        `/api/xrpc/io.exprsn.admin.plc.getIdentity?did=${encodeURIComponent(identity.did)}`,
+        { headers: { 'X-Dev-Admin': 'true' } }
+      );
       return response.json();
     },
   });
 
-  const operations = operationsData?.operations || [];
+  // Get operations list
+  const { data: operationsData, isLoading: opsLoading } = useQuery({
+    queryKey: ['admin', 'plc', 'operations', identity.did],
+    queryFn: async () => {
+      const response = await fetch(
+        `/api/xrpc/io.exprsn.admin.plc.listOperations?did=${encodeURIComponent(identity.did)}&limit=50`,
+        { headers: { 'X-Dev-Admin': 'true' } }
+      );
+      return response.json();
+    },
+  });
+
+  // Tombstone mutation
+  const tombstoneMutation = useMutation({
+    mutationFn: async () => {
+      const response = await fetch('/api/xrpc/io.exprsn.admin.plc.tombstoneIdentity', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Dev-Admin': 'true' },
+        body: JSON.stringify({ did: identity.did, reason: 'Admin action' }),
+      });
+      if (!response.ok) throw new Error('Failed to tombstone identity');
+      return response.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'plc'] });
+      toast.success('Identity tombstoned');
+    },
+    onError: () => toast.error('Failed to tombstone identity'),
+  });
+
+  // Reactivate mutation
+  const reactivateMutation = useMutation({
+    mutationFn: async () => {
+      const response = await fetch('/api/xrpc/io.exprsn.admin.plc.reactivateIdentity', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Dev-Admin': 'true' },
+        body: JSON.stringify({ did: identity.did }),
+      });
+      if (!response.ok) throw new Error('Failed to reactivate identity');
+      return response.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'plc'] });
+      toast.success('Identity reactivated');
+    },
+    onError: () => toast.error('Failed to reactivate identity'),
+  });
+
+  const detailed: DetailedIdentity = detailedData?.identity || identity;
+  const operations: PlcOperation[] = operationsData?.operations || [];
+  const isTombstoned = detailed.tombstoned;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative bg-background border border-border rounded-2xl p-6 w-full max-w-2xl max-h-[80vh] overflow-auto">
-        <h2 className="text-xl font-bold text-text-primary mb-4">Identity Details</h2>
-
-        <div className="space-y-4">
+      <div className="relative bg-background border border-border rounded-2xl p-6 w-full max-w-3xl max-h-[85vh] overflow-auto">
+        <div className="flex items-start justify-between mb-4">
           <div>
-            <label className="text-sm text-text-muted">DID</label>
-            <p className="font-mono text-sm text-text-primary break-all">{identity.did}</p>
+            <h2 className="text-xl font-bold text-text-primary">Identity Details</h2>
+            {isTombstoned && (
+              <span className="inline-flex items-center gap-1 mt-1 px-2 py-0.5 text-xs bg-red-500/10 text-red-500 rounded-full">
+                <TombstoneIcon className="w-3 h-3" /> Tombstoned
+              </span>
+            )}
           </div>
+          <button onClick={onClose} className="text-text-muted hover:text-text-primary">
+            <CloseIcon className="w-5 h-5" />
+          </button>
+        </div>
 
-          {identity.handle && (
+        {/* Sub-tabs */}
+        <div className="flex gap-2 mb-4 border-b border-border pb-px">
+          <button
+            onClick={() => setActiveSubTab('overview')}
+            className={`px-4 py-2 text-sm font-medium transition-colors relative ${
+              activeSubTab === 'overview' ? 'text-accent' : 'text-text-muted hover:text-text-primary'
+            }`}
+          >
+            Overview
+            {activeSubTab === 'overview' && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-accent" />}
+          </button>
+          <button
+            onClick={() => setActiveSubTab('operations')}
+            className={`px-4 py-2 text-sm font-medium transition-colors relative ${
+              activeSubTab === 'operations' ? 'text-accent' : 'text-text-muted hover:text-text-primary'
+            }`}
+          >
+            Operations ({detailed.operationCount || operations.length})
+            {activeSubTab === 'operations' && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-accent" />}
+          </button>
+        </div>
+
+        {activeSubTab === 'overview' && (
+          <div className="space-y-4">
             <div>
-              <label className="text-sm text-text-muted">Handle</label>
-              <p className="text-accent">@{identity.handle}</p>
+              <label className="text-sm text-text-muted">DID</label>
+              <p className="font-mono text-sm text-text-primary break-all">{identity.did}</p>
             </div>
-          )}
 
-          {identity.pdsEndpoint && (
+            {identity.handle && (
+              <div>
+                <label className="text-sm text-text-muted">Handle</label>
+                <p className="text-accent">@{identity.handle}</p>
+              </div>
+            )}
+
+            {identity.pdsEndpoint && (
+              <div>
+                <label className="text-sm text-text-muted">PDS Endpoint</label>
+                <p className="text-sm text-text-primary">{identity.pdsEndpoint}</p>
+              </div>
+            )}
+
+            {identity.signingKey && (
+              <div>
+                <label className="text-sm text-text-muted">Signing Key</label>
+                <p className="font-mono text-xs text-text-secondary break-all">{identity.signingKey}</p>
+              </div>
+            )}
+
             <div>
-              <label className="text-sm text-text-muted">PDS Endpoint</label>
-              <p className="text-sm text-text-primary">{identity.pdsEndpoint}</p>
+              <label className="text-sm text-text-muted">Rotation Keys</label>
+              <div className="space-y-1 mt-1">
+                {identity.rotationKeys.map((key, i) => (
+                  <p key={i} className="font-mono text-xs text-text-secondary break-all">
+                    {i + 1}. {key}
+                  </p>
+                ))}
+              </div>
             </div>
-          )}
 
-          <div>
-            <label className="text-sm text-text-muted">Rotation Keys</label>
-            <div className="space-y-1 mt-1">
-              {identity.rotationKeys.map((key, i) => (
-                <p key={i} className="font-mono text-xs text-text-secondary break-all">
-                  {key}
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="text-sm text-text-muted">Created</label>
+                <p className="text-sm text-text-primary">
+                  {new Date(identity.createdAt).toLocaleString()}
                 </p>
-              ))}
+              </div>
+              <div>
+                <label className="text-sm text-text-muted">Updated</label>
+                <p className="text-sm text-text-primary">
+                  {new Date(identity.updatedAt).toLocaleString()}
+                </p>
+              </div>
             </div>
-          </div>
 
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="text-sm text-text-muted">Created</label>
-              <p className="text-sm text-text-primary">
-                {new Date(identity.createdAt).toLocaleString()}
-              </p>
-            </div>
-            <div>
-              <label className="text-sm text-text-muted">Updated</label>
-              <p className="text-sm text-text-primary">
-                {new Date(identity.updatedAt).toLocaleString()}
-              </p>
-            </div>
+            {detailed.latestOperationCid && (
+              <div>
+                <label className="text-sm text-text-muted">Latest Operation CID</label>
+                <p className="font-mono text-xs text-text-secondary break-all">{detailed.latestOperationCid}</p>
+              </div>
+            )}
           </div>
+        )}
 
-          {/* Operations Log */}
-          <div>
-            <label className="text-sm text-text-muted mb-2 block">Operations Log</label>
-            <div className="bg-surface border border-border rounded-lg max-h-48 overflow-auto">
-              {operations.length === 0 ? (
-                <p className="p-4 text-sm text-text-muted text-center">No operations</p>
-              ) : (
-                <div className="divide-y divide-border">
-                  {operations.map((op: any, i: number) => (
-                    <div key={i} className="p-3 text-xs">
-                      <p className="font-mono text-text-muted">{op.cid}</p>
-                      <p className="text-text-secondary mt-1">
-                        {op.operation?.type || 'Unknown operation'}
-                      </p>
+        {activeSubTab === 'operations' && (
+          <div className="space-y-2">
+            {opsLoading ? (
+              <div className="p-8 text-center">
+                <div className="w-8 h-8 border-2 border-accent border-t-transparent rounded-full animate-spin mx-auto" />
+              </div>
+            ) : operations.length === 0 ? (
+              <p className="p-4 text-sm text-text-muted text-center">No operations</p>
+            ) : (
+              <div className="bg-surface border border-border rounded-lg overflow-hidden">
+                <div className="divide-y divide-border max-h-[400px] overflow-auto">
+                  {operations.map((op, i) => (
+                    <div
+                      key={op.cid}
+                      className={`p-3 hover:bg-surface-hover/50 cursor-pointer transition-colors ${
+                        op.nullified ? 'opacity-50' : ''
+                      }`}
+                      onClick={() => setSelectedOp(op)}
+                    >
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-accent/10 text-accent">
+                            {op.operation.type || 'operation'}
+                          </span>
+                          {op.nullified && (
+                            <span className="text-xs px-2 py-0.5 rounded-full bg-red-500/10 text-red-400">
+                              nullified
+                            </span>
+                          )}
+                          {i === 0 && (
+                            <span className="text-xs px-2 py-0.5 rounded-full bg-green-500/10 text-green-400">
+                              latest
+                            </span>
+                          )}
+                        </div>
+                        <span className="text-xs text-text-muted">
+                          {new Date(op.createdAt).toLocaleString()}
+                        </span>
+                      </div>
+                      <p className="font-mono text-xs text-text-muted mt-1 truncate">{op.cid}</p>
                     </div>
                   ))}
                 </div>
-              )}
-            </div>
+              </div>
+            )}
           </div>
-        </div>
+        )}
 
-        <div className="flex justify-end mt-6">
+        {/* Action Buttons */}
+        <div className="flex items-center justify-between mt-6 pt-4 border-t border-border">
+          <div className="flex gap-2">
+            {isTombstoned ? (
+              <button
+                onClick={() => {
+                  if (confirm('Are you sure you want to reactivate this identity?')) {
+                    reactivateMutation.mutate();
+                  }
+                }}
+                disabled={reactivateMutation.isPending}
+                className="flex items-center gap-2 px-4 py-2 bg-green-500/10 text-green-500 hover:bg-green-500/20 rounded-lg transition-colors disabled:opacity-50"
+              >
+                <RefreshIcon className="w-4 h-4" />
+                {reactivateMutation.isPending ? 'Reactivating...' : 'Reactivate'}
+              </button>
+            ) : (
+              <button
+                onClick={() => {
+                  if (confirm('Are you sure you want to tombstone this identity? This will mark it as deleted.')) {
+                    tombstoneMutation.mutate();
+                  }
+                }}
+                disabled={tombstoneMutation.isPending}
+                className="flex items-center gap-2 px-4 py-2 bg-red-500/10 text-red-500 hover:bg-red-500/20 rounded-lg transition-colors disabled:opacity-50"
+              >
+                <TombstoneIcon className="w-4 h-4" />
+                {tombstoneMutation.isPending ? 'Tombstoning...' : 'Tombstone'}
+              </button>
+            )}
+          </div>
           <button
             onClick={onClose}
             className="px-4 py-2 bg-surface-hover hover:bg-border text-text-primary rounded-lg transition-colors"
           >
             Close
           </button>
+        </div>
+
+        {/* Operation Detail Modal */}
+        {selectedOp && (
+          <OperationDetailModal
+            operation={selectedOp}
+            did={identity.did}
+            onClose={() => setSelectedOp(null)}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function OperationDetailModal({
+  operation,
+  did,
+  onClose,
+}: {
+  operation: PlcOperation;
+  did: string;
+  onClose: () => void;
+}) {
+  // Fetch full operation details with prev/next navigation
+  const { data } = useQuery({
+    queryKey: ['admin', 'plc', 'operation', operation.cid],
+    queryFn: async () => {
+      const response = await fetch(
+        `/api/xrpc/io.exprsn.admin.plc.getOperation?did=${encodeURIComponent(did)}&cid=${encodeURIComponent(operation.cid)}`,
+        { headers: { 'X-Dev-Admin': 'true' } }
+      );
+      return response.json();
+    },
+  });
+
+  const op = data?.operation || operation;
+
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
+      <div className="relative bg-background border border-border rounded-xl p-5 w-full max-w-xl max-h-[70vh] overflow-auto">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-lg font-bold text-text-primary">Operation Details</h3>
+          <button onClick={onClose} className="text-text-muted hover:text-text-primary">
+            <CloseIcon className="w-5 h-5" />
+          </button>
+        </div>
+
+        <div className="space-y-3">
+          <div>
+            <label className="text-xs text-text-muted">CID</label>
+            <p className="font-mono text-xs text-text-primary break-all">{op.cid}</p>
+          </div>
+
+          <div>
+            <label className="text-xs text-text-muted">Type</label>
+            <p className="text-sm text-accent">{op.operation?.type || 'Unknown'}</p>
+          </div>
+
+          <div>
+            <label className="text-xs text-text-muted">Created At</label>
+            <p className="text-sm text-text-primary">{new Date(op.createdAt).toLocaleString()}</p>
+          </div>
+
+          {op.operation?.prev && (
+            <div>
+              <label className="text-xs text-text-muted">Previous CID</label>
+              <p className="font-mono text-xs text-text-secondary break-all">{op.operation.prev}</p>
+            </div>
+          )}
+
+          {op.nullified && (
+            <div className="px-3 py-2 bg-red-500/10 border border-red-500/20 rounded-lg">
+              <p className="text-sm text-red-400">This operation has been nullified</p>
+            </div>
+          )}
+
+          <div>
+            <label className="text-xs text-text-muted mb-1 block">Operation Data</label>
+            <pre className="p-3 bg-surface border border-border rounded-lg text-xs text-text-secondary overflow-auto max-h-48">
+              {JSON.stringify(op.operation, null, 2)}
+            </pre>
+          </div>
+
+          {/* Navigation */}
+          {(op.prev || op.next) && (
+            <div className="flex justify-between pt-2 border-t border-border">
+              {op.prev ? (
+                <button className="text-xs text-accent hover:underline">
+                  ← Previous: {op.prev.cid.slice(0, 16)}...
+                </button>
+              ) : <span />}
+              {op.next && (
+                <button className="text-xs text-accent hover:underline">
+                  Next: {op.next.cid.slice(0, 16)}... →
+                </button>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -811,6 +1101,30 @@ function PlusIcon({ className }: { className?: string }) {
   return (
     <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
       <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+    </svg>
+  );
+}
+
+function CloseIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+    </svg>
+  );
+}
+
+function TombstoneIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M20 12H4M8 8V6a2 2 0 012-2h4a2 2 0 012 2v2M9 16v4M15 16v4" />
+    </svg>
+  );
+}
+
+function RefreshIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
     </svg>
   );
 }

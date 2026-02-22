@@ -42,6 +42,7 @@ import { announcementsRouter } from './routes/announcements.js';
 import { paymentsAdminRouter } from './routes/payments-admin.js';
 import { liveAdminRouter } from './routes/live-admin.js';
 import { moderationAdminRouter } from './routes/moderation-admin.js';
+import { analyticsRoutes } from './routes/analytics.js';
 import { initializeIdentityService } from './services/identity/index.js';
 import { Redis } from 'ioredis';
 import { RelayService, CommitEvent as RelayCommitEvent } from '@exprsn/relay';
@@ -188,6 +189,7 @@ app.route('/xrpc', announcementsRouter);
 app.route('/xrpc', paymentsAdminRouter);
 app.route('/xrpc', liveAdminRouter);
 app.route('/xrpc', moderationAdminRouter);
+app.route('/xrpc', analyticsRoutes); // Creator analytics
 // PLC routes - standard directory at /plc, XRPC routes already have /xrpc prefix
 app.route('/plc', plcRouter); // Standard PLC directory endpoints (did:plc resolution)
 app.route('/', plcRouter); // Mount at root so /xrpc/io.exprsn.plc.* routes work

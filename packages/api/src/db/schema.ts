@@ -1524,6 +1524,108 @@ export const streamViewers = pgTable(
 );
 
 // ============================================
+// Co-Streaming / Guest Features
+// ============================================
+
+// Stream guest invitations - pending or expired invitations
+export const streamGuestInvitations = pgTable(
+  'stream_guest_invitations',
+  {
+    id: text('id').primaryKey(),
+    streamId: text('stream_id')
+      .notNull()
+      .references(() => liveStreams.id, { onDelete: 'cascade' }),
+    inviterDid: text('inviter_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    inviteeDid: text('invitee_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    status: text('status').notNull().default('pending'), // 'pending' | 'accepted' | 'declined' | 'expired' | 'revoked'
+    role: text('role').notNull().default('guest'), // 'guest' | 'co-host'
+    message: text('message'), // Optional invite message
+    expiresAt: timestamp('expires_at').notNull(),
+    respondedAt: timestamp('responded_at'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    streamIdx: index('stream_guest_invitations_stream_idx').on(table.streamId),
+    inviterIdx: index('stream_guest_invitations_inviter_idx').on(table.inviterDid),
+    inviteeIdx: index('stream_guest_invitations_invitee_idx').on(table.inviteeDid),
+    statusIdx: index('stream_guest_invitations_status_idx').on(table.status),
+    expiresIdx: index('stream_guest_invitations_expires_idx').on(table.expiresAt),
+    uniqueInvite: uniqueIndex('stream_guest_invitations_unique_idx').on(
+      table.streamId,
+      table.inviteeDid,
+      table.status
+    ),
+  })
+);
+
+// Stream guests - active co-streamers/guests in a stream
+export const streamGuests = pgTable(
+  'stream_guests',
+  {
+    id: text('id').primaryKey(),
+    streamId: text('stream_id')
+      .notNull()
+      .references(() => liveStreams.id, { onDelete: 'cascade' }),
+    userDid: text('user_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    invitationId: text('invitation_id')
+      .references(() => streamGuestInvitations.id, { onDelete: 'set null' }),
+    role: text('role').notNull().default('guest'), // 'guest' | 'co-host'
+    status: text('status').notNull().default('active'), // 'active' | 'disconnected' | 'removed'
+    audioEnabled: boolean('audio_enabled').default(true).notNull(),
+    videoEnabled: boolean('video_enabled').default(true).notNull(),
+    screenShareEnabled: boolean('screen_share_enabled').default(false).notNull(),
+    position: integer('position').default(0).notNull(), // Display order
+    joinedAt: timestamp('joined_at').defaultNow().notNull(),
+    leftAt: timestamp('left_at'),
+    // WebRTC/SFU connection info
+    connectionId: text('connection_id'),
+    peerId: text('peer_id'),
+    metadata: jsonb('metadata').$type<Record<string, unknown>>(),
+  },
+  (table) => ({
+    streamIdx: index('stream_guests_stream_idx').on(table.streamId),
+    userIdx: index('stream_guests_user_idx').on(table.userDid),
+    statusIdx: index('stream_guests_status_idx').on(table.status),
+    positionIdx: index('stream_guests_position_idx').on(table.streamId, table.position),
+    uniqueGuest: uniqueIndex('stream_guests_unique_idx').on(table.streamId, table.userDid),
+  })
+);
+
+// Stream guest sessions - track guest connection history
+export const streamGuestSessions = pgTable(
+  'stream_guest_sessions',
+  {
+    id: text('id').primaryKey(),
+    guestId: text('guest_id')
+      .notNull()
+      .references(() => streamGuests.id, { onDelete: 'cascade' }),
+    streamId: text('stream_id')
+      .notNull()
+      .references(() => liveStreams.id, { onDelete: 'cascade' }),
+    userDid: text('user_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    connectionId: text('connection_id').notNull(),
+    duration: integer('duration').default(0).notNull(), // seconds
+    disconnectReason: text('disconnect_reason'), // 'left' | 'kicked' | 'stream_ended' | 'connection_lost'
+    joinedAt: timestamp('joined_at').defaultNow().notNull(),
+    leftAt: timestamp('left_at'),
+  },
+  (table) => ({
+    guestIdx: index('stream_guest_sessions_guest_idx').on(table.guestId),
+    streamIdx: index('stream_guest_sessions_stream_idx').on(table.streamId),
+    userIdx: index('stream_guest_sessions_user_idx').on(table.userDid),
+    joinedIdx: index('stream_guest_sessions_joined_idx').on(table.joinedAt),
+  })
+);
+
+// ============================================
 // Payment Processing Tables
 // ============================================
 
@@ -1826,6 +1928,12 @@ export type StreamBannedUser = typeof streamBannedUsers.$inferSelect;
 export type NewStreamBannedUser = typeof streamBannedUsers.$inferInsert;
 export type StreamViewer = typeof streamViewers.$inferSelect;
 export type NewStreamViewer = typeof streamViewers.$inferInsert;
+export type StreamGuestInvitation = typeof streamGuestInvitations.$inferSelect;
+export type NewStreamGuestInvitation = typeof streamGuestInvitations.$inferInsert;
+export type StreamGuest = typeof streamGuests.$inferSelect;
+export type NewStreamGuest = typeof streamGuests.$inferInsert;
+export type StreamGuestSession = typeof streamGuestSessions.$inferSelect;
+export type NewStreamGuestSession = typeof streamGuestSessions.$inferInsert;
 
 // Payment type exports
 export type PaymentConfig = typeof paymentConfigs.$inferSelect;

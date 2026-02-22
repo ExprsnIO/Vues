@@ -194,6 +194,12 @@ export class RelayService {
 // Export components
 export { Sequencer, CursorStore, Firehose, Backfill };
 
+// Export external relay client
+export {
+  ExternalRelayClient,
+  RelaySubscriptionManager,
+} from './external-client.js';
+
 // Export types
 export type {
   RelayEvent,
@@ -203,5 +209,13 @@ export type {
   FirehoseConfig,
   BackfillConfig,
 };
+
+export type {
+  ExternalRelayConfig,
+  CommitFrame,
+  HandleFrame,
+  TombstoneFrame,
+  RelayEventType,
+} from './external-client.js';
 
 export default RelayService;

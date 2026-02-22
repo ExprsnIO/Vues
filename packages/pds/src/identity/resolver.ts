@@ -433,6 +433,65 @@ export class DidResolver {
       localCacheHits: 0, // Would need to track this
     };
   }
+
+  /**
+   * Cache a resolved DID (for external cache warming)
+   * Allows IdentityService to populate the cache from database entries
+   */
+  async cacheResolved(did: string, data: ResolvedDid): Promise<void> {
+    await this.setCache(did, data);
+  }
+
+  /**
+   * Check if a DID is cached (without resolving)
+   */
+  async isCached(did: string): Promise<boolean> {
+    // Check local cache
+    const localEntry = this.localCache.get(did);
+    if (localEntry && localEntry.expiresAt > Date.now()) {
+      return true;
+    }
+
+    // Check Redis cache
+    if (this.redis) {
+      try {
+        const exists = await this.redis.exists(this.CACHE_PREFIX + did);
+        return exists === 1;
+      } catch {
+        return false;
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * Get cache TTL remaining for a DID (in milliseconds)
+   * Returns -1 if not cached, -2 if no TTL set
+   */
+  async getCacheTtl(did: string): Promise<number> {
+    // Check local cache first
+    const localEntry = this.localCache.get(did);
+    if (localEntry) {
+      const remaining = localEntry.expiresAt - Date.now();
+      return remaining > 0 ? remaining : -1;
+    }
+
+    // Check Redis
+    if (this.redis) {
+      try {
+        const ttl = await this.redis.ttl(this.CACHE_PREFIX + did);
+        if (ttl > 0) {
+          return ttl * 1000; // Convert to ms
+        }
+        return ttl; // -1 or -2
+      } catch {
+        return -1;
+      }
+    }
+
+    return -1;
+  }
 }
 
 /**

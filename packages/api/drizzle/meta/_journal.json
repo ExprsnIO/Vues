@@ -78,6 +78,13 @@
       "when": 1772000000000,
       "tag": "0010_plc_directory",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1771768649677,
+      "tag": "0011_classy_virginia_dare",
+      "breakpoints": true
     }
   ]
 }
