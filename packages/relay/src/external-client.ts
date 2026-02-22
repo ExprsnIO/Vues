@@ -195,7 +195,7 @@ export class ExternalRelayClient extends EventEmitter {
         this.handleMessage(data);
       });
 
-      this.ws.on('close', (code, reason) => {
+      this.ws.on('close', (code: number, reason: Buffer) => {
         const reasonStr = reason?.toString() || 'Unknown';
         console.log(`[ExternalRelayClient] Disconnected: ${code} - ${reasonStr}`);
         this.ws = null;
@@ -207,7 +207,7 @@ export class ExternalRelayClient extends EventEmitter {
         }
       });
 
-      this.ws.on('error', (error) => {
+      this.ws.on('error', (error: Error) => {
         console.error(`[ExternalRelayClient] WebSocket error:`, error);
         this.emit('error', { name: 'WebSocketError', message: error.message });
         reject(error);
