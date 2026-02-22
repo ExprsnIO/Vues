@@ -37,6 +37,10 @@ import { identityRouter } from './routes/identity.js';
 import { registryRouter, initializeServiceRegistry } from './routes/registry.js';
 import { federationRouter } from './routes/federation.js';
 import { plcRouter } from './routes/plc.js';
+import { announcementsRouter } from './routes/announcements.js';
+import { paymentsAdminRouter } from './routes/payments-admin.js';
+import { liveAdminRouter } from './routes/live-admin.js';
+import { moderationAdminRouter } from './routes/moderation-admin.js';
 import { initializeIdentityService } from './services/identity/index.js';
 import { Redis } from 'ioredis';
 import { RelayService, CommitEvent as RelayCommitEvent } from '@exprsn/relay';
@@ -176,10 +180,15 @@ app.route('/xrpc', configRoutes);
 app.route('/xrpc', identityRouter);
 app.route('/xrpc', registryRouter);
 app.route('/xrpc', federationRouter);
-app.route('/xrpc', plcRouter); // PLC XRPC endpoints
-app.route('/plc', plcRouter); // Standard PLC directory endpoints (did:plc resolution)
-// Admin routes last (has wildcard middleware)
+// Admin routes (must be before PLC to avoid /:did catch-all)
 app.route('/xrpc', adminRouter);
+app.route('/xrpc', announcementsRouter);
+app.route('/xrpc', paymentsAdminRouter);
+app.route('/xrpc', liveAdminRouter);
+app.route('/xrpc', moderationAdminRouter);
+// PLC routes - standard directory at /plc, XRPC routes already have /xrpc prefix
+app.route('/plc', plcRouter); // Standard PLC directory endpoints (did:plc resolution)
+app.route('/', plcRouter); // Mount at root so /xrpc/io.exprsn.plc.* routes work
 app.route('/oauth', oauthRouter);
 
 // PDS will be mounted after relay is initialized in main()

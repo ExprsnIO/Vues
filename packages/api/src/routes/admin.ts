@@ -1753,6 +1753,40 @@ adminRouter.get(
   }
 );
 
+// Get PLC audit log
+adminRouter.get(
+  '/io.exprsn.admin.plc.getAuditLog',
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_VIEW),
+  async (c) => {
+    const did = c.req.query('did');
+    const limit = parseInt(c.req.query('limit') || '100', 10);
+
+    const { plcAuditLog } = await import('../db/schema.js');
+
+    let query = db.select().from(plcAuditLog);
+
+    if (did) {
+      query = query.where(eq(plcAuditLog.did, did)) as typeof query;
+    }
+
+    const entries = await query
+      .orderBy(desc(plcAuditLog.createdAt))
+      .limit(limit);
+
+    return c.json({
+      entries: entries.map((e) => ({
+        id: e.id,
+        did: e.did,
+        action: e.action,
+        operationCid: e.operationCid,
+        ipAddress: e.ipAddress,
+        userAgent: e.userAgent,
+        createdAt: e.createdAt.toISOString(),
+      })),
+    });
+  }
+);
+
 // ============================================
 // Content Limits Configuration
 // ============================================

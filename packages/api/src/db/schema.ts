@@ -2138,6 +2138,303 @@ export type NewServiceRegistryEntry = typeof serviceRegistry.$inferInsert;
 export type FederationSyncStateEntry = typeof federationSyncState.$inferSelect;
 export type NewFederationSyncStateEntry = typeof federationSyncState.$inferInsert;
 
+// ============================================
+// Announcements
+// ============================================
+
+export const announcements = pgTable('announcements', {
+  id: text('id').primaryKey(),
+  title: text('title').notNull(),
+  content: text('content').notNull(),
+  type: text('type').notNull().default('info'), // info, warning, success, maintenance
+  status: text('status').notNull().default('draft'), // draft, active, scheduled, expired
+  targetAudience: text('target_audience').notNull().default('all'), // all, verified, creators, new_users
+  dismissible: boolean('dismissible').notNull().default(true),
+  startsAt: timestamp('starts_at'),
+  endsAt: timestamp('ends_at'),
+  viewCount: integer('view_count').notNull().default(0),
+  dismissCount: integer('dismiss_count').notNull().default(0),
+  createdBy: text('created_by').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+// ============================================
+// Payout Requests (Admin)
+// ============================================
+
+export const payoutRequests = pgTable('payout_requests', {
+  id: text('id').primaryKey(),
+  userDid: text('user_did').notNull(),
+  amount: integer('amount').notNull(), // in cents
+  currency: text('currency').notNull().default('USD'),
+  status: text('status').notNull().default('pending'), // pending, processing, completed, rejected
+  payoutMethod: text('payout_method'), // bank_transfer, paypal
+  payoutDetails: jsonb('payout_details').$type<Record<string, unknown>>(),
+  processedBy: text('processed_by'),
+  processedAt: timestamp('processed_at'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  userDidIdx: index('payout_requests_user_did_idx').on(table.userDid),
+  statusIdx: index('payout_requests_status_idx').on(table.status),
+}));
+
+// ============================================
+// Content Moderation System
+// ============================================
+
+// Moderation Items - content submitted for moderation
+export const moderationItems = pgTable('moderation_items', {
+  id: text('id').primaryKey(),
+  contentType: text('content_type').notNull(), // 'text' | 'image' | 'video' | 'audio' | 'post' | 'comment' | 'message' | 'profile'
+  contentId: text('content_id').notNull(),
+  sourceService: text('source_service').notNull(), // 'timeline' | 'spark' | 'gallery' | 'live' | 'filevault'
+  userId: text('user_id').notNull(),
+  contentText: text('content_text'),
+  contentUrl: text('content_url'),
+  contentMetadata: jsonb('content_metadata').$type<Record<string, unknown>>().default({}),
+  // Risk scores (0-100)
+  riskScore: integer('risk_score').notNull().default(0),
+  riskLevel: text('risk_level').notNull().default('safe'), // 'safe' | 'low' | 'medium' | 'high' | 'critical'
+  toxicityScore: integer('toxicity_score').default(0),
+  nsfwScore: integer('nsfw_score').default(0),
+  spamScore: integer('spam_score').default(0),
+  violenceScore: integer('violence_score').default(0),
+  hateSpeechScore: integer('hate_speech_score').default(0),
+  // AI analysis
+  aiProvider: text('ai_provider'), // 'claude' | 'openai' | 'deepseek' | 'local'
+  aiModel: text('ai_model'),
+  aiResponse: jsonb('ai_response').$type<Record<string, unknown>>(),
+  // Status
+  status: text('status').notNull().default('pending'), // 'pending' | 'approved' | 'rejected' | 'flagged' | 'reviewing' | 'appealed' | 'escalated'
+  action: text('action'), // 'auto_approve' | 'approve' | 'reject' | 'hide' | 'remove' | 'warn' | 'flag' | 'escalate' | 'require_review'
+  requiresReview: boolean('requires_review').default(false),
+  // Review
+  reviewedBy: text('reviewed_by'),
+  reviewedAt: timestamp('reviewed_at'),
+  reviewNotes: text('review_notes'),
+  // Timestamps
+  submittedAt: timestamp('submitted_at').notNull(),
+  processedAt: timestamp('processed_at'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  userIdIdx: index('moderation_items_user_id_idx').on(table.userId),
+  statusIdx: index('moderation_items_status_idx').on(table.status),
+  riskLevelIdx: index('moderation_items_risk_level_idx').on(table.riskLevel),
+  sourceServiceIdx: index('moderation_items_source_service_idx').on(table.sourceService),
+  submittedAtIdx: index('moderation_items_submitted_at_idx').on(table.submittedAt),
+  contentUniqueIdx: uniqueIndex('moderation_items_content_unique_idx').on(table.sourceService, table.contentType, table.contentId),
+}));
+
+// Review Queue - items needing manual review
+export const moderationReviewQueue = pgTable('moderation_review_queue', {
+  id: text('id').primaryKey(),
+  moderationItemId: text('moderation_item_id').notNull().references(() => moderationItems.id, { onDelete: 'cascade' }),
+  priority: integer('priority').default(0),
+  escalated: boolean('escalated').default(false),
+  escalatedReason: text('escalated_reason'),
+  assignedTo: text('assigned_to'),
+  assignedAt: timestamp('assigned_at'),
+  status: text('status').notNull().default('pending'), // 'pending' | 'in_progress' | 'approved' | 'rejected'
+  queuedAt: timestamp('queued_at').notNull(),
+  completedAt: timestamp('completed_at'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  statusIdx: index('moderation_review_queue_status_idx').on(table.status),
+  priorityIdx: index('moderation_review_queue_priority_idx').on(table.priority, table.queuedAt),
+  assignedToIdx: index('moderation_review_queue_assigned_to_idx').on(table.assignedTo),
+  escalatedIdx: index('moderation_review_queue_escalated_idx').on(table.escalated),
+}));
+
+// Moderation Actions Log - log of all AI moderation actions taken
+export const modActionsLog = pgTable('mod_actions_log', {
+  id: text('id').primaryKey(),
+  action: text('action').notNull(),
+  contentType: text('content_type').notNull(),
+  contentId: text('content_id').notNull(),
+  sourceService: text('source_service').notNull(),
+  performedBy: text('performed_by'),
+  isAutomated: boolean('is_automated').default(false),
+  reason: text('reason'),
+  moderationItemId: text('moderation_item_id').references(() => moderationItems.id),
+  reportId: text('report_id'),
+  metadata: jsonb('metadata').$type<Record<string, unknown>>().default({}),
+  performedAt: timestamp('performed_at').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  moderationItemIdIdx: index('mod_actions_log_moderation_item_id_idx').on(table.moderationItemId),
+  performedAtIdx: index('mod_actions_log_performed_at_idx').on(table.performedAt),
+}));
+
+// Moderation Rules - custom auto-moderation rules
+export const moderationRules = pgTable('moderation_rules', {
+  id: text('id').primaryKey(),
+  name: text('name').notNull().unique(),
+  description: text('description'),
+  appliesTo: jsonb('applies_to').$type<string[]>().default([]), // content types
+  sourceServices: jsonb('source_services').$type<string[]>().default([]),
+  conditions: jsonb('conditions').$type<Record<string, unknown>>().default({}),
+  thresholdScore: integer('threshold_score'),
+  action: text('action').notNull(),
+  enabled: boolean('enabled').default(true),
+  priority: integer('priority').default(0),
+  createdBy: text('created_by'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  enabledIdx: index('moderation_rules_enabled_idx').on(table.enabled),
+  priorityIdx: index('moderation_rules_priority_idx').on(table.priority),
+}));
+
+// User Reports - user-submitted content reports
+export const moderationReports = pgTable('moderation_reports', {
+  id: text('id').primaryKey(),
+  contentType: text('content_type').notNull(),
+  contentId: text('content_id').notNull(),
+  sourceService: text('source_service').notNull(),
+  reportedBy: text('reported_by').notNull(),
+  reason: text('reason').notNull(), // 'spam' | 'harassment' | 'hate_speech' | 'violence' | 'nsfw' | 'misinformation' | 'copyright' | 'impersonation' | 'other'
+  details: text('details'),
+  status: text('status').notNull().default('open'), // 'open' | 'investigating' | 'resolved' | 'dismissed' | 'escalated'
+  assignedTo: text('assigned_to'),
+  assignedAt: timestamp('assigned_at'),
+  resolvedBy: text('resolved_by'),
+  resolvedAt: timestamp('resolved_at'),
+  resolutionNotes: text('resolution_notes'),
+  actionTaken: text('action_taken'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  statusIdx: index('moderation_reports_status_idx').on(table.status),
+  reportedByIdx: index('moderation_reports_reported_by_idx').on(table.reportedBy),
+  contentIdx: index('moderation_reports_content_idx').on(table.sourceService, table.contentType, table.contentId),
+}));
+
+// User Actions - sanctions applied to users
+export const moderationUserActions = pgTable('moderation_user_actions', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').notNull(),
+  actionType: text('action_type').notNull(), // 'warn' | 'mute' | 'restrict' | 'suspend' | 'ban'
+  reason: text('reason').notNull(),
+  durationSeconds: integer('duration_seconds'), // null = permanent
+  expiresAt: timestamp('expires_at'),
+  performedBy: text('performed_by').notNull(),
+  relatedContentId: text('related_content_id'),
+  relatedReportId: text('related_report_id'),
+  active: boolean('active').default(true),
+  performedAt: timestamp('performed_at').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  userIdIdx: index('moderation_user_actions_user_id_idx').on(table.userId),
+  actionTypeIdx: index('moderation_user_actions_action_type_idx').on(table.actionType),
+  activeIdx: index('moderation_user_actions_active_idx').on(table.active),
+  expiresAtIdx: index('moderation_user_actions_expires_at_idx').on(table.expiresAt),
+}));
+
+// Appeals - user appeals of moderation decisions
+export const moderationAppeals = pgTable('moderation_appeals', {
+  id: text('id').primaryKey(),
+  moderationItemId: text('moderation_item_id').references(() => moderationItems.id),
+  userActionId: text('user_action_id').references(() => moderationUserActions.id),
+  userId: text('user_id').notNull(),
+  reason: text('reason').notNull(),
+  additionalInfo: text('additional_info'),
+  status: text('status').notNull().default('pending'), // 'pending' | 'reviewing' | 'approved' | 'denied'
+  reviewedBy: text('reviewed_by'),
+  reviewedAt: timestamp('reviewed_at'),
+  reviewNotes: text('review_notes'),
+  decision: text('decision'),
+  submittedAt: timestamp('submitted_at').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  userIdIdx: index('moderation_appeals_user_id_idx').on(table.userId),
+  statusIdx: index('moderation_appeals_status_idx').on(table.status),
+  submittedAtIdx: index('moderation_appeals_submitted_at_idx').on(table.submittedAt),
+}));
+
+// AI Agents - configured AI moderation agents
+export const moderationAiAgents = pgTable('moderation_ai_agents', {
+  id: text('id').primaryKey(),
+  name: text('name').notNull().unique(),
+  description: text('description'),
+  type: text('type').notNull(), // 'text_moderation' | 'image_moderation' | 'spam_detection' | 'hate_speech_detection' | etc.
+  status: text('status').notNull().default('active'), // 'active' | 'inactive' | 'testing' | 'error'
+  provider: text('provider').notNull(), // 'claude' | 'openai' | 'deepseek' | 'local'
+  model: text('model'),
+  promptTemplate: text('prompt_template'),
+  config: jsonb('config').$type<Record<string, unknown>>().default({}),
+  thresholdScores: jsonb('threshold_scores').$type<Record<string, number>>().default({}),
+  appliesTo: jsonb('applies_to').$type<string[]>().default([]),
+  priority: integer('priority').default(0),
+  enabled: boolean('enabled').default(true),
+  autoAction: boolean('auto_action').default(false),
+  // Performance metrics
+  totalExecutions: integer('total_executions').default(0),
+  successfulExecutions: integer('successful_executions').default(0),
+  failedExecutions: integer('failed_executions').default(0),
+  avgExecutionTimeMs: integer('avg_execution_time_ms').default(0),
+  lastExecutionAt: timestamp('last_execution_at'),
+  lastError: text('last_error'),
+  lastErrorAt: timestamp('last_error_at'),
+  createdBy: text('created_by'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  enabledIdx: index('moderation_ai_agents_enabled_idx').on(table.enabled),
+  providerIdx: index('moderation_ai_agents_provider_idx').on(table.provider),
+  statusIdx: index('moderation_ai_agents_status_idx').on(table.status),
+}));
+
+// Agent Executions - log of AI agent runs
+export const moderationAgentExecutions = pgTable('moderation_agent_executions', {
+  id: text('id').primaryKey(),
+  agentId: text('agent_id').notNull().references(() => moderationAiAgents.id),
+  moderationItemId: text('moderation_item_id').references(() => moderationItems.id),
+  success: boolean('success').notNull(),
+  executionTimeMs: integer('execution_time_ms').notNull(),
+  inputData: jsonb('input_data').$type<Record<string, unknown>>(),
+  outputData: jsonb('output_data').$type<Record<string, unknown>>(),
+  errorMessage: text('error_message'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  agentIdIdx: index('moderation_agent_executions_agent_id_idx').on(table.agentId),
+  createdAtIdx: index('moderation_agent_executions_created_at_idx').on(table.createdAt),
+}));
+
+// Banned Words - words/phrases to auto-flag
+export const moderationBannedWords = pgTable('moderation_banned_words', {
+  id: text('id').primaryKey(),
+  word: text('word').notNull(),
+  category: text('category').notNull(), // 'profanity' | 'slur' | 'spam' | 'custom'
+  severity: text('severity').notNull().default('medium'), // 'low' | 'medium' | 'high' | 'critical'
+  action: text('action').notNull().default('flag'), // 'flag' | 'hide' | 'reject'
+  enabled: boolean('enabled').default(true),
+  createdBy: text('created_by'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  wordIdx: uniqueIndex('moderation_banned_words_word_idx').on(table.word),
+  categoryIdx: index('moderation_banned_words_category_idx').on(table.category),
+  enabledIdx: index('moderation_banned_words_enabled_idx').on(table.enabled),
+}));
+
+// Banned Tags - hashtags to auto-flag
+export const moderationBannedTags = pgTable('moderation_banned_tags', {
+  id: text('id').primaryKey(),
+  tag: text('tag').notNull(),
+  reason: text('reason'),
+  action: text('action').notNull().default('flag'), // 'flag' | 'hide' | 'reject'
+  enabled: boolean('enabled').default(true),
+  createdBy: text('created_by'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  tagIdx: uniqueIndex('moderation_banned_tags_tag_idx').on(table.tag),
+  enabledIdx: index('moderation_banned_tags_enabled_idx').on(table.enabled),
+}));
+
 // PLC type exports
 export type PlcOperation = typeof plcOperations.$inferSelect;
 export type NewPlcOperation = typeof plcOperations.$inferInsert;
@@ -2147,3 +2444,36 @@ export type PlcHandleReservation = typeof plcHandleReservations.$inferSelect;
 export type NewPlcHandleReservation = typeof plcHandleReservations.$inferInsert;
 export type PlcAuditLogEntry = typeof plcAuditLog.$inferSelect;
 export type NewPlcAuditLogEntry = typeof plcAuditLog.$inferInsert;
+
+// Announcement type exports
+export type Announcement = typeof announcements.$inferSelect;
+export type NewAnnouncement = typeof announcements.$inferInsert;
+
+// Payout Request type exports
+export type PayoutRequest = typeof payoutRequests.$inferSelect;
+export type NewPayoutRequest = typeof payoutRequests.$inferInsert;
+
+// Moderation type exports
+export type ModerationItem = typeof moderationItems.$inferSelect;
+export type NewModerationItem = typeof moderationItems.$inferInsert;
+export type ModerationReviewQueueItem = typeof moderationReviewQueue.$inferSelect;
+export type NewModerationReviewQueueItem = typeof moderationReviewQueue.$inferInsert;
+export type ModActionLog = typeof modActionsLog.$inferSelect;
+export type NewModActionLog = typeof modActionsLog.$inferInsert;
+export type ModerationRule = typeof moderationRules.$inferSelect;
+export type NewModerationRule = typeof moderationRules.$inferInsert;
+export type ModerationReport = typeof moderationReports.$inferSelect;
+export type NewModerationReport = typeof moderationReports.$inferInsert;
+export type ModerationUserAction = typeof moderationUserActions.$inferSelect;
+export type NewModerationUserAction = typeof moderationUserActions.$inferInsert;
+export type ModerationAppeal = typeof moderationAppeals.$inferSelect;
+export type NewModerationAppeal = typeof moderationAppeals.$inferInsert;
+export type ModerationAiAgent = typeof moderationAiAgents.$inferSelect;
+export type NewModerationAiAgent = typeof moderationAiAgents.$inferInsert;
+export type ModerationAgentExecution = typeof moderationAgentExecutions.$inferSelect;
+export type NewModerationAgentExecution = typeof moderationAgentExecutions.$inferInsert;
+export type ModerationBannedWord = typeof moderationBannedWords.$inferSelect;
+export type NewModerationBannedWord = typeof moderationBannedWords.$inferInsert;
+export type ModerationBannedTag = typeof moderationBannedTags.$inferSelect;
+export type NewModerationBannedTag = typeof moderationBannedTags.$inferInsert;
+
