@@ -23,10 +23,15 @@ pnpm test                             # Run all tests
 pnpm --filter @exprsn/api test        # API tests (Vitest)
 pnpm --filter @exprsn/api test:watch  # Watch mode
 
+# Run a single test file
+pnpm --filter @exprsn/api test routes/auth.test.ts
+
 # Database (API package)
 pnpm db:push                          # Push schema to DB
 pnpm --filter @exprsn/api db:seed     # Seed database
 pnpm --filter @exprsn/api db:studio   # Open Drizzle Studio
+pnpm --filter @exprsn/api seed:community  # Seed community data
+pnpm --filter @exprsn/api seed:admin      # Seed admin user
 
 # Infrastructure
 pnpm docker:up                        # Start Postgres, Redis, OpenSearch, MinIO
@@ -36,6 +41,11 @@ pnpm docker:down                      # Stop all containers
 pnpm lint                             # Lint all packages
 pnpm format                           # Prettier format
 pnpm typecheck                        # TypeScript check
+
+# Workers
+pnpm --filter @exprsn/video-service dev   # Video transcoding worker
+pnpm --filter @exprsn/feed-generator dev  # Feed generation worker
+pnpm --filter @exprsn/prefetch worker     # Timeline prefetch worker
 ```
 
 ## Architecture
@@ -54,6 +64,7 @@ pnpm typecheck                        # TypeScript check
 | `packages/feed-generator` | BullMQ | Trending feeds, Jetstream consumer |
 | `packages/video-service` | FFmpeg, BullMQ | Video transcoding worker |
 | `packages/prefetch` | BullMQ | Timeline prefetch worker |
+| `packages/render-worker` | FFmpeg, BullMQ | Render pipeline worker |
 | `Exprsn/` | SwiftUI | Native iOS app |
 
 ### API Endpoint Patterns
@@ -62,6 +73,31 @@ pnpm typecheck                        # TypeScript check
 - Routes organized by domain in `packages/api/src/routes/`
 - Business logic in `packages/api/src/services/`
 - Auth middleware: `authMiddleware` (required) or `optionalAuthMiddleware`
+
+### API Route Domains
+
+Routes are organized by functional domain in `packages/api/src/routes/`:
+- `auth.ts` - Account creation, sessions, authentication
+- `actor.ts` - User profiles, handles
+- `feed.ts` - Video feeds, timeline
+- `graph.ts` - Social graph (follows, followers)
+- `social.ts` - Likes, reposts, comments
+- `chat.ts` - Real-time messaging
+- `admin.ts` - Admin dashboard APIs
+- `studio.ts` - Video editor, effects, rendering
+- `live.ts` - Live streaming
+- `payments.ts` - Subscriptions, transactions
+
+### Services Layer
+
+Core services in `packages/api/src/services/`:
+- `storage/` - Multi-provider storage (AWS S3, Azure Blob, MinIO, local)
+- `payments/` - Payment gateway factory (Stripe, PayPal, Authorize.net)
+- `moderation/` - AI moderation, workflow engine
+- `federation/` - Service auth, content sync, federated search
+- `identity/` - DID resolution, handle verification
+- `notifications/` - Email, webhooks
+- `studio/` - Editor, effects, publishing, rendering
 
 ### Database
 
@@ -75,7 +111,15 @@ pnpm typecheck                        # TypeScript check
 - Redis: Caching, BullMQ job queues, WebSocket support
 - MinIO/S3: Object storage for media
 - OpenSearch: Search functionality
-- Socket.IO: Real-time chat and collaboration
+- Socket.IO: Real-time chat, editor collaboration, render progress
+- Mailhog: Email testing (localhost:8025)
+
+### WebSocket Namespaces
+
+Initialized in `packages/api/src/index.ts`:
+- `/chat` - Real-time messaging
+- `/editor-collab` - Collaborative video editing (Yjs)
+- `/xrpc/com.atproto.sync.subscribeRepos` - Federation firehose (when relay enabled)
 
 ## Code Conventions
 
@@ -87,9 +131,14 @@ pnpm typecheck                        # TypeScript check
 ## Testing
 
 API tests use Vitest with helpers in `packages/api/tests/helpers.ts`:
-- `createTestApp()` - Creates test Hono app instance
-- `testRequest()` - Simulates HTTP requests
-- Database mocking via `vi.mock()`
+- `createTestApp()` - Creates test Hono app instance with error handling
+- `testRequest(app, method, path, options)` - Simulates HTTP requests
+- `createMockUser()` - Creates mock user data
+- `createMockVideo()` - Creates mock video data
+- `authHeader(token)` - Creates Authorization header
+- Database mocking via `vi.mock('../../src/db/index.js', ...)`
+
+Test files are in `packages/api/tests/routes/` mirroring the route structure.
 
 ## Environment
 
@@ -97,4 +146,28 @@ API env file at `packages/api/.env` (copy from `.env.example`). Key variables:
 - `PORT=3002` - API port
 - `DATABASE_URL` - PostgreSQL connection
 - `REDIS_URL` - Redis connection
-- `S3_*` - Object storage config
+- `S3_*` / `DO_SPACES_*` - Object storage config
+- `RELAY_ENABLED` - Enable federation relay
+- `OAUTH_PRIVATE_KEY` - OAuth signing key
+
+## Docker Services
+
+`docker-compose.yml` provides:
+- `postgres` (5432) - PostgreSQL database
+- `redis` (6379) - Redis cache/queues
+- `opensearch` (9200) - Search engine
+- `opensearch-dashboards` (5601) - Search UI
+- `minio` (9000/9001) - S3-compatible storage
+- `render-worker` - FFmpeg render workers (scalable)
+- `prefetch-worker` - Timeline prefetch
+- `mailhog` (1025/8025) - Email testing
+
+## Native iOS App
+
+The `Exprsn/` directory contains a SwiftUI iOS app:
+- Configuration: `Exprsn/Configuration/Environment.swift`
+- Network: `Exprsn/Core/Network/` (APIClient, APIEndpoints)
+- Auth: `Exprsn/Core/Auth/` (AuthManager, KeychainService)
+- Features: `Exprsn/Features/` (Feed, Profile, Settings, etc.)
+
+Open `Exprsn/Exprsn.xcodeproj` in Xcode to run.
