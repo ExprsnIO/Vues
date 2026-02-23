@@ -7,3 +7,4 @@ export * from './types.js';
 export * from './service.js';
 export * from './ai-providers.js';
 export * from './risk-calculator.js';
+export * from './WorkflowEngine.js';
