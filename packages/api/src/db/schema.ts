@@ -2037,6 +2037,90 @@ export const editorDocumentSnapshots = pgTable(
   })
 );
 
+// Render jobs - video export from editor projects
+export const renderJobs = pgTable(
+  'render_jobs',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => editorProjects.id, { onDelete: 'cascade' }),
+    userDid: text('user_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    status: text('status').notNull().default('pending'), // 'pending' | 'queued' | 'rendering' | 'encoding' | 'uploading' | 'completed' | 'failed'
+    progress: integer('progress').default(0), // 0-100
+    currentStep: text('current_step'), // Description of current render step
+    // Render settings
+    format: text('format').notNull().default('mp4'), // 'mp4' | 'webm' | 'mov'
+    quality: text('quality').notNull().default('high'), // 'draft' | 'medium' | 'high' | 'ultra'
+    resolution: jsonb('resolution').$type<{ width: number; height: number }>(),
+    fps: integer('fps').default(30),
+    // Output
+    outputKey: text('output_key'), // S3 key for rendered file
+    outputUrl: text('output_url'), // CDN URL
+    outputSize: integer('output_size'), // File size in bytes
+    duration: integer('duration'), // Duration in seconds
+    // Metadata
+    errorMessage: text('error_message'),
+    errorDetails: jsonb('error_details').$type<Record<string, unknown>>(),
+    renderStartedAt: timestamp('render_started_at'),
+    renderCompletedAt: timestamp('render_completed_at'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    projectIdx: index('render_jobs_project_idx').on(table.projectId),
+    userIdx: index('render_jobs_user_idx').on(table.userDid),
+    statusIdx: index('render_jobs_status_idx').on(table.status),
+    createdIdx: index('render_jobs_created_idx').on(table.createdAt),
+  })
+);
+
+// Scheduled video publishing
+export const scheduledPublishing = pgTable(
+  'scheduled_publishing',
+  {
+    id: text('id').primaryKey(),
+    userDid: text('user_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    // Source - either render job or direct upload
+    renderJobId: text('render_job_id').references(() => renderJobs.id, { onDelete: 'set null' }),
+    uploadJobId: text('upload_job_id'), // Reference to upload_jobs if direct upload
+    // Video metadata
+    caption: text('caption'),
+    tags: jsonb('tags').$type<string[]>().default([]),
+    thumbnailUrl: text('thumbnail_url'),
+    customThumbnailKey: text('custom_thumbnail_key'), // User-uploaded thumbnail
+    // Visibility and permissions
+    visibility: text('visibility').notNull().default('public'), // 'public' | 'followers' | 'private' | 'unlisted'
+    allowComments: boolean('allow_comments').default(true),
+    allowDuet: boolean('allow_duet').default(true),
+    allowStitch: boolean('allow_stitch').default(true),
+    // Sound
+    soundUri: text('sound_uri'),
+    soundTitle: text('sound_title'),
+    // Scheduling
+    scheduledFor: timestamp('scheduled_for'), // null = publish immediately
+    timezone: text('timezone').default('UTC'),
+    // Status
+    status: text('status').notNull().default('draft'), // 'draft' | 'scheduled' | 'publishing' | 'published' | 'failed' | 'cancelled'
+    publishedVideoUri: text('published_video_uri'), // URI of the published video
+    errorMessage: text('error_message'),
+    // Timestamps
+    publishedAt: timestamp('published_at'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    userIdx: index('scheduled_publishing_user_idx').on(table.userDid),
+    statusIdx: index('scheduled_publishing_status_idx').on(table.status),
+    scheduledIdx: index('scheduled_publishing_scheduled_idx').on(table.scheduledFor),
+    renderJobIdx: index('scheduled_publishing_render_job_idx').on(table.renderJobId),
+  })
+);
+
 // Editor Collaboration type exports
 export type EditorProject = typeof editorProjects.$inferSelect;
 export type NewEditorProject = typeof editorProjects.$inferInsert;
@@ -2044,6 +2128,10 @@ export type EditorCollaborator = typeof editorCollaborators.$inferSelect;
 export type NewEditorCollaborator = typeof editorCollaborators.$inferInsert;
 export type EditorDocumentSnapshot = typeof editorDocumentSnapshots.$inferSelect;
 export type NewEditorDocumentSnapshot = typeof editorDocumentSnapshots.$inferInsert;
+export type RenderJob = typeof renderJobs.$inferSelect;
+export type NewRenderJob = typeof renderJobs.$inferInsert;
+export type ScheduledPublishing = typeof scheduledPublishing.$inferSelect;
+export type NewScheduledPublishing = typeof scheduledPublishing.$inferInsert;
 
 // ============================================
 // Relay/Federation Tables

@@ -1,0 +1,832 @@
+/**
+ * Video Render Service
+ * Converts editor projects to video files using FFmpeg
+ */
+
+import { Queue, Worker, Job } from 'bullmq';
+import { Redis } from 'ioredis';
+import { db } from '../../db/index.js';
+import { renderJobs, editorProjects, editorDocumentSnapshots } from '../../db/schema.js';
+import { eq, and, desc } from 'drizzle-orm';
+import { nanoid } from 'nanoid';
+import { spawn } from 'child_process';
+import * as fs from 'fs/promises';
+import * as path from 'path';
+import * as os from 'os';
+
+/**
+ * Editor element types from the editor
+ */
+interface EditorElement {
+  id: string;
+  type: 'video' | 'image' | 'text' | 'shape' | 'audio';
+  name: string;
+  src?: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  rotation: number;
+  scale: { x: number; y: number };
+  opacity: number;
+  startFrame: number;
+  endFrame: number;
+  visible: boolean;
+  locked: boolean;
+  blendMode?: string;
+  effects?: Array<{ type: string; params: Record<string, unknown> }>;
+  keyframes?: Record<string, Array<{ frame: number; value: unknown }>>;
+  // Text-specific
+  text?: string;
+  fontSize?: number;
+  fontFamily?: string;
+  fontColor?: string;
+  textAlign?: string;
+  // Shape-specific
+  shapeType?: string;
+  fill?: string;
+  stroke?: string;
+  strokeWidth?: number;
+}
+
+/**
+ * Project state from Yjs document
+ */
+interface ProjectState {
+  elements: EditorElement[];
+  audioTracks: Array<{
+    id: string;
+    name: string;
+    src: string;
+    startFrame: number;
+    duration: number;
+    volume: number;
+  }>;
+  settings: {
+    fps: number;
+    width: number;
+    height: number;
+    duration: number;
+    backgroundColor?: string;
+  };
+}
+
+/**
+ * Render job data
+ */
+export interface RenderJobData {
+  jobId: string;
+  projectId: string;
+  userDid: string;
+  format: 'mp4' | 'webm' | 'mov';
+  quality: 'draft' | 'medium' | 'high' | 'ultra';
+  resolution?: { width: number; height: number };
+  fps?: number;
+}
+
+/**
+ * Quality presets for rendering
+ */
+const QUALITY_PRESETS = {
+  draft: { crf: 28, preset: 'ultrafast', audioBitrate: '128k' },
+  medium: { crf: 23, preset: 'medium', audioBitrate: '192k' },
+  high: { crf: 18, preset: 'slow', audioBitrate: '256k' },
+  ultra: { crf: 15, preset: 'veryslow', audioBitrate: '320k' },
+};
+
+/**
+ * Render Service for video export
+ */
+export class RenderService {
+  private redis: Redis;
+  private redisOptions: { host: string; port: number; password?: string; db: number };
+  private queue: Queue;
+  private worker: Worker | null = null;
+  private storageProvider: StorageProvider;
+
+  constructor(config: {
+    redis: Redis;
+    storageProvider: StorageProvider;
+    concurrency?: number;
+  }) {
+    this.redis = config.redis;
+    this.storageProvider = config.storageProvider;
+
+    // Extract Redis connection options for BullMQ (to avoid ioredis version conflicts)
+    this.redisOptions = {
+      host: config.redis.options.host || 'localhost',
+      port: config.redis.options.port || 6379,
+      password: config.redis.options.password,
+      db: config.redis.options.db || 0,
+    };
+
+    // Create BullMQ queue
+    this.queue = new Queue('render-jobs', {
+      connection: this.redisOptions,
+      defaultJobOptions: {
+        attempts: 2,
+        backoff: {
+          type: 'exponential',
+          delay: 10000,
+        },
+        removeOnComplete: 100,
+        removeOnFail: 50,
+      },
+    });
+  }
+
+  /**
+   * Start the render worker
+   */
+  startWorker(concurrency = 2): void {
+    if (this.worker) return;
+
+    this.worker = new Worker<RenderJobData>(
+      'render-jobs',
+      async (job) => this.processRenderJob(job),
+      {
+        connection: this.redisOptions,
+        concurrency,
+      }
+    );
+
+    this.worker.on('completed', (job) => {
+      console.log(`[RenderService] Job ${job.id} completed`);
+    });
+
+    this.worker.on('failed', (job, err) => {
+      console.error(`[RenderService] Job ${job?.id} failed:`, err);
+    });
+
+    console.log(`[RenderService] Worker started with concurrency ${concurrency}`);
+  }
+
+  /**
+   * Stop the render worker
+   */
+  async stopWorker(): Promise<void> {
+    if (this.worker) {
+      await this.worker.close();
+      this.worker = null;
+    }
+  }
+
+  /**
+   * Create a new render job
+   */
+  async createRenderJob(params: {
+    projectId: string;
+    userDid: string;
+    format?: 'mp4' | 'webm' | 'mov';
+    quality?: 'draft' | 'medium' | 'high' | 'ultra';
+    resolution?: { width: number; height: number };
+    fps?: number;
+  }): Promise<string> {
+    const jobId = `render-${nanoid()}`;
+
+    // Verify project exists and user has access
+    const project = await db.query.editorProjects.findFirst({
+      where: eq(editorProjects.id, params.projectId),
+    });
+
+    if (!project) {
+      throw new Error('Project not found');
+    }
+
+    if (project.ownerDid !== params.userDid) {
+      // Check if user is a collaborator with edit access
+      const collaborator = await db.query.editorCollaborators?.findFirst({
+        where: and(
+          eq((await import('../../db/schema.js')).editorCollaborators.projectId, params.projectId),
+          eq((await import('../../db/schema.js')).editorCollaborators.userDid, params.userDid)
+        ),
+      });
+
+      if (!collaborator || collaborator.accessLevel === 'viewer') {
+        throw new Error('Access denied');
+      }
+    }
+
+    // Create database record
+    await db.insert(renderJobs).values({
+      id: jobId,
+      projectId: params.projectId,
+      userDid: params.userDid,
+      status: 'pending',
+      format: params.format || 'mp4',
+      quality: params.quality || 'high',
+      resolution: params.resolution || project.settings,
+      fps: params.fps || project.settings?.fps || 30,
+    });
+
+    // Add to queue
+    await this.queue.add('render', {
+      jobId,
+      projectId: params.projectId,
+      userDid: params.userDid,
+      format: params.format || 'mp4',
+      quality: params.quality || 'high',
+      resolution: params.resolution,
+      fps: params.fps,
+    });
+
+    return jobId;
+  }
+
+  /**
+   * Get render job status
+   */
+  async getJobStatus(jobId: string): Promise<{
+    id: string;
+    status: string;
+    progress: number;
+    currentStep?: string;
+    outputUrl?: string;
+    error?: string;
+  } | null> {
+    const job = await db.query.renderJobs.findFirst({
+      where: eq(renderJobs.id, jobId),
+    });
+
+    if (!job) return null;
+
+    return {
+      id: job.id,
+      status: job.status,
+      progress: job.progress || 0,
+      currentStep: job.currentStep || undefined,
+      outputUrl: job.outputUrl || undefined,
+      error: job.errorMessage || undefined,
+    };
+  }
+
+  /**
+   * Get render jobs for a user
+   */
+  async getUserJobs(
+    userDid: string,
+    options: { projectId?: string; status?: string; limit?: number } = {}
+  ): Promise<Array<{
+    id: string;
+    projectId: string;
+    status: string;
+    progress: number;
+    format: string;
+    quality: string;
+    outputUrl?: string;
+    createdAt: Date;
+  }>> {
+    const { projectId, status, limit = 20 } = options;
+
+    // Build conditions
+    const conditions = [eq(renderJobs.userDid, userDid)];
+    if (projectId) {
+      conditions.push(eq(renderJobs.projectId, projectId));
+    }
+    if (status) {
+      conditions.push(eq(renderJobs.status, status));
+    }
+
+    const jobs = await db
+      .select()
+      .from(renderJobs)
+      .where(and(...conditions))
+      .orderBy(desc(renderJobs.createdAt))
+      .limit(limit);
+
+    return jobs.map((job) => ({
+      id: job.id,
+      projectId: job.projectId,
+      status: job.status,
+      progress: job.progress || 0,
+      format: job.format,
+      quality: job.quality,
+      outputUrl: job.outputUrl || undefined,
+      createdAt: job.createdAt,
+    }));
+  }
+
+  /**
+   * Retry a failed render job
+   */
+  async retryJob(jobId: string, userDid: string): Promise<string | null> {
+    const job = await db.query.renderJobs.findFirst({
+      where: and(
+        eq(renderJobs.id, jobId),
+        eq(renderJobs.userDid, userDid)
+      ),
+    });
+
+    if (!job || job.status !== 'failed') {
+      return null;
+    }
+
+    // Create a new job with the same parameters
+    return this.createRenderJob({
+      projectId: job.projectId,
+      userDid: job.userDid,
+      format: job.format as 'mp4' | 'webm' | 'mov',
+      quality: job.quality as 'draft' | 'medium' | 'high' | 'ultra',
+      resolution: job.resolution as { width: number; height: number } | undefined,
+    });
+  }
+
+  /**
+   * Cancel a render job
+   */
+  async cancelJob(jobId: string, userDid: string): Promise<boolean> {
+    const job = await db.query.renderJobs.findFirst({
+      where: and(
+        eq(renderJobs.id, jobId),
+        eq(renderJobs.userDid, userDid)
+      ),
+    });
+
+    if (!job || job.status === 'completed' || job.status === 'failed') {
+      return false;
+    }
+
+    // Remove from queue if pending
+    const bullJob = await this.queue.getJob(jobId);
+    if (bullJob) {
+      await bullJob.remove();
+    }
+
+    // Update status
+    await db
+      .update(renderJobs)
+      .set({ status: 'failed', errorMessage: 'Cancelled by user' })
+      .where(eq(renderJobs.id, jobId));
+
+    return true;
+  }
+
+  /**
+   * Process a render job
+   */
+  private async processRenderJob(job: Job<RenderJobData>): Promise<void> {
+    const { jobId, projectId, format, quality, resolution, fps } = job.data;
+
+    const updateProgress = async (progress: number, step: string) => {
+      await db
+        .update(renderJobs)
+        .set({ progress, currentStep: step, updatedAt: new Date() })
+        .where(eq(renderJobs.id, jobId));
+      await job.updateProgress(progress);
+    };
+
+    try {
+      // Update status to rendering
+      await db
+        .update(renderJobs)
+        .set({ status: 'rendering', renderStartedAt: new Date() })
+        .where(eq(renderJobs.id, jobId));
+
+      await updateProgress(5, 'Loading project...');
+
+      // Get project state
+      const projectState = await this.getProjectState(projectId);
+      if (!projectState) {
+        throw new Error('Could not load project state');
+      }
+
+      await updateProgress(10, 'Preparing assets...');
+
+      // Create temp directory
+      const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'render-'));
+      const outputPath = path.join(tempDir, `output.${format}`);
+
+      try {
+        await updateProgress(15, 'Downloading media assets...');
+
+        // Download all media assets
+        const assetPaths = await this.downloadAssets(projectState, tempDir);
+
+        await updateProgress(25, 'Generating render script...');
+
+        // Generate FFmpeg filter complex
+        const renderSettings = {
+          width: resolution?.width || projectState.settings.width,
+          height: resolution?.height || projectState.settings.height,
+          fps: fps || projectState.settings.fps,
+          duration: projectState.settings.duration / (fps || projectState.settings.fps),
+          backgroundColor: projectState.settings.backgroundColor || '#000000',
+        };
+
+        await updateProgress(30, 'Rendering video...');
+
+        // Render the video
+        await this.renderWithFFmpeg(
+          projectState,
+          assetPaths,
+          renderSettings,
+          quality,
+          format,
+          outputPath,
+          async (progress) => {
+            await updateProgress(30 + Math.floor(progress * 0.5), 'Rendering video...');
+          }
+        );
+
+        await updateProgress(80, 'Encoding final output...');
+
+        // Get output file stats
+        const stats = await fs.stat(outputPath);
+
+        await updateProgress(85, 'Uploading to storage...');
+
+        // Upload to storage
+        const outputKey = `renders/${job.data.userDid}/${jobId}/output.${format}`;
+        const outputUrl = await this.storageProvider.upload(outputPath, outputKey);
+
+        await updateProgress(95, 'Finalizing...');
+
+        // Update job as completed
+        await db
+          .update(renderJobs)
+          .set({
+            status: 'completed',
+            progress: 100,
+            currentStep: 'Complete',
+            outputKey,
+            outputUrl,
+            outputSize: stats.size,
+            duration: Math.floor(renderSettings.duration),
+            renderCompletedAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(eq(renderJobs.id, jobId));
+
+      } finally {
+        // Cleanup temp directory
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+
+    } catch (error) {
+      console.error(`[RenderService] Render failed:`, error);
+
+      await db
+        .update(renderJobs)
+        .set({
+          status: 'failed',
+          errorMessage: error instanceof Error ? error.message : 'Unknown error',
+          errorDetails: error instanceof Error ? { stack: error.stack } : {},
+          updatedAt: new Date(),
+        })
+        .where(eq(renderJobs.id, jobId));
+
+      throw error;
+    }
+  }
+
+  /**
+   * Get project state from Yjs snapshot
+   */
+  private async getProjectState(projectId: string): Promise<ProjectState | null> {
+    // Get latest snapshot
+    const snapshot = await db.query.editorDocumentSnapshots.findFirst({
+      where: eq(editorDocumentSnapshots.projectId, projectId),
+      orderBy: [desc(editorDocumentSnapshots.version)],
+    });
+
+    if (!snapshot) {
+      // Return empty project with defaults
+      const project = await db.query.editorProjects.findFirst({
+        where: eq(editorProjects.id, projectId),
+      });
+
+      if (!project) return null;
+
+      return {
+        elements: [],
+        audioTracks: [],
+        settings: project.settings || { fps: 30, width: 1920, height: 1080, duration: 300 },
+      };
+    }
+
+    try {
+      // Decode Yjs state
+      const yjs = await import('yjs');
+      const doc = new yjs.Doc();
+      const update = Buffer.from(snapshot.snapshot, 'base64');
+      yjs.applyUpdate(doc, update);
+
+      const elementsMap = doc.getMap('elements');
+      const audioTracksArray = doc.getArray('audioTracks');
+      const settingsMap = doc.getMap('settings');
+
+      const elements: EditorElement[] = [];
+      elementsMap.forEach((value, key) => {
+        if (value && typeof value === 'object') {
+          elements.push({ id: key, ...value } as EditorElement);
+        }
+      });
+
+      const audioTracks = audioTracksArray.toArray() as ProjectState['audioTracks'];
+
+      const settings = {
+        fps: (settingsMap.get('fps') as number) || 30,
+        width: (settingsMap.get('width') as number) || 1920,
+        height: (settingsMap.get('height') as number) || 1080,
+        duration: (settingsMap.get('duration') as number) || 300,
+        backgroundColor: settingsMap.get('backgroundColor') as string | undefined,
+      };
+
+      return { elements, audioTracks, settings };
+    } catch (error) {
+      console.error('[RenderService] Failed to parse project state:', error);
+      return null;
+    }
+  }
+
+  /**
+   * Download media assets to temp directory
+   */
+  private async downloadAssets(
+    state: ProjectState,
+    tempDir: string
+  ): Promise<Map<string, string>> {
+    const assetPaths = new Map<string, string>();
+
+    // Download element media
+    for (const element of state.elements) {
+      if (element.src && (element.type === 'video' || element.type === 'image' || element.type === 'audio')) {
+        const ext = path.extname(element.src) || (element.type === 'video' ? '.mp4' : element.type === 'image' ? '.png' : '.mp3');
+        const localPath = path.join(tempDir, `asset-${element.id}${ext}`);
+
+        try {
+          await this.storageProvider.download(element.src, localPath);
+          assetPaths.set(element.id, localPath);
+        } catch (error) {
+          console.warn(`[RenderService] Failed to download asset ${element.src}:`, error);
+        }
+      }
+    }
+
+    // Download audio tracks
+    for (const track of state.audioTracks) {
+      if (track.src) {
+        const ext = path.extname(track.src) || '.mp3';
+        const localPath = path.join(tempDir, `audio-${track.id}${ext}`);
+
+        try {
+          await this.storageProvider.download(track.src, localPath);
+          assetPaths.set(track.id, localPath);
+        } catch (error) {
+          console.warn(`[RenderService] Failed to download audio ${track.src}:`, error);
+        }
+      }
+    }
+
+    return assetPaths;
+  }
+
+  /**
+   * Render video using FFmpeg
+   */
+  private async renderWithFFmpeg(
+    state: ProjectState,
+    assetPaths: Map<string, string>,
+    settings: {
+      width: number;
+      height: number;
+      fps: number;
+      duration: number;
+      backgroundColor: string;
+    },
+    quality: 'draft' | 'medium' | 'high' | 'ultra',
+    format: string,
+    outputPath: string,
+    onProgress: (progress: number) => Promise<void>
+  ): Promise<void> {
+    const preset = QUALITY_PRESETS[quality];
+
+    // Build FFmpeg command
+    const args: string[] = [];
+
+    // Create blank canvas as base
+    args.push(
+      '-f', 'lavfi',
+      '-i', `color=c=${settings.backgroundColor.replace('#', '0x')}:s=${settings.width}x${settings.height}:d=${settings.duration}:r=${settings.fps}`
+    );
+
+    // Add input files
+    const inputIndices = new Map<string, number>();
+    let inputIndex = 1;
+
+    for (const element of state.elements) {
+      if (assetPaths.has(element.id)) {
+        args.push('-i', assetPaths.get(element.id)!);
+        inputIndices.set(element.id, inputIndex++);
+      }
+    }
+
+    for (const track of state.audioTracks) {
+      if (assetPaths.has(track.id)) {
+        args.push('-i', assetPaths.get(track.id)!);
+        inputIndices.set(track.id, inputIndex++);
+      }
+    }
+
+    // Build filter complex
+    const filters: string[] = [];
+    let lastVideoOutput = '0:v';
+
+    // Sort elements by layer order (startFrame as proxy for z-index)
+    const sortedElements = [...state.elements]
+      .filter((e) => e.visible && (e.type === 'video' || e.type === 'image'))
+      .sort((a, b) => a.startFrame - b.startFrame);
+
+    sortedElements.forEach((element, i) => {
+      const idx = inputIndices.get(element.id);
+      if (idx === undefined) return;
+
+      const inputLabel = `${idx}:v`;
+      const outputLabel = `v${i}`;
+
+      const startTime = element.startFrame / settings.fps;
+      const endTime = element.endFrame / settings.fps;
+
+      // Scale and position
+      filters.push(
+        `[${inputLabel}]scale=${Math.round(element.width * element.scale.x)}:${Math.round(element.height * element.scale.y)},` +
+        `setpts=PTS-STARTPTS+${startTime}/TB[scaled${i}]`
+      );
+
+      filters.push(
+        `[${lastVideoOutput}][scaled${i}]overlay=${Math.round(element.x)}:${Math.round(element.y)}:` +
+        `enable='between(t,${startTime},${endTime})'[${outputLabel}]`
+      );
+
+      lastVideoOutput = outputLabel;
+    });
+
+    // Audio mixing
+    const audioInputs = state.audioTracks
+      .filter((t) => inputIndices.has(t.id))
+      .map((t) => `[${inputIndices.get(t.id)}:a]volume=${t.volume}[a${t.id}]`)
+      .join(';');
+
+    if (audioInputs) {
+      filters.push(audioInputs);
+      const audioMix = state.audioTracks
+        .filter((t) => inputIndices.has(t.id))
+        .map((t) => `[a${t.id}]`)
+        .join('');
+      filters.push(`${audioMix}amix=inputs=${state.audioTracks.length}[aout]`);
+    }
+
+    // Apply filter complex
+    if (filters.length > 0) {
+      args.push('-filter_complex', filters.join(';'));
+      args.push('-map', `[${lastVideoOutput}]`);
+      if (audioInputs) {
+        args.push('-map', '[aout]');
+      }
+    }
+
+    // Output settings
+    if (format === 'mp4') {
+      args.push(
+        '-c:v', 'libx264',
+        '-preset', preset.preset,
+        '-crf', preset.crf.toString(),
+        '-c:a', 'aac',
+        '-b:a', preset.audioBitrate,
+        '-movflags', '+faststart'
+      );
+    } else if (format === 'webm') {
+      args.push(
+        '-c:v', 'libvpx-vp9',
+        '-crf', preset.crf.toString(),
+        '-b:v', '0',
+        '-c:a', 'libopus',
+        '-b:a', preset.audioBitrate
+      );
+    }
+
+    args.push('-y', outputPath);
+
+    // Run FFmpeg
+    await new Promise<void>((resolve, reject) => {
+      const ffmpeg = spawn('ffmpeg', args);
+      let duration = settings.duration;
+
+      ffmpeg.stderr.on('data', (data: Buffer) => {
+        const output = data.toString();
+
+        // Parse duration
+        const durationMatch = output.match(/Duration: (\d+):(\d+):(\d+\.\d+)/);
+        if (durationMatch) {
+          const [, hours, minutes, seconds] = durationMatch;
+          duration = parseInt(hours || '0') * 3600 + parseInt(minutes || '0') * 60 + parseFloat(seconds || '0');
+        }
+
+        // Parse progress
+        const timeMatch = output.match(/time=(\d+):(\d+):(\d+\.\d+)/);
+        if (timeMatch) {
+          const [, hours, minutes, seconds] = timeMatch;
+          const currentTime = parseInt(hours || '0') * 3600 + parseInt(minutes || '0') * 60 + parseFloat(seconds || '0');
+          const progress = Math.min(currentTime / duration, 1);
+          onProgress(progress).catch(console.error);
+        }
+      });
+
+      ffmpeg.on('close', (code) => {
+        if (code === 0) {
+          resolve();
+        } else {
+          reject(new Error(`FFmpeg exited with code ${code}`));
+        }
+      });
+
+      ffmpeg.on('error', reject);
+    });
+  }
+}
+
+/**
+ * Storage provider interface
+ */
+export interface StorageProvider {
+  upload(localPath: string, key: string): Promise<string>;
+  download(url: string, localPath: string): Promise<void>;
+}
+
+/**
+ * S3 Storage Provider
+ */
+export class S3StorageProvider implements StorageProvider {
+  private bucketName: string;
+  private cdnBaseUrl: string;
+
+  constructor(config: { bucketName: string; cdnBaseUrl: string }) {
+    this.bucketName = config.bucketName;
+    this.cdnBaseUrl = config.cdnBaseUrl;
+  }
+
+  async upload(localPath: string, key: string): Promise<string> {
+    const { S3Client, PutObjectCommand } = await import('@aws-sdk/client-s3');
+    const client = new S3Client({});
+
+    const fileContent = await fs.readFile(localPath);
+
+    await client.send(
+      new PutObjectCommand({
+        Bucket: this.bucketName,
+        Key: key,
+        Body: fileContent,
+        ContentType: this.getContentType(key),
+      })
+    );
+
+    return `${this.cdnBaseUrl}/${key}`;
+  }
+
+  async download(url: string, localPath: string): Promise<void> {
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`Failed to download: ${response.status}`);
+    }
+
+    const buffer = await response.arrayBuffer();
+    await fs.writeFile(localPath, Buffer.from(buffer));
+  }
+
+  private getContentType(key: string): string {
+    const ext = path.extname(key).toLowerCase();
+    const types: Record<string, string> = {
+      '.mp4': 'video/mp4',
+      '.webm': 'video/webm',
+      '.mov': 'video/quicktime',
+      '.png': 'image/png',
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+    };
+    return types[ext] || 'application/octet-stream';
+  }
+}
+
+// Singleton
+let renderService: RenderService | null = null;
+
+export function getRenderService(): RenderService {
+  if (!renderService) {
+    throw new Error('RenderService not initialized');
+  }
+  return renderService;
+}
+
+export function initializeRenderService(config: {
+  redis: Redis;
+  storageProvider: StorageProvider;
+  concurrency?: number;
+}): RenderService {
+  if (renderService) return renderService;
+
+  renderService = new RenderService(config);
+  renderService.startWorker(config.concurrency);
+  return renderService;
+}
+
+export default RenderService;

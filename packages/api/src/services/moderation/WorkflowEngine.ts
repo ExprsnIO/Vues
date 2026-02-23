@@ -626,11 +626,14 @@ export class WorkflowEngine extends EventEmitter {
     try {
       await db.insert(modActionsLog).values({
         id: `wf-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-        actionType: 'workflow_execution',
-        targetType: context.contentType || 'unknown',
-        targetId: context.contentId || '',
+        action: 'workflow_execution',
+        contentType: context.contentType || 'unknown',
+        contentId: context.contentId || '',
+        sourceService: 'workflow_engine',
         performedBy: 'system:workflow',
-        details: {
+        isAutomated: true,
+        performedAt: new Date(),
+        metadata: {
           ruleId: rule.id,
           ruleName: rule.name,
           actionsExecuted: result.actionsExecuted,

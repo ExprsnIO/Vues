@@ -83,6 +83,9 @@ importers:
       bullmq:
         specifier: ^5.26.0
         version: 5.69.3
+      cron:
+        specifier: ^3.2.0
+        version: 3.5.0
       csv-parse:
         specifier: ^6.1.0
         version: 6.1.0

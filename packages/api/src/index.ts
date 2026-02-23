@@ -44,6 +44,7 @@ import { liveAdminRouter } from './routes/live-admin.js';
 import { moderationAdminRouter } from './routes/moderation-admin.js';
 import { adminSettingsRouter } from './routes/admin-settings.js';
 import { analyticsRoutes } from './routes/analytics.js';
+import { studioRouter } from './routes/studio.js';
 import { initializeIdentityService } from './services/identity/index.js';
 import { cronService } from './services/cron/index.js';
 import { oauthAgent } from './services/oauth/OAuthAgent.js';
@@ -187,6 +188,7 @@ app.route('/xrpc', liveRoutes);
 app.route('/xrpc', paymentRoutes);
 app.route('/xrpc', caRoutes);
 app.route('/xrpc', audioRouter);
+app.route('/xrpc', studioRouter);
 app.route('/xrpc', configRoutes);
 // Identity, registry, federation, sync, and PLC routes
 app.route('/xrpc', identityRouter);
