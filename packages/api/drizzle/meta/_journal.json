@@ -106,6 +106,20 @@
       "when": 1771807189654,
       "tag": "0014_majestic_dagger",
       "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1771856676402,
+      "tag": "0015_chemical_thaddeus_ross",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1771858371669,
+      "tag": "0016_harsh_nekra",
+      "breakpoints": true
     }
   ]
 }

@@ -2037,6 +2037,296 @@ export const editorDocumentSnapshots = pgTable(
   })
 );
 
+// =============================================================================
+// STUDIO EDITOR - Production Video Editing
+// =============================================================================
+
+// Editor tracks - timeline tracks for organizing clips
+export const editorTracks = pgTable(
+  'editor_tracks',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => editorProjects.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    type: text('type').notNull(), // 'video' | 'audio' | 'text' | 'overlay'
+    order: integer('order').notNull().default(0), // Track stacking order
+    locked: boolean('locked').default(false),
+    muted: boolean('muted').default(false),
+    solo: boolean('solo').default(false),
+    visible: boolean('visible').default(true),
+    height: integer('height').default(60), // Track height in pixels
+    color: text('color'), // Track color for UI
+    volume: real('volume').default(1.0), // For audio tracks (0-2)
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    projectIdx: index('editor_tracks_project_idx').on(table.projectId),
+    orderIdx: index('editor_tracks_order_idx').on(table.projectId, table.order),
+  })
+);
+
+// Editor clips - individual clips on tracks
+export const editorClips = pgTable(
+  'editor_clips',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => editorProjects.id, { onDelete: 'cascade' }),
+    trackId: text('track_id')
+      .notNull()
+      .references(() => editorTracks.id, { onDelete: 'cascade' }),
+    assetId: text('asset_id'), // Reference to source asset
+    type: text('type').notNull(), // 'video' | 'audio' | 'image' | 'text' | 'shape' | 'solid'
+    name: text('name').notNull(),
+    // Timeline position (in frames)
+    startFrame: integer('start_frame').notNull().default(0),
+    endFrame: integer('end_frame').notNull().default(150),
+    // Source trimming (in frames, for video/audio)
+    sourceStart: integer('source_start').default(0),
+    sourceEnd: integer('source_end'),
+    // Speed & time
+    speed: real('speed').default(1.0), // 0.1 to 10.0
+    reverse: boolean('reverse').default(false),
+    loop: boolean('loop').default(false),
+    loopCount: integer('loop_count'), // null = infinite
+    // Transform
+    transform: jsonb('transform').$type<{
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+      rotation: number;
+      scaleX: number;
+      scaleY: number;
+      anchorX: number;
+      anchorY: number;
+      opacity: number;
+    }>(),
+    // Audio properties
+    volume: real('volume').default(1.0),
+    fadeIn: integer('fade_in').default(0), // Frames
+    fadeOut: integer('fade_out').default(0), // Frames
+    // Text properties (for text clips)
+    textContent: text('text_content'),
+    textStyle: jsonb('text_style').$type<{
+      fontFamily: string;
+      fontSize: number;
+      fontWeight: string;
+      color: string;
+      backgroundColor?: string;
+      align: 'left' | 'center' | 'right';
+      verticalAlign: 'top' | 'middle' | 'bottom';
+      lineHeight: number;
+      letterSpacing: number;
+      stroke?: { color: string; width: number };
+      shadow?: { color: string; blur: number; offsetX: number; offsetY: number };
+    }>(),
+    // Shape properties (for shape clips)
+    shapeType: text('shape_type'), // 'rectangle' | 'ellipse' | 'polygon' | 'star' | 'arrow'
+    shapeStyle: jsonb('shape_style').$type<{
+      fill: string;
+      stroke: string;
+      strokeWidth: number;
+      cornerRadius?: number;
+      sides?: number;
+      innerRadius?: number;
+    }>(),
+    // Solid color properties
+    solidColor: text('solid_color'),
+    // Effects applied to this clip
+    effects: jsonb('effects').$type<Array<{
+      id: string;
+      type: string;
+      enabled: boolean;
+      params: Record<string, number | string | boolean>;
+    }>>(),
+    // Keyframes for animation
+    keyframes: jsonb('keyframes').$type<Record<string, Array<{
+      frame: number;
+      value: number | string | { x: number; y: number };
+      easing: string;
+    }>>>(),
+    // Blend mode
+    blendMode: text('blend_mode').default('normal'),
+    locked: boolean('locked').default(false),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    projectIdx: index('editor_clips_project_idx').on(table.projectId),
+    trackIdx: index('editor_clips_track_idx').on(table.trackId),
+    timelineIdx: index('editor_clips_timeline_idx').on(table.trackId, table.startFrame),
+  })
+);
+
+// Editor transitions - transitions between clips
+export const editorTransitions = pgTable(
+  'editor_transitions',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => editorProjects.id, { onDelete: 'cascade' }),
+    trackId: text('track_id')
+      .notNull()
+      .references(() => editorTracks.id, { onDelete: 'cascade' }),
+    clipAId: text('clip_a_id')
+      .notNull()
+      .references(() => editorClips.id, { onDelete: 'cascade' }),
+    clipBId: text('clip_b_id')
+      .notNull()
+      .references(() => editorClips.id, { onDelete: 'cascade' }),
+    type: text('type').notNull(), // 'fade' | 'dissolve' | 'wipe' | 'slide' | 'zoom' | 'blur' | etc.
+    duration: integer('duration').notNull().default(30), // Frames
+    easing: text('easing').default('ease-in-out'),
+    params: jsonb('params').$type<{
+      direction?: 'left' | 'right' | 'up' | 'down';
+      softness?: number;
+      color?: string;
+      angle?: number;
+    }>(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    projectIdx: index('editor_transitions_project_idx').on(table.projectId),
+    trackIdx: index('editor_transitions_track_idx').on(table.trackId),
+  })
+);
+
+// Editor effect presets - reusable effect configurations
+export const editorEffectPresets = pgTable(
+  'editor_effect_presets',
+  {
+    id: text('id').primaryKey(),
+    ownerDid: text('owner_did').references(() => users.did, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    category: text('category').notNull(), // 'color' | 'blur' | 'distort' | 'stylize' | 'transition' | 'text'
+    type: text('type').notNull(), // Specific effect type
+    isBuiltIn: boolean('is_built_in').default(false),
+    isPublic: boolean('is_public').default(false),
+    params: jsonb('params').$type<Record<string, number | string | boolean>>().notNull(),
+    thumbnail: text('thumbnail'), // Preview image URL
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    ownerIdx: index('editor_effect_presets_owner_idx').on(table.ownerDid),
+    categoryIdx: index('editor_effect_presets_category_idx').on(table.category),
+    publicIdx: index('editor_effect_presets_public_idx').on(table.isPublic),
+  })
+);
+
+// Editor assets - media library for projects
+export const editorAssets = pgTable(
+  'editor_assets',
+  {
+    id: text('id').primaryKey(),
+    ownerDid: text('owner_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    projectId: text('project_id').references(() => editorProjects.id, { onDelete: 'set null' }),
+    name: text('name').notNull(),
+    type: text('type').notNull(), // 'video' | 'audio' | 'image' | 'font' | 'lut'
+    mimeType: text('mime_type'),
+    // Storage
+    storageKey: text('storage_key').notNull(),
+    cdnUrl: text('cdn_url'),
+    thumbnailUrl: text('thumbnail_url'),
+    // Media properties
+    width: integer('width'),
+    height: integer('height'),
+    duration: real('duration'), // Seconds
+    frameRate: real('frame_rate'),
+    fileSize: integer('file_size'),
+    // Audio analysis
+    waveformData: jsonb('waveform_data').$type<number[]>(),
+    bpm: real('bpm'),
+    // Metadata
+    tags: jsonb('tags').$type<string[]>().default([]),
+    metadata: jsonb('metadata').$type<Record<string, unknown>>(),
+    // Processing status
+    processingStatus: text('processing_status').default('pending'), // 'pending' | 'processing' | 'ready' | 'failed'
+    proxyUrl: text('proxy_url'), // Low-res proxy for editing
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    ownerIdx: index('editor_assets_owner_idx').on(table.ownerDid),
+    projectIdx: index('editor_assets_project_idx').on(table.projectId),
+    typeIdx: index('editor_assets_type_idx').on(table.type),
+    statusIdx: index('editor_assets_status_idx').on(table.processingStatus),
+  })
+);
+
+// Editor templates - project templates for quick starts
+export const editorTemplates = pgTable(
+  'editor_templates',
+  {
+    id: text('id').primaryKey(),
+    ownerDid: text('owner_did').references(() => users.did, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    description: text('description'),
+    category: text('category').notNull(), // 'intro' | 'outro' | 'social' | 'presentation' | 'music' | 'promo'
+    aspectRatio: text('aspect_ratio').notNull(), // '16:9' | '9:16' | '1:1' | '4:5'
+    duration: integer('duration').notNull(), // Frames
+    // Template data (serialized project)
+    templateData: jsonb('template_data').$type<{
+      settings: { fps: number; width: number; height: number };
+      tracks: Array<{ name: string; type: string; order: number }>;
+      clips: Array<Record<string, unknown>>;
+      effects: Array<Record<string, unknown>>;
+    }>().notNull(),
+    // Preview
+    thumbnailUrl: text('thumbnail_url'),
+    previewVideoUrl: text('preview_video_url'),
+    // Metadata
+    isBuiltIn: boolean('is_built_in').default(false),
+    isPublic: boolean('is_public').default(false),
+    usageCount: integer('usage_count').default(0),
+    tags: jsonb('tags').$type<string[]>().default([]),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    ownerIdx: index('editor_templates_owner_idx').on(table.ownerDid),
+    categoryIdx: index('editor_templates_category_idx').on(table.category),
+    publicIdx: index('editor_templates_public_idx').on(table.isPublic),
+    usageIdx: index('editor_templates_usage_idx').on(table.usageCount),
+  })
+);
+
+// Editor project history - undo/redo stack
+export const editorProjectHistory = pgTable(
+  'editor_project_history',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => editorProjects.id, { onDelete: 'cascade' }),
+    userDid: text('user_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    action: text('action').notNull(), // 'create_clip' | 'delete_clip' | 'move_clip' | 'trim_clip' | etc.
+    description: text('description'),
+    // Stores the delta/patch to undo this action
+    undoData: jsonb('undo_data').$type<Record<string, unknown>>().notNull(),
+    redoData: jsonb('redo_data').$type<Record<string, unknown>>().notNull(),
+    // For grouping related actions
+    batchId: text('batch_id'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    projectIdx: index('editor_history_project_idx').on(table.projectId),
+    userIdx: index('editor_history_user_idx').on(table.userDid),
+    batchIdx: index('editor_history_batch_idx').on(table.batchId),
+    createdIdx: index('editor_history_created_idx').on(table.createdAt),
+  })
+);
+
 // Render jobs - video export from editor projects
 export const renderJobs = pgTable(
   'render_jobs',

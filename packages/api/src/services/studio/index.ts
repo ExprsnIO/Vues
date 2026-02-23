@@ -1,6 +1,6 @@
 /**
  * Studio Services
- * Video export, rendering, and publishing
+ * Production video editing, export, rendering, and publishing
  */
 
 export {
@@ -19,3 +19,27 @@ export {
   type PublishOptions,
   type PublishResult,
 } from './PublishingService.js';
+
+export {
+  EditorService,
+  getEditorService,
+  type ProjectSettings,
+  type ClipTransform,
+  type TextStyle,
+  type ShapeStyle,
+  type ClipEffect,
+  type Keyframe,
+  type TransitionParams,
+  type TrackType,
+  type ClipType,
+  type BlendMode,
+} from './EditorService.js';
+
+export {
+  EffectsService,
+  getEffectsService,
+  EFFECT_DEFINITIONS,
+  type EffectDefinition,
+  type EffectParam,
+  type EffectCategory,
+} from './EffectsService.js';

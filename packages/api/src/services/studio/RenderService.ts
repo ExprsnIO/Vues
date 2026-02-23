@@ -6,9 +6,19 @@
 import { Queue, Worker, Job } from 'bullmq';
 import { Redis } from 'ioredis';
 import { db } from '../../db/index.js';
-import { renderJobs, editorProjects, editorDocumentSnapshots } from '../../db/schema.js';
-import { eq, and, desc } from 'drizzle-orm';
+import {
+  renderJobs,
+  editorProjects,
+  editorDocumentSnapshots,
+  editorTracks,
+  editorClips,
+  editorTransitions,
+  editorAssets,
+} from '../../db/schema.js';
+import { eq, and, desc, asc } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
+import { getEffectsService } from './EffectsService.js';
+import type { ClipTransform, ClipEffect } from './EditorService.js';
 import { spawn } from 'child_process';
 import * as fs from 'fs/promises';
 import * as path from 'path';
@@ -34,19 +44,46 @@ interface EditorElement {
   visible: boolean;
   locked: boolean;
   blendMode?: string;
-  effects?: Array<{ type: string; params: Record<string, unknown> }>;
+  effects?: Array<{ id?: string; type: string; enabled?: boolean; params: Record<string, unknown> }>;
   keyframes?: Record<string, Array<{ frame: number; value: unknown }>>;
+  // Clip properties
+  sourceStart?: number;
+  sourceEnd?: number | null;
+  speed?: number;
+  reverse?: boolean;
+  loop?: boolean;
+  // Audio properties
+  volume?: number;
+  fadeIn?: number;
+  fadeOut?: number;
   // Text-specific
   text?: string;
   fontSize?: number;
   fontFamily?: string;
   fontColor?: string;
   textAlign?: string;
+  textStyle?: {
+    fontFamily?: string;
+    fontSize?: number;
+    fontWeight?: string;
+    color?: string;
+    backgroundColor?: string;
+    align?: string;
+    stroke?: { color: string; width: number };
+    shadow?: { color: string; blur: number; offsetX: number; offsetY: number };
+  };
   // Shape-specific
   shapeType?: string;
   fill?: string;
   stroke?: string;
   strokeWidth?: number;
+  shapeStyle?: {
+    fill?: string;
+    stroke?: string;
+    strokeWidth?: number;
+    cornerRadius?: number;
+  };
+  solidColor?: string;
 }
 
 /**
@@ -480,28 +517,150 @@ export class RenderService {
   }
 
   /**
-   * Get project state from Yjs snapshot
+   * Get project state from database (new data model)
+   */
+  private async getProjectStateFromDB(projectId: string): Promise<ProjectState | null> {
+    const project = await db.query.editorProjects.findFirst({
+      where: eq(editorProjects.id, projectId),
+    });
+
+    if (!project) return null;
+
+    // Get all tracks with their clips
+    const tracks = await db
+      .select()
+      .from(editorTracks)
+      .where(eq(editorTracks.projectId, projectId))
+      .orderBy(asc(editorTracks.order));
+
+    const allClips = await db
+      .select()
+      .from(editorClips)
+      .where(eq(editorClips.projectId, projectId))
+      .orderBy(asc(editorClips.startFrame));
+
+    // Get assets for source URLs
+    const assetIds = allClips
+      .filter((c) => c.assetId)
+      .map((c) => c.assetId as string);
+
+    const assets = assetIds.length > 0
+      ? await db
+          .select()
+          .from(editorAssets)
+          .where(eq(editorAssets.projectId, projectId))
+      : [];
+
+    const assetMap = new Map(assets.map((a) => [a.id, a]));
+
+    // Get transitions
+    const transitions = await db
+      .select()
+      .from(editorTransitions)
+      .where(eq(editorTransitions.projectId, projectId));
+
+    const settings = (project.settings as ProjectState['settings']) || {
+      fps: 30,
+      width: 1920,
+      height: 1080,
+      duration: 300,
+    };
+
+    // Convert clips to EditorElement format
+    const elements: EditorElement[] = allClips.map((clip) => {
+      const asset = clip.assetId ? assetMap.get(clip.assetId) : null;
+      const transform = (clip.transform as ClipTransform) || {
+        x: 0,
+        y: 0,
+        width: settings.width,
+        height: settings.height,
+        rotation: 0,
+        scaleX: 1,
+        scaleY: 1,
+        opacity: 1,
+      };
+
+      return {
+        id: clip.id,
+        type: clip.type as EditorElement['type'],
+        name: clip.name,
+        src: asset?.cdnUrl || undefined,
+        x: transform.x || 0,
+        y: transform.y || 0,
+        width: transform.width || settings.width,
+        height: transform.height || settings.height,
+        rotation: transform.rotation || 0,
+        scale: { x: transform.scaleX || 1, y: transform.scaleY || 1 },
+        opacity: transform.opacity ?? 1,
+        startFrame: clip.startFrame,
+        endFrame: clip.endFrame,
+        visible: true,
+        locked: clip.locked || false,
+        blendMode: clip.blendMode || 'normal',
+        effects: (clip.effects as ClipEffect[]) || [],
+        keyframes: clip.keyframes as Record<string, Array<{ frame: number; value: unknown }>> || {},
+        // Clip-specific properties
+        sourceStart: clip.sourceStart || 0,
+        sourceEnd: clip.sourceEnd,
+        speed: clip.speed || 1,
+        reverse: clip.reverse || false,
+        loop: clip.loop || false,
+        // Text properties
+        text: clip.textContent || undefined,
+        textStyle: clip.textStyle as EditorElement['textStyle'],
+        // Shape properties
+        shapeType: clip.shapeType || undefined,
+        shapeStyle: clip.shapeStyle as EditorElement['shapeStyle'],
+        solidColor: clip.solidColor || undefined,
+        // Audio properties
+        volume: clip.volume || 1,
+        fadeIn: clip.fadeIn || 0,
+        fadeOut: clip.fadeOut || 0,
+      };
+    });
+
+    // Extract audio clips into audioTracks format
+    const audioTracks: ProjectState['audioTracks'] = allClips
+      .filter((clip) => clip.type === 'audio')
+      .map((clip) => {
+        const asset = clip.assetId ? assetMap.get(clip.assetId) : null;
+        return {
+          id: clip.id,
+          name: clip.name,
+          src: asset?.cdnUrl || '',
+          startFrame: clip.startFrame,
+          duration: clip.endFrame - clip.startFrame,
+          volume: clip.volume || 1,
+        };
+      });
+
+    // Store transitions for rendering
+    (settings as unknown as { transitions: typeof transitions }).transitions = transitions;
+
+    return { elements, audioTracks, settings };
+  }
+
+  /**
+   * Get project state - tries database first, falls back to Yjs snapshot
    */
   private async getProjectState(projectId: string): Promise<ProjectState | null> {
-    // Get latest snapshot
+    // First try the new data model
+    const dbState = await this.getProjectStateFromDB(projectId);
+
+    // If we have elements from the database, use that
+    if (dbState && dbState.elements.length > 0) {
+      return dbState;
+    }
+
+    // Fallback to Yjs snapshot for legacy/collaborative projects
     const snapshot = await db.query.editorDocumentSnapshots.findFirst({
       where: eq(editorDocumentSnapshots.projectId, projectId),
       orderBy: [desc(editorDocumentSnapshots.version)],
     });
 
     if (!snapshot) {
-      // Return empty project with defaults
-      const project = await db.query.editorProjects.findFirst({
-        where: eq(editorProjects.id, projectId),
-      });
-
-      if (!project) return null;
-
-      return {
-        elements: [],
-        audioTracks: [],
-        settings: project.settings || { fps: 30, width: 1920, height: 1080, duration: 300 },
-      };
+      // Return project from database or null
+      return dbState;
     }
 
     try {
@@ -535,7 +694,7 @@ export class RenderService {
       return { elements, audioTracks, settings };
     } catch (error) {
       console.error('[RenderService] Failed to parse project state:', error);
-      return null;
+      return dbState; // Return database state if Yjs fails
     }
   }
 
@@ -637,6 +796,8 @@ export class RenderService {
       .filter((e) => e.visible && (e.type === 'video' || e.type === 'image'))
       .sort((a, b) => a.startFrame - b.startFrame);
 
+    const effectsService = getEffectsService();
+
     sortedElements.forEach((element, i) => {
       const idx = inputIndices.get(element.id);
       if (idx === undefined) return;
@@ -647,17 +808,90 @@ export class RenderService {
       const startTime = element.startFrame / settings.fps;
       const endTime = element.endFrame / settings.fps;
 
-      // Scale and position
-      filters.push(
-        `[${inputLabel}]scale=${Math.round(element.width * element.scale.x)}:${Math.round(element.height * element.scale.y)},` +
-        `setpts=PTS-STARTPTS+${startTime}/TB[scaled${i}]`
+      // Build filter chain for this element
+      const elementFilters: string[] = [];
+
+      // Handle speed changes
+      const speed = element.speed || 1;
+      if (speed !== 1) {
+        elementFilters.push(`setpts=${1 / speed}*PTS`);
+      }
+
+      // Handle reverse
+      if (element.reverse) {
+        elementFilters.push('reverse');
+      }
+
+      // Source trimming if specified
+      if (element.sourceStart !== undefined && element.sourceStart > 0) {
+        const trimStart = element.sourceStart / settings.fps;
+        elementFilters.push(`trim=start=${trimStart}`);
+        elementFilters.push('setpts=PTS-STARTPTS');
+      }
+
+      // Scale and transform
+      elementFilters.push(
+        `scale=${Math.round(element.width * element.scale.x)}:${Math.round(element.height * element.scale.y)}`
       );
 
-      filters.push(
-        `[${lastVideoOutput}][scaled${i}]overlay=${Math.round(element.x)}:${Math.round(element.y)}:` +
-        `enable='between(t,${startTime},${endTime})'[${outputLabel}]`
-      );
+      // Apply rotation if needed
+      if (element.rotation !== 0) {
+        const radians = (element.rotation * Math.PI) / 180;
+        elementFilters.push(`rotate=${radians}:c=none`);
+      }
 
+      // Apply effects using EffectsService
+      if (element.effects && element.effects.length > 0) {
+        const effectsToApply = element.effects
+          .filter((e) => e.enabled !== false)
+          .map((e) => ({
+            type: e.type,
+            params: e.params as Record<string, number | string | boolean>,
+            enabled: true,
+          }));
+
+        if (effectsToApply.length > 0) {
+          const effectChain = effectsService.generateFilterChain(effectsToApply);
+          if (effectChain) {
+            elementFilters.push(effectChain);
+          }
+        }
+      }
+
+      // Apply opacity
+      if (element.opacity !== undefined && element.opacity < 1) {
+        elementFilters.push(`colorchannelmixer=aa=${element.opacity}`);
+      }
+
+      // Set PTS for timeline positioning
+      elementFilters.push(`setpts=PTS-STARTPTS+${startTime}/TB`);
+
+      // Combine all filters for this element
+      filters.push(`[${inputLabel}]${elementFilters.join(',')}[scaled${i}]`);
+
+      // Overlay with blend mode support
+      let overlayFilter = `overlay=${Math.round(element.x)}:${Math.round(element.y)}:enable='between(t,${startTime},${endTime})'`;
+
+      // Handle blend modes (limited support in FFmpeg)
+      if (element.blendMode && element.blendMode !== 'normal') {
+        const blendModes: Record<string, string> = {
+          'multiply': 'multiply',
+          'screen': 'screen',
+          'overlay': 'overlay',
+          'darken': 'darken',
+          'lighten': 'lighten',
+          'difference': 'difference',
+        };
+        const ffmpegBlend = blendModes[element.blendMode];
+        if (ffmpegBlend) {
+          // Use blend filter instead of overlay for blend modes
+          filters.push(`[${lastVideoOutput}][scaled${i}]blend=all_mode=${ffmpegBlend}:all_opacity=1[${outputLabel}]`);
+          lastVideoOutput = outputLabel;
+          return;
+        }
+      }
+
+      filters.push(`[${lastVideoOutput}][scaled${i}]${overlayFilter}[${outputLabel}]`);
       lastVideoOutput = outputLabel;
     });
 
