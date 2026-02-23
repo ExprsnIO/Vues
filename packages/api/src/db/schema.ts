@@ -1215,6 +1215,14 @@ export const organizations = pgTable(
     avatar: text('avatar'),
     verified: boolean('verified').default(false).notNull(),
     memberCount: integer('member_count').default(1).notNull(),
+    // Rate limit settings (null = use system defaults)
+    rateLimitPerMinute: integer('rate_limit_per_minute'),
+    burstLimit: integer('burst_limit'),
+    dailyRequestLimit: integer('daily_request_limit'),
+    // API access settings
+    apiAccessEnabled: boolean('api_access_enabled').default(true).notNull(),
+    allowedScopes: jsonb('allowed_scopes').$type<string[]>(),
+    webhooksEnabled: boolean('webhooks_enabled').default(false).notNull(),
     createdAt: timestamp('created_at').defaultNow().notNull(),
     updatedAt: timestamp('updated_at').defaultNow().notNull(),
   },
@@ -2732,6 +2740,11 @@ export const authConfig = pgTable('auth_config', {
   // Token settings
   accessTokenExpiryMinutes: integer('access_token_expiry_minutes').default(60).notNull(),
   refreshTokenExpiryDays: integer('refresh_token_expiry_days').default(30).notNull(),
+  // Token type settings
+  localTokensEnabled: boolean('local_tokens_enabled').default(true).notNull(),
+  oauthTokensEnabled: boolean('oauth_tokens_enabled').default(true).notNull(),
+  apiKeysEnabled: boolean('api_keys_enabled').default(false).notNull(),
+  serviceTokensEnabled: boolean('service_tokens_enabled').default(true).notNull(),
   // Security settings
   requireMfaForAdmins: boolean('require_mfa_for_admins').default(false).notNull(),
   allowedMfaMethods: jsonb('allowed_mfa_methods').$type<string[]>().default(['totp', 'webauthn']),
@@ -2739,12 +2752,21 @@ export const authConfig = pgTable('auth_config', {
   passwordRequireUppercase: boolean('password_require_uppercase').default(true).notNull(),
   passwordRequireNumbers: boolean('password_require_numbers').default(true).notNull(),
   passwordRequireSymbols: boolean('password_require_symbols').default(false).notNull(),
-  // Rate limiting
+  // Rate limiting - login
   maxLoginAttempts: integer('max_login_attempts').default(5).notNull(),
   lockoutDurationMinutes: integer('lockout_duration_minutes').default(15).notNull(),
+  // Rate limiting - API (per minute)
+  userRateLimitPerMinute: integer('user_rate_limit_per_minute').default(60).notNull(),
+  adminRateLimitPerMinute: integer('admin_rate_limit_per_minute').default(120).notNull(),
+  anonymousRateLimitPerMinute: integer('anonymous_rate_limit_per_minute').default(30).notNull(),
+  // Rate limiting - burst
+  userBurstLimit: integer('user_burst_limit').default(20).notNull(),
+  adminBurstLimit: integer('admin_burst_limit').default(50).notNull(),
   // OAuth settings
   oauthEnabled: boolean('oauth_enabled').default(true).notNull(),
   allowedOauthProviders: jsonb('allowed_oauth_providers').$type<string[]>().default(['atproto']),
+  allowedOauthScopes: jsonb('allowed_oauth_scopes').$type<string[]>().default(['atproto', 'openid', 'profile', 'read', 'write']),
+  defaultOauthScopes: jsonb('default_oauth_scopes').$type<string[]>().default(['atproto']),
   // Audit
   updatedBy: text('updated_by'),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),

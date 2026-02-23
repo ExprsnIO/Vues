@@ -92,16 +92,32 @@ adminSettingsRouter.get(
         maxConcurrentAdminSessions: 3,
         accessTokenExpiryMinutes: 60,
         refreshTokenExpiryDays: 30,
+        // Token type settings
+        localTokensEnabled: true,
+        oauthTokensEnabled: true,
+        apiKeysEnabled: false,
+        serviceTokensEnabled: true,
+        // Security settings
         requireMfaForAdmins: false,
         allowedMfaMethods: ['totp', 'webauthn'],
         passwordMinLength: 12,
         passwordRequireUppercase: true,
         passwordRequireNumbers: true,
         passwordRequireSymbols: false,
+        // Rate limiting - login
         maxLoginAttempts: 5,
         lockoutDurationMinutes: 15,
+        // Rate limiting - API
+        userRateLimitPerMinute: 60,
+        adminRateLimitPerMinute: 120,
+        anonymousRateLimitPerMinute: 30,
+        userBurstLimit: 20,
+        adminBurstLimit: 50,
+        // OAuth settings
         oauthEnabled: true,
         allowedOauthProviders: ['atproto'],
+        allowedOauthScopes: ['atproto', 'openid', 'profile', 'read', 'write'],
+        defaultOauthScopes: ['atproto'],
         updatedBy: null,
         updatedAt: new Date(),
       };

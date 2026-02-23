@@ -2,8 +2,10 @@ import { Hono } from 'hono';
 import { eq, desc, and, sql, count, sum } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import { db } from '../db/index.js';
-import { paymentConfigs, paymentTransactions, payoutRequests, users } from '../db/schema.js';
+import { paymentConfigs, paymentTransactions, payoutRequests, users, creatorEarnings } from '../db/schema.js';
 import { adminAuthMiddleware, requirePermission, ADMIN_PERMISSIONS } from '../auth/middleware.js';
+import { PaymentGatewayFactory } from '../services/payments/PaymentGatewayFactory.js';
+import type { PaymentProvider } from '@exprsn/shared/types';
 
 export const paymentsAdminRouter = new Hono();
 
@@ -186,12 +188,14 @@ paymentsAdminRouter.post(
   '/io.exprsn.admin.payments.refund',
   requirePermission(ADMIN_PERMISSIONS.CONFIG_EDIT),
   async (c) => {
+    const adminUser = c.get('adminUser');
     const { id, reason, amount } = await c.req.json<{ id: string; reason?: string; amount?: number }>();
 
     if (!id) {
       return c.json({ error: 'InvalidRequest', message: 'Missing id' }, 400);
     }
 
+    // Get transaction with its payment config
     const [transaction] = await db
       .select()
       .from(paymentTransactions)
@@ -206,26 +210,129 @@ paymentsAdminRouter.post(
       return c.json({ error: 'InvalidState', message: 'Can only refund completed transactions' }, 400);
     }
 
-    const refundAmount = amount || transaction.amount;
-    const isFullRefund = refundAmount >= transaction.amount;
+    // Check if already fully refunded
+    const alreadyRefunded = transaction.refundedAmount || 0;
+    const maxRefundable = transaction.amount - alreadyRefunded;
 
-    // TODO: Integrate with actual payment provider to process refund
-    // For now, just update the status
+    if (maxRefundable <= 0) {
+      return c.json({ error: 'InvalidState', message: 'Transaction already fully refunded' }, 400);
+    }
+
+    const refundAmount = Math.min(amount || transaction.amount, maxRefundable);
+    const isFullRefund = (alreadyRefunded + refundAmount) >= transaction.amount;
+
+    // Get payment config for gateway
+    const [config] = await db
+      .select()
+      .from(paymentConfigs)
+      .where(eq(paymentConfigs.id, transaction.configId))
+      .limit(1);
+
+    if (!config) {
+      return c.json({ error: 'ConfigError', message: 'Payment configuration not found' }, 500);
+    }
+
+    // Process refund through payment gateway
+    let providerRefundId: string | undefined;
+
+    if (transaction.providerTransactionId) {
+      try {
+        const gateway = PaymentGatewayFactory.getOrCreate(
+          config.id,
+          config.provider as PaymentProvider,
+          config.credentials as Record<string, string>,
+          config.testMode
+        );
+
+        const refundResult = await gateway.processRefund({
+          transactionId: transaction.providerTransactionId,
+          amount: refundAmount,
+          reason: reason,
+        });
+
+        if (!refundResult.success) {
+          return c.json({
+            error: 'RefundFailed',
+            message: refundResult.errorMessage || 'Payment provider refund failed'
+          }, 500);
+        }
+
+        providerRefundId = refundResult.refundId;
+      } catch (error) {
+        console.error('Payment gateway refund error:', error);
+        return c.json({
+          error: 'GatewayError',
+          message: error instanceof Error ? error.message : 'Payment gateway error'
+        }, 500);
+      }
+    }
+
+    // Update transaction status
     await db
       .update(paymentTransactions)
       .set({
         status: isFullRefund ? 'refunded' : 'completed',
-        refundedAmount: (transaction.refundedAmount || 0) + refundAmount,
+        refundedAmount: alreadyRefunded + refundAmount,
         metadata: {
           ...((transaction.metadata as Record<string, unknown>) || {}),
           refundReason: reason,
           refundedAt: new Date().toISOString(),
+          refundedBy: adminUser?.id,
+          providerRefundId,
         },
         updatedAt: new Date(),
       })
       .where(eq(paymentTransactions.id, id));
 
-    return c.json({ success: true });
+    // Create refund transaction record
+    const refundTxId = nanoid();
+    await db.insert(paymentTransactions).values({
+      id: refundTxId,
+      configId: transaction.configId,
+      customerId: transaction.customerId,
+      providerTransactionId: providerRefundId,
+      type: 'refund',
+      status: 'completed',
+      amount: -refundAmount, // Negative to indicate refund
+      currency: transaction.currency,
+      fromDid: transaction.toDid, // Reverse the direction
+      toDid: transaction.fromDid,
+      description: `Refund for transaction ${transaction.id}${reason ? `: ${reason}` : ''}`,
+      metadata: {
+        originalTransactionId: transaction.id,
+        reason,
+        refundedBy: adminUser?.id,
+      },
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    // Deduct from creator earnings if applicable
+    if (transaction.toDid) {
+      const [earnings] = await db
+        .select()
+        .from(creatorEarnings)
+        .where(eq(creatorEarnings.userDid, transaction.toDid))
+        .limit(1);
+
+      if (earnings) {
+        await db
+          .update(creatorEarnings)
+          .set({
+            totalEarnings: Math.max(0, earnings.totalEarnings - refundAmount),
+            availableBalance: Math.max(0, earnings.availableBalance - refundAmount),
+          })
+          .where(eq(creatorEarnings.userDid, transaction.toDid));
+      }
+    }
+
+    return c.json({
+      success: true,
+      refundTransactionId: refundTxId,
+      refundAmount,
+      isFullRefund,
+      providerRefundId,
+    });
   }
 );
 

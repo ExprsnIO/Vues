@@ -46,6 +46,8 @@ import { adminSettingsRouter } from './routes/admin-settings.js';
 import { analyticsRoutes } from './routes/analytics.js';
 import { initializeIdentityService } from './services/identity/index.js';
 import { cronService } from './services/cron/index.js';
+import { oauthAgent } from './services/oauth/OAuthAgent.js';
+import { scopeExtractMiddleware, configBasedRateLimit } from './auth/scope-middleware.js';
 import { Redis } from 'ioredis';
 import { RelayService, CommitEvent as RelayCommitEvent } from '@exprsn/relay';
 
@@ -61,6 +63,12 @@ app.use('*', prettyJSON());
 app.use('*', secureHeaders({
   crossOriginResourcePolicy: false, // Disable CORP to allow cross-origin video loading
 }));
+
+// OAuth scope extraction middleware for /xrpc routes
+app.use('/xrpc/*', scopeExtractMiddleware);
+
+// Config-based rate limiting for /xrpc routes
+app.use('/xrpc/*', configBasedRateLimit());
 
 // Health check
 app.get('/health', (c) => {
@@ -322,6 +330,12 @@ async function main() {
   const cronEnabled = process.env.CRON_ENABLED !== 'false';
   if (cronEnabled) {
     await cronService.initialize();
+  }
+
+  // Initialize OAuth agent for automated token management
+  const oauthAgentEnabled = process.env.OAUTH_AGENT_ENABLED !== 'false';
+  if (oauthAgentEnabled) {
+    await oauthAgent.initialize();
   }
 
   // Mount PDS routes with relay callback
