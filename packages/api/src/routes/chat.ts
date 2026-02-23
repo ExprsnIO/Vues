@@ -107,7 +107,7 @@ chatRouter.post('/io.exprsn.chat.getOrCreateConversation', authMiddleware, async
         .where(
           and(
             eq(messages.conversationId, conversation!.id),
-            sql`${messages.createdAt} > ${participantState.lastReadAt}`,
+            sql`${messages.createdAt} > ${participantState.lastReadAt.toISOString()}`,
             sql`${messages.senderDid} != ${userDid}`
           )
         )
@@ -157,7 +157,7 @@ chatRouter.get('/io.exprsn.chat.getConversations', authMiddleware, async (c) => 
 
   if (cursor) {
     const cursorDate = new Date(cursor);
-    conditions.push(sql`${conversations.lastMessageAt} < ${cursorDate}`);
+    conditions.push(sql`${conversations.lastMessageAt} < ${cursorDate.toISOString()}`);
   }
 
   const results = await db
@@ -196,7 +196,7 @@ chatRouter.get('/io.exprsn.chat.getConversations', authMiddleware, async (c) => 
             .where(
               and(
                 eq(messages.conversationId, r.conversation.id),
-                sql`${messages.createdAt} > ${participantState.lastReadAt}`,
+                sql`${messages.createdAt} > ${participantState.lastReadAt.toISOString()}`,
                 sql`${messages.senderDid} != ${userDid}`
               )
             )
@@ -363,7 +363,7 @@ chatRouter.get('/io.exprsn.chat.getMessages', authMiddleware, async (c) => {
 
   if (cursor) {
     const cursorDate = new Date(cursor);
-    messageConditions.push(sql`${messages.createdAt} < ${cursorDate}`);
+    messageConditions.push(sql`${messages.createdAt} < ${cursorDate.toISOString()}`);
   }
 
   const results = await db

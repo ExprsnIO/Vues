@@ -93,28 +93,106 @@ services:
       exit 0;
       "
 
-  ffmpeg-worker:
+  # FFmpeg Render Workers - horizontally scalable
+  render-worker:
     build:
       context: .
       dockerfile: docker/ffmpeg/Dockerfile
-    container_name: exprsn-ffmpeg-worker
+    deploy:
+      mode: replicated
+      replicas: 2
+      resources:
+        limits:
+          cpus: "2"
+          memory: 4G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
     environment:
       - NODE_ENV=production
       - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgres://exprsn:exprsn_dev@postgres:5432/exprsn
+      - QUEUE_NAME=render-jobs
+      - WORKER_CONCURRENCY=2
+      - HEALTH_PORT=3100
+      - GRACEFUL_SHUTDOWN_TIMEOUT=30000
+      - RENDER_OUTPUT_DIR=/data/renders
+      - RENDER_TEMP_DIR=/tmp/renders
+      - GPU_ENABLED=false
       - DO_SPACES_ENDPOINT=http://minio:9000
       - DO_SPACES_KEY=minioadmin
       - DO_SPACES_SECRET=minioadmin
       - DO_SPACES_BUCKET=exprsn-uploads
       - DO_SPACES_PROCESSED_BUCKET=exprsn-processed
-      - STORAGE_PATH=/app/data
-      - WORKER_CONCURRENCY=2
     volumes:
+      - render_output:/data/renders
       - ./data:/app/data
     depends_on:
       redis:
         condition: service_healthy
+      postgres:
+        condition: service_healthy
       minio:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3100/health"]
+      interval: 15s
+      timeout: 10s
+      start_period: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # GPU-enabled render worker (optional, requires nvidia-docker)
+  render-worker-gpu:
+    build:
+      context: .
+      dockerfile: docker/ffmpeg/Dockerfile
+    profiles:
+      - gpu
+    deploy:
+      mode: replicated
+      replicas: 1
+      resources:
+        limits:
+          cpus: "4"
+          memory: 8G
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      - NODE_ENV=production
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgres://exprsn:exprsn_dev@postgres:5432/exprsn
+      - QUEUE_NAME=render-jobs
+      - WORKER_CONCURRENCY=4
+      - HEALTH_PORT=3100
+      - GRACEFUL_SHUTDOWN_TIMEOUT=60000
+      - RENDER_OUTPUT_DIR=/data/renders
+      - RENDER_TEMP_DIR=/tmp/renders
+      - GPU_ENABLED=true
+      - DO_SPACES_ENDPOINT=http://minio:9000
+      - DO_SPACES_KEY=minioadmin
+      - DO_SPACES_SECRET=minioadmin
+      - DO_SPACES_BUCKET=exprsn-uploads
+      - DO_SPACES_PROCESSED_BUCKET=exprsn-processed
+    volumes:
+      - render_output:/data/renders
+      - ./data:/app/data
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3100/health"]
+      interval: 15s
+      timeout: 10s
+      start_period: 10s
+      retries: 3
     restart: unless-stopped
 
   prefetch-worker:
@@ -138,3 +216,4 @@ volumes:
   redis_data:
   opensearch_data:
   minio_data:
+  render_output:

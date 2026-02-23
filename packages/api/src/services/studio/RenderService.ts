@@ -8,6 +8,9 @@ import { Redis } from 'ioredis';
 import { db } from '../../db/index.js';
 import {
   renderJobs,
+  renderBatches,
+  userRenderQuotas,
+  renderWorkers,
   editorProjects,
   editorDocumentSnapshots,
   editorTracks,
@@ -15,7 +18,7 @@ import {
   editorTransitions,
   editorAssets,
 } from '../../db/schema.js';
-import { eq, and, desc, asc } from 'drizzle-orm';
+import { eq, and, desc, asc, inArray, count, gte, sql } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import { getEffectsService } from './EffectsService.js';
 import type { ClipTransform, ClipEffect } from './EditorService.js';
@@ -119,7 +122,30 @@ export interface RenderJobData {
   quality: 'draft' | 'medium' | 'high' | 'ultra';
   resolution?: { width: number; height: number };
   fps?: number;
+  priority?: 'low' | 'normal' | 'high' | 'urgent';
+  batchId?: string;
+  dependsOnJobId?: string;
 }
+
+/**
+ * Priority values for BullMQ (lower = higher priority)
+ */
+const PRIORITY_VALUES: Record<string, number> = {
+  urgent: 1,
+  high: 5,
+  normal: 10,
+  low: 20,
+};
+
+/**
+ * Priority scores for database sorting (higher = higher priority)
+ */
+const PRIORITY_SCORES: Record<string, number> = {
+  urgent: 100,
+  high: 75,
+  normal: 50,
+  low: 25,
+};
 
 /**
  * Quality presets for rendering
@@ -218,8 +244,12 @@ export class RenderService {
     quality?: 'draft' | 'medium' | 'high' | 'ultra';
     resolution?: { width: number; height: number };
     fps?: number;
+    priority?: 'low' | 'normal' | 'high' | 'urgent';
+    batchId?: string;
+    dependsOnJobId?: string;
   }): Promise<string> {
     const jobId = `render-${nanoid()}`;
+    const priority = params.priority || 'normal';
 
     // Verify project exists and user has access
     const project = await db.query.editorProjects.findFirst({
@@ -244,6 +274,15 @@ export class RenderService {
       }
     }
 
+    // Get user's priority boost if applicable
+    let priorityBoost = 0;
+    const quota = await db.query.userRenderQuotas.findFirst({
+      where: eq(userRenderQuotas.userDid, params.userDid),
+    });
+    if (quota?.priorityBoost) {
+      priorityBoost = quota.priorityBoost;
+    }
+
     // Create database record
     await db.insert(renderJobs).values({
       id: jobId,
@@ -254,9 +293,20 @@ export class RenderService {
       quality: params.quality || 'high',
       resolution: params.resolution || project.settings,
       fps: params.fps || project.settings?.fps || 30,
+      priority,
+      priorityScore: (PRIORITY_SCORES[priority] || 50) + priorityBoost,
+      batchId: params.batchId,
+      dependsOnJobId: params.dependsOnJobId,
     });
 
-    // Add to queue
+    // If this job depends on another, don't add to queue yet
+    // It will be added when the dependency completes
+    if (params.dependsOnJobId) {
+      await db.update(renderJobs).set({ status: 'waiting' }).where(eq(renderJobs.id, jobId));
+      return jobId;
+    }
+
+    // Add to queue with priority
     await this.queue.add('render', {
       jobId,
       projectId: params.projectId,
@@ -265,9 +315,395 @@ export class RenderService {
       quality: params.quality || 'high',
       resolution: params.resolution,
       fps: params.fps,
+      priority,
+      batchId: params.batchId,
+    }, {
+      priority: PRIORITY_VALUES[priority],
+      jobId, // Use jobId as the BullMQ job ID for easier lookup
     });
 
+    // Increment user's daily usage
+    await this.incrementQuotaUsage(params.userDid);
+
     return jobId;
+  }
+
+  /**
+   * Create batch render jobs for multiple projects
+   */
+  async createBatchRenderJobs(params: {
+    projectIds: string[];
+    userDid: string;
+    format?: 'mp4' | 'webm' | 'mov';
+    quality?: 'draft' | 'medium' | 'high' | 'ultra';
+    priority?: 'low' | 'normal' | 'high' | 'urgent';
+    name?: string;
+  }): Promise<{ batchId: string; jobIds: string[] }> {
+    const batchId = `batch-${nanoid()}`;
+    const jobIds: string[] = [];
+
+    // Create batch record
+    await db.insert(renderBatches).values({
+      id: batchId,
+      userDid: params.userDid,
+      name: params.name,
+      totalJobs: params.projectIds.length,
+      status: 'pending',
+    });
+
+    // Create individual jobs
+    for (const projectId of params.projectIds) {
+      try {
+        const jobId = await this.createRenderJob({
+          projectId,
+          userDid: params.userDid,
+          format: params.format,
+          quality: params.quality,
+          priority: params.priority,
+          batchId,
+        });
+        jobIds.push(jobId);
+      } catch (error) {
+        console.error(`[RenderService] Failed to create job for project ${projectId}:`, error);
+        // Continue with other projects
+      }
+    }
+
+    // Update batch with actual job count
+    await db.update(renderBatches).set({
+      totalJobs: jobIds.length,
+      status: jobIds.length > 0 ? 'processing' : 'failed',
+    }).where(eq(renderBatches.id, batchId));
+
+    return { batchId, jobIds };
+  }
+
+  /**
+   * Create a job that depends on another job
+   */
+  async createDependentJob(params: {
+    projectId: string;
+    userDid: string;
+    dependsOnJobId: string;
+    format?: 'mp4' | 'webm' | 'mov';
+    quality?: 'draft' | 'medium' | 'high' | 'ultra';
+  }): Promise<string> {
+    // Verify dependency exists
+    const dependency = await db.query.renderJobs.findFirst({
+      where: eq(renderJobs.id, params.dependsOnJobId),
+    });
+
+    if (!dependency) {
+      throw new Error('Dependency job not found');
+    }
+
+    return this.createRenderJob({
+      ...params,
+      dependsOnJobId: params.dependsOnJobId,
+    });
+  }
+
+  /**
+   * Check rate limits for a user
+   */
+  async checkRateLimits(userDid: string): Promise<{
+    canRender: boolean;
+    dailyRemaining: number;
+    weeklyRemaining: number;
+    currentConcurrent: number;
+    maxConcurrent: number;
+    reason?: string;
+  }> {
+    // Get or create quota
+    let quota = await db.query.userRenderQuotas.findFirst({
+      where: eq(userRenderQuotas.userDid, userDid),
+    });
+
+    if (!quota) {
+      await db.insert(userRenderQuotas).values({ userDid });
+      quota = await db.query.userRenderQuotas.findFirst({
+        where: eq(userRenderQuotas.userDid, userDid),
+      });
+    }
+
+    const now = new Date();
+    let dailyUsed = quota!.dailyUsed || 0;
+    let weeklyUsed = quota!.weeklyUsed || 0;
+
+    // Reset daily counter if needed
+    if (!quota!.dailyResetAt || new Date(quota!.dailyResetAt) < now) {
+      dailyUsed = 0;
+      await db.update(userRenderQuotas).set({
+        dailyUsed: 0,
+        dailyResetAt: new Date(now.getTime() + 86400000),
+      }).where(eq(userRenderQuotas.userDid, userDid));
+    }
+
+    // Reset weekly counter if needed
+    if (!quota!.weeklyResetAt || new Date(quota!.weeklyResetAt) < now) {
+      weeklyUsed = 0;
+      await db.update(userRenderQuotas).set({
+        weeklyUsed: 0,
+        weeklyResetAt: new Date(now.getTime() + 604800000),
+      }).where(eq(userRenderQuotas.userDid, userDid));
+    }
+
+    // Count concurrent jobs
+    const [concurrent] = await db
+      .select({ count: count() })
+      .from(renderJobs)
+      .where(and(
+        eq(renderJobs.userDid, userDid),
+        inArray(renderJobs.status, ['pending', 'queued', 'rendering'])
+      ));
+
+    const dailyLimit = quota!.dailyLimit || 10;
+    const weeklyLimit = quota!.weeklyLimit || 50;
+    const concurrentLimit = quota!.concurrentLimit || 2;
+    const currentConcurrent = concurrent?.count || 0;
+
+    const dailyRemaining = dailyLimit - dailyUsed;
+    const weeklyRemaining = weeklyLimit - weeklyUsed;
+
+    let reason: string | undefined;
+    if (dailyRemaining <= 0) {
+      reason = 'Daily render limit reached';
+    } else if (weeklyRemaining <= 0) {
+      reason = 'Weekly render limit reached';
+    } else if (currentConcurrent >= concurrentLimit) {
+      reason = 'Maximum concurrent renders reached';
+    }
+
+    return {
+      canRender: dailyRemaining > 0 && weeklyRemaining > 0 && currentConcurrent < concurrentLimit,
+      dailyRemaining,
+      weeklyRemaining,
+      currentConcurrent,
+      maxConcurrent: concurrentLimit,
+      reason,
+    };
+  }
+
+  /**
+   * Estimate render resources for a project
+   */
+  async estimateRender(projectId: string): Promise<{
+    estimatedDurationSeconds: number;
+    estimatedMemoryMb: number;
+    estimatedFileSizeMb: number;
+    warnings: string[];
+  }> {
+    const projectState = await this.getProjectState(projectId);
+    if (!projectState) {
+      throw new Error('Project not found');
+    }
+
+    const duration = projectState.settings.duration / projectState.settings.fps;
+    const elementCount = projectState.elements.length;
+    const hasVideo = projectState.elements.some((e) => e.type === 'video');
+    const hasEffects = projectState.elements.some((e) => e.effects && e.effects.length > 0);
+    const hasAudio = projectState.audioTracks.length > 0;
+
+    const warnings: string[] = [];
+    if (duration > 300) {
+      warnings.push('Long video (> 5 min) may take significant time to render');
+    }
+    if (elementCount > 50) {
+      warnings.push('High element count may increase memory usage and render time');
+    }
+    if (hasEffects) {
+      warnings.push('Video effects will increase render time');
+    }
+
+    // Estimate based on complexity
+    const baseTimeMultiplier = 2; // 2x real-time for basic encoding
+    const complexityMultiplier = 1 + (elementCount * 0.05) + (hasEffects ? 0.5 : 0) + (hasVideo ? 0.3 : 0);
+
+    return {
+      estimatedDurationSeconds: Math.ceil(duration * baseTimeMultiplier * complexityMultiplier),
+      estimatedMemoryMb: Math.ceil(512 + (elementCount * 50) + (hasVideo ? 500 : 0) + (hasAudio ? 100 : 0)),
+      estimatedFileSizeMb: Math.ceil(duration * 2), // ~2MB per second for high quality
+      warnings,
+    };
+  }
+
+  /**
+   * Admin: Pause a render job
+   */
+  async adminPauseJob(jobId: string, adminId: string): Promise<boolean> {
+    const job = await db.query.renderJobs.findFirst({
+      where: eq(renderJobs.id, jobId),
+    });
+
+    if (!job || !['pending', 'queued'].includes(job.status)) {
+      return false;
+    }
+
+    // Remove from queue
+    const bullJob = await this.queue.getJob(jobId);
+    if (bullJob) {
+      await bullJob.moveToDelayed(Date.now() + 86400000 * 365); // Move far into the future
+    }
+
+    await db.update(renderJobs).set({
+      status: 'paused',
+      pausedAt: new Date(),
+      pausedByAdminId: adminId,
+      updatedAt: new Date(),
+    }).where(eq(renderJobs.id, jobId));
+
+    return true;
+  }
+
+  /**
+   * Admin: Resume a paused job
+   */
+  async adminResumeJob(jobId: string): Promise<boolean> {
+    const job = await db.query.renderJobs.findFirst({
+      where: and(eq(renderJobs.id, jobId), eq(renderJobs.status, 'paused')),
+    });
+
+    if (!job) {
+      return false;
+    }
+
+    // Re-add to queue
+    await this.queue.add('render', {
+      jobId: job.id,
+      projectId: job.projectId,
+      userDid: job.userDid,
+      format: job.format as 'mp4' | 'webm' | 'mov',
+      quality: job.quality as 'draft' | 'medium' | 'high' | 'ultra',
+      resolution: job.resolution as { width: number; height: number } | undefined,
+      fps: job.fps || undefined,
+      priority: job.priority as 'low' | 'normal' | 'high' | 'urgent' | undefined,
+      batchId: job.batchId || undefined,
+    }, {
+      priority: PRIORITY_VALUES[job.priority || 'normal'],
+      jobId,
+    });
+
+    await db.update(renderJobs).set({
+      status: 'pending',
+      pausedAt: null,
+      pausedByAdminId: null,
+      updatedAt: new Date(),
+    }).where(eq(renderJobs.id, jobId));
+
+    return true;
+  }
+
+  /**
+   * Admin: Update job priority
+   */
+  async adminUpdatePriority(
+    jobId: string,
+    priority: 'low' | 'normal' | 'high' | 'urgent'
+  ): Promise<boolean> {
+    const job = await db.query.renderJobs.findFirst({
+      where: eq(renderJobs.id, jobId),
+    });
+
+    if (!job) {
+      return false;
+    }
+
+    await db.update(renderJobs).set({
+      priority,
+      priorityScore: PRIORITY_SCORES[priority],
+      updatedAt: new Date(),
+    }).where(eq(renderJobs.id, jobId));
+
+    // Update queue priority if job is pending
+    if (job.status === 'pending') {
+      const bullJob = await this.queue.getJob(jobId);
+      if (bullJob) {
+        await bullJob.changePriority({ priority: PRIORITY_VALUES[priority] });
+      }
+    }
+
+    return true;
+  }
+
+  /**
+   * Increment user's quota usage
+   */
+  private async incrementQuotaUsage(userDid: string): Promise<void> {
+    await db.update(userRenderQuotas).set({
+      dailyUsed: sql`${userRenderQuotas.dailyUsed} + 1`,
+      weeklyUsed: sql`${userRenderQuotas.weeklyUsed} + 1`,
+      updatedAt: new Date(),
+    }).where(eq(userRenderQuotas.userDid, userDid));
+  }
+
+  /**
+   * Update batch status when a job completes or fails
+   */
+  async updateBatchStatus(batchId: string, jobStatus: 'completed' | 'failed'): Promise<void> {
+    if (!batchId) return;
+
+    // Increment appropriate counter
+    if (jobStatus === 'completed') {
+      await db.update(renderBatches).set({
+        completedJobs: sql`${renderBatches.completedJobs} + 1`,
+      }).where(eq(renderBatches.id, batchId));
+    } else {
+      await db.update(renderBatches).set({
+        failedJobs: sql`${renderBatches.failedJobs} + 1`,
+      }).where(eq(renderBatches.id, batchId));
+    }
+
+    // Check if batch is complete
+    const batch = await db.query.renderBatches.findFirst({
+      where: eq(renderBatches.id, batchId),
+    });
+
+    if (batch) {
+      const completed = (batch.completedJobs || 0) + (batch.failedJobs || 0);
+      if (completed >= (batch.totalJobs || 0)) {
+        const status = batch.failedJobs === 0 ? 'completed' : batch.completedJobs === 0 ? 'failed' : 'partial';
+        await db.update(renderBatches).set({
+          status,
+          completedAt: new Date(),
+        }).where(eq(renderBatches.id, batchId));
+      }
+    }
+  }
+
+  /**
+   * Process dependent jobs when a job completes
+   */
+  async processDependentJobs(completedJobId: string): Promise<void> {
+    const dependentJobs = await db
+      .select()
+      .from(renderJobs)
+      .where(and(
+        eq(renderJobs.dependsOnJobId, completedJobId),
+        eq(renderJobs.status, 'waiting')
+      ));
+
+    for (const job of dependentJobs) {
+      // Add to queue
+      await this.queue.add('render', {
+        jobId: job.id,
+        projectId: job.projectId,
+        userDid: job.userDid,
+        format: job.format as 'mp4' | 'webm' | 'mov',
+        quality: job.quality as 'draft' | 'medium' | 'high' | 'ultra',
+        resolution: job.resolution as { width: number; height: number } | undefined,
+        fps: job.fps || undefined,
+        priority: job.priority as 'low' | 'normal' | 'high' | 'urgent' | undefined,
+        batchId: job.batchId || undefined,
+      }, {
+        priority: PRIORITY_VALUES[job.priority || 'normal'],
+        jobId: job.id,
+      });
+
+      await db.update(renderJobs).set({
+        status: 'pending',
+        updatedAt: new Date(),
+      }).where(eq(renderJobs.id, job.id));
+    }
   }
 
   /**
@@ -478,6 +914,11 @@ export class RenderService {
 
         await updateProgress(95, 'Finalizing...');
 
+        // Get the job to check for batch and update with actual metrics
+        const completedJob = await db.query.renderJobs.findFirst({
+          where: eq(renderJobs.id, jobId),
+        });
+
         // Update job as completed
         await db
           .update(renderJobs)
@@ -489,10 +930,21 @@ export class RenderService {
             outputUrl,
             outputSize: stats.size,
             duration: Math.floor(renderSettings.duration),
+            actualDurationSeconds: completedJob?.renderStartedAt
+              ? Math.floor((Date.now() - completedJob.renderStartedAt.getTime()) / 1000)
+              : undefined,
             renderCompletedAt: new Date(),
             updatedAt: new Date(),
           })
           .where(eq(renderJobs.id, jobId));
+
+        // Update batch status if part of a batch
+        if (completedJob?.batchId) {
+          await this.updateBatchStatus(completedJob.batchId, 'completed');
+        }
+
+        // Process any dependent jobs
+        await this.processDependentJobs(jobId);
 
       } finally {
         // Cleanup temp directory
@@ -501,6 +953,11 @@ export class RenderService {
 
     } catch (error) {
       console.error(`[RenderService] Render failed:`, error);
+
+      // Get the job to check for batch
+      const failedJob = await db.query.renderJobs.findFirst({
+        where: eq(renderJobs.id, jobId),
+      });
 
       await db
         .update(renderJobs)
@@ -511,6 +968,11 @@ export class RenderService {
           updatedAt: new Date(),
         })
         .where(eq(renderJobs.id, jobId));
+
+      // Update batch status if part of a batch
+      if (failedJob?.batchId) {
+        await this.updateBatchStatus(failedJob.batchId, 'failed');
+      }
 
       throw error;
     }

@@ -490,7 +490,7 @@ class ApiClient {
   }): Promise<{ projectId: string }> {
     return this.fetch('/xrpc/io.exprsn.studio.createProject', {
       method: 'POST',
-      body: JSON.stringify(data),
+      body: JSON.stringify({ name: data.title, settings: data.settings }),
     });
   }
 
@@ -858,6 +858,131 @@ class ApiClient {
     return this.fetch('/xrpc/io.exprsn.admin.featured.remove', {
       method: 'POST',
       body: JSON.stringify({ contentUri }),
+    });
+  }
+
+  // =============================================================================
+  // Render Admin API
+  // =============================================================================
+
+  async getRenderQueueStats(): Promise<{
+    pending: number;
+    rendering: number;
+    completed: number;
+    failed: number;
+    paused: number;
+    totalToday: number;
+    avgWaitTime: number;
+    avgRenderTime: number;
+    priorityBreakdown: {
+      urgent: number;
+      high: number;
+      normal: number;
+      low: number;
+    };
+  }> {
+    return this.fetch('/xrpc/io.exprsn.admin.render.getQueueStats');
+  }
+
+  async listRenderJobs(options: {
+    status?: string;
+    priority?: string;
+    userDid?: string;
+    limit?: number;
+    cursor?: string;
+  } = {}): Promise<RenderJobView[]> {
+    const params = new URLSearchParams();
+    if (options.status) params.set('status', options.status);
+    if (options.priority) params.set('priority', options.priority);
+    if (options.userDid) params.set('userDid', options.userDid);
+    if (options.limit) params.set('limit', String(options.limit));
+    if (options.cursor) params.set('cursor', options.cursor);
+    const result = await this.fetch(`/xrpc/io.exprsn.admin.render.listJobs?${params}`) as { jobs: RenderJobView[] };
+    return result.jobs;
+  }
+
+  async getRenderJob(jobId: string): Promise<RenderJobView> {
+    const params = new URLSearchParams({ jobId });
+    return this.fetch(`/xrpc/io.exprsn.admin.render.getJob?${params}`);
+  }
+
+  async pauseRenderJob(jobId: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.render.pauseJob', {
+      method: 'POST',
+      body: JSON.stringify({ jobId }),
+    });
+  }
+
+  async resumeRenderJob(jobId: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.render.resumeJob', {
+      method: 'POST',
+      body: JSON.stringify({ jobId }),
+    });
+  }
+
+  async cancelRenderJob(jobId: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.render.cancelJob', {
+      method: 'POST',
+      body: JSON.stringify({ jobId }),
+    });
+  }
+
+  async retryRenderJob(jobId: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.render.retryJob', {
+      method: 'POST',
+      body: JSON.stringify({ jobId }),
+    });
+  }
+
+  async updateRenderJobPriority(jobId: string, priority: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.render.updatePriority', {
+      method: 'POST',
+      body: JSON.stringify({ jobId, priority }),
+    });
+  }
+
+  async listRenderWorkers(): Promise<RenderWorkerView[]> {
+    const result = await this.fetch('/xrpc/io.exprsn.admin.render.listWorkers') as { workers: RenderWorkerView[] };
+    return result.workers;
+  }
+
+  async drainRenderWorker(workerId: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.render.drainWorker', {
+      method: 'POST',
+      body: JSON.stringify({ workerId }),
+    });
+  }
+
+  async listRenderBatches(options: {
+    status?: string;
+    userDid?: string;
+    limit?: number;
+    cursor?: string;
+  } = {}): Promise<RenderBatchView[]> {
+    const params = new URLSearchParams();
+    if (options.status) params.set('status', options.status);
+    if (options.userDid) params.set('userDid', options.userDid);
+    if (options.limit) params.set('limit', String(options.limit));
+    if (options.cursor) params.set('cursor', options.cursor);
+    const result = await this.fetch(`/xrpc/io.exprsn.admin.render.listBatches?${params}`) as { batches: RenderBatchView[] };
+    return result.batches;
+  }
+
+  async getUserRenderQuota(userDid: string): Promise<UserRenderQuotaView> {
+    const params = new URLSearchParams({ userDid });
+    return this.fetch(`/xrpc/io.exprsn.admin.render.getUserQuota?${params}`);
+  }
+
+  async updateUserRenderQuota(userDid: string, quota: {
+    dailyLimit?: number;
+    weeklyLimit?: number;
+    concurrentLimit?: number;
+    maxQuality?: string;
+    priorityBoost?: number;
+  }): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.render.updateUserQuota', {
+      method: 'POST',
+      body: JSON.stringify({ userDid, ...quota }),
     });
   }
 
@@ -2453,6 +2578,75 @@ export interface FeaturedContentItem {
       avatar?: string;
     };
   };
+}
+
+// Render Pipeline types
+export interface RenderJobView {
+  id: string;
+  projectId: string;
+  userDid: string;
+  userHandle?: string;
+  status: string;
+  progress: number;
+  priority: string;
+  priorityScore: number;
+  format: string;
+  quality: string;
+  width: number;
+  height: number;
+  fps: number;
+  workerId?: string;
+  batchId?: string;
+  dependsOnJobId?: string;
+  estimatedDurationSeconds?: number;
+  actualDurationSeconds?: number;
+  outputUrl?: string;
+  fileSize?: number;
+  error?: string;
+  createdAt: string;
+  startedAt?: string;
+  completedAt?: string;
+  pausedAt?: string;
+}
+
+export interface RenderWorkerView {
+  id: string;
+  hostname: string;
+  status: string;
+  concurrency: number;
+  activeJobs: number;
+  totalProcessed: number;
+  failedJobs: number;
+  avgProcessingTime?: number;
+  gpuEnabled: boolean;
+  gpuModel?: string;
+  lastHeartbeat?: string;
+  startedAt: string;
+}
+
+export interface RenderBatchView {
+  id: string;
+  userDid: string;
+  userHandle?: string;
+  name?: string;
+  totalJobs: number;
+  completedJobs: number;
+  failedJobs: number;
+  status: string;
+  createdAt: string;
+  completedAt?: string;
+}
+
+export interface UserRenderQuotaView {
+  userDid: string;
+  userHandle?: string;
+  dailyLimit: number;
+  dailyUsed: number;
+  weeklyLimit: number;
+  weeklyUsed: number;
+  concurrentLimit: number;
+  maxQuality: string;
+  priorityBoost: number;
 }
 
 // Social types

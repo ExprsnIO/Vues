@@ -2338,9 +2338,23 @@ export const renderJobs = pgTable(
     userDid: text('user_did')
       .notNull()
       .references(() => users.did, { onDelete: 'cascade' }),
-    status: text('status').notNull().default('pending'), // 'pending' | 'queued' | 'rendering' | 'encoding' | 'uploading' | 'completed' | 'failed'
+    status: text('status').notNull().default('pending'), // 'pending' | 'queued' | 'rendering' | 'encoding' | 'uploading' | 'completed' | 'failed' | 'paused'
     progress: integer('progress').default(0), // 0-100
     currentStep: text('current_step'), // Description of current render step
+    // Priority system
+    priority: text('priority').notNull().default('normal'), // 'low' | 'normal' | 'high' | 'urgent'
+    priorityScore: integer('priority_score').default(50), // 0-100 for fine-grained sorting
+    // Batch and dependencies
+    batchId: text('batch_id'), // Group jobs in batches
+    dependsOnJobId: text('depends_on_job_id'), // Job dependency (self-reference)
+    // Worker assignment
+    workerId: text('worker_id'), // Which worker is processing
+    workerStartedAt: timestamp('worker_started_at'),
+    // Resource estimation
+    estimatedDurationSeconds: integer('estimated_duration_seconds'),
+    estimatedMemoryMb: integer('estimated_memory_mb'),
+    actualDurationSeconds: integer('actual_duration_seconds'),
+    actualMemoryMb: integer('actual_memory_mb'),
     // Render settings
     format: text('format').notNull().default('mp4'), // 'mp4' | 'webm' | 'mov'
     quality: text('quality').notNull().default('high'), // 'draft' | 'medium' | 'high' | 'ultra'
@@ -2356,6 +2370,9 @@ export const renderJobs = pgTable(
     errorDetails: jsonb('error_details').$type<Record<string, unknown>>(),
     renderStartedAt: timestamp('render_started_at'),
     renderCompletedAt: timestamp('render_completed_at'),
+    // Pause/resume support
+    pausedAt: timestamp('paused_at'),
+    pausedByAdminId: text('paused_by_admin_id'),
     createdAt: timestamp('created_at').defaultNow().notNull(),
     updatedAt: timestamp('updated_at').defaultNow().notNull(),
   },
@@ -2363,7 +2380,74 @@ export const renderJobs = pgTable(
     projectIdx: index('render_jobs_project_idx').on(table.projectId),
     userIdx: index('render_jobs_user_idx').on(table.userDid),
     statusIdx: index('render_jobs_status_idx').on(table.status),
+    priorityIdx: index('render_jobs_priority_idx').on(table.priority, table.priorityScore),
+    batchIdx: index('render_jobs_batch_idx').on(table.batchId),
+    dependsOnIdx: index('render_jobs_depends_on_idx').on(table.dependsOnJobId),
+    workerIdx: index('render_jobs_worker_idx').on(table.workerId),
     createdIdx: index('render_jobs_created_idx').on(table.createdAt),
+  })
+);
+
+// Render batches - group multiple render jobs
+export const renderBatches = pgTable(
+  'render_batches',
+  {
+    id: text('id').primaryKey(),
+    userDid: text('user_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    name: text('name'),
+    totalJobs: integer('total_jobs').default(0),
+    completedJobs: integer('completed_jobs').default(0),
+    failedJobs: integer('failed_jobs').default(0),
+    status: text('status').notNull().default('pending'), // 'pending' | 'processing' | 'completed' | 'partial' | 'failed'
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    completedAt: timestamp('completed_at'),
+  },
+  (table) => ({
+    userIdx: index('render_batches_user_idx').on(table.userDid),
+    statusIdx: index('render_batches_status_idx').on(table.status),
+  })
+);
+
+// User render quotas - rate limiting per user
+export const userRenderQuotas = pgTable('user_render_quotas', {
+  userDid: text('user_did')
+    .primaryKey()
+    .references(() => users.did, { onDelete: 'cascade' }),
+  dailyLimit: integer('daily_limit').default(10),
+  dailyUsed: integer('daily_used').default(0),
+  dailyResetAt: timestamp('daily_reset_at'),
+  weeklyLimit: integer('weekly_limit').default(50),
+  weeklyUsed: integer('weekly_used').default(0),
+  weeklyResetAt: timestamp('weekly_reset_at'),
+  concurrentLimit: integer('concurrent_limit').default(2),
+  maxQuality: text('max_quality').default('ultra'), // 'draft' | 'medium' | 'high' | 'ultra'
+  priorityBoost: integer('priority_boost').default(0), // Added to priority score
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+// Render workers - track active render workers
+export const renderWorkers = pgTable(
+  'render_workers',
+  {
+    id: text('id').primaryKey(),
+    hostname: text('hostname').notNull(),
+    status: text('status').notNull().default('active'), // 'active' | 'draining' | 'offline'
+    concurrency: integer('concurrency').default(2),
+    activeJobs: integer('active_jobs').default(0),
+    totalProcessed: integer('total_processed').default(0),
+    failedJobs: integer('failed_jobs').default(0),
+    avgProcessingTime: real('avg_processing_time'), // seconds
+    gpuEnabled: boolean('gpu_enabled').default(false),
+    gpuModel: text('gpu_model'),
+    lastHeartbeat: timestamp('last_heartbeat'),
+    startedAt: timestamp('started_at').defaultNow().notNull(),
+    metadata: jsonb('metadata').$type<Record<string, unknown>>(),
+  },
+  (table) => ({
+    statusIdx: index('render_workers_status_idx').on(table.status),
+    heartbeatIdx: index('render_workers_heartbeat_idx').on(table.lastHeartbeat),
   })
 );
 
@@ -2420,6 +2504,12 @@ export type EditorDocumentSnapshot = typeof editorDocumentSnapshots.$inferSelect
 export type NewEditorDocumentSnapshot = typeof editorDocumentSnapshots.$inferInsert;
 export type RenderJob = typeof renderJobs.$inferSelect;
 export type NewRenderJob = typeof renderJobs.$inferInsert;
+export type RenderBatch = typeof renderBatches.$inferSelect;
+export type NewRenderBatch = typeof renderBatches.$inferInsert;
+export type UserRenderQuota = typeof userRenderQuotas.$inferSelect;
+export type NewUserRenderQuota = typeof userRenderQuotas.$inferInsert;
+export type RenderWorker = typeof renderWorkers.$inferSelect;
+export type NewRenderWorker = typeof renderWorkers.$inferInsert;
 export type ScheduledPublishing = typeof scheduledPublishing.$inferSelect;
 export type NewScheduledPublishing = typeof scheduledPublishing.$inferInsert;
 

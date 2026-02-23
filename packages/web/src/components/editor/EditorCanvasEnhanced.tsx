@@ -160,12 +160,26 @@ export function EditorCanvasEnhanced() {
       el => el.visible && currentFrame >= el.startFrame && currentFrame <= el.endFrame
     );
 
+    console.log('[Canvas] Visible elements at frame', currentFrame, ':', visibleElements.map(e => e.name));
+
     visibleElements.forEach((element) => {
-      // Get animated values
+      // Get animated values (support both scaleX/scaleY and scale.x/scale.y naming)
       const opacity = getAnimatedValue(element, 'opacity', element.opacity);
       const rotation = getAnimatedValue(element, 'rotation', element.rotation);
-      const scaleX = getAnimatedValue(element, 'scale.x', element.scale.x);
-      const scaleY = getAnimatedValue(element, 'scale.y', element.scale.y);
+
+      // Check which property naming convention is used for scale
+      const hasScaleXKeyframes = element.keyframes['scaleX']?.length > 0;
+      const hasScaleYKeyframes = element.keyframes['scaleY']?.length > 0;
+      const scaleX = hasScaleXKeyframes
+        ? getAnimatedValue(element, 'scaleX', element.scale.x)
+        : getAnimatedValue(element, 'scale.x', element.scale.x);
+      const scaleY = hasScaleYKeyframes
+        ? getAnimatedValue(element, 'scaleY', element.scale.y)
+        : getAnimatedValue(element, 'scale.y', element.scale.y);
+
+      // Get animated position
+      const animatedX = getAnimatedValue(element, 'x', element.x);
+      const animatedY = getAnimatedValue(element, 'y', element.y);
 
       ctx.save();
       ctx.globalAlpha = opacity;
@@ -175,9 +189,9 @@ export function EditorCanvasEnhanced() {
         ctx.globalCompositeOperation = element.blendMode as GlobalCompositeOperation;
       }
 
-      // Transform from center
-      const centerX = element.x + element.width * element.anchor.x;
-      const centerY = element.y + element.height * element.anchor.y;
+      // Transform from center using animated position
+      const centerX = animatedX + element.width * element.anchor.x;
+      const centerY = animatedY + element.height * element.anchor.y;
       ctx.translate(centerX, centerY);
       ctx.rotate((rotation * Math.PI) / 180);
       ctx.scale(scaleX, scaleY);
@@ -220,11 +234,23 @@ export function EditorCanvasEnhanced() {
       // Draw selection box
       if (selectedElementIds.includes(element.id)) {
         const rotation = getAnimatedValue(element, 'rotation', element.rotation);
-        const scaleX = getAnimatedValue(element, 'scale.x', element.scale.x);
-        const scaleY = getAnimatedValue(element, 'scale.y', element.scale.y);
 
-        const centerX = element.x + element.width * element.anchor.x;
-        const centerY = element.y + element.height * element.anchor.y;
+        // Check which property naming convention is used for scale
+        const hasScaleXKeyframes = element.keyframes['scaleX']?.length > 0;
+        const hasScaleYKeyframes = element.keyframes['scaleY']?.length > 0;
+        const scaleX = hasScaleXKeyframes
+          ? getAnimatedValue(element, 'scaleX', element.scale.x)
+          : getAnimatedValue(element, 'scale.x', element.scale.x);
+        const scaleY = hasScaleYKeyframes
+          ? getAnimatedValue(element, 'scaleY', element.scale.y)
+          : getAnimatedValue(element, 'scale.y', element.scale.y);
+
+        // Get animated position
+        const animatedX = getAnimatedValue(element, 'x', element.x);
+        const animatedY = getAnimatedValue(element, 'y', element.y);
+
+        const centerX = animatedX + element.width * element.anchor.x;
+        const centerY = animatedY + element.height * element.anchor.y;
 
         ctx.save();
         ctx.strokeStyle = '#6366f1';
@@ -297,12 +323,21 @@ export function EditorCanvasEnhanced() {
     const glCanvas = glCanvasRef.current;
     const offscreen = offscreenCanvasRef.current;
 
-    if (!canvas) return;
+    if (!canvas) {
+      console.log('[Draw] No canvas ref');
+      return;
+    }
     const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+    if (!ctx) {
+      console.log('[Draw] No 2D context');
+      return;
+    }
 
     // If no effects or WebGL not initialized, draw directly
-    if (allActiveEffects.length === 0 || !effectsInitialized || !glCanvas || !offscreen) {
+    const useSimplePath = allActiveEffects.length === 0 || !effectsInitialized || !glCanvas || !offscreen;
+    console.log('[Draw] Path:', useSimplePath ? 'SIMPLE' : 'WEBGL', 'effects:', allActiveEffects.length, 'glInit:', effectsInitialized);
+
+    if (useSimplePath) {
       drawScene(ctx);
       drawOverlays(ctx);
       return;
@@ -346,19 +381,23 @@ export function EditorCanvasEnhanced() {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, offscreen);
 
-    // Apply effects
-    const processedTexture = effectEngine.applyEffects(sourceTexture, allActiveEffects, {
-      time: currentTime,
-      resolution: [CANVAS_WIDTH, CANVAS_HEIGHT],
-    });
+    // Apply effects and render to screen
+    try {
+      const processedTexture = effectEngine.applyEffects(sourceTexture, allActiveEffects, {
+        time: currentTime,
+        resolution: [CANVAS_WIDTH, CANVAS_HEIGHT],
+      });
 
-    // Read result back and draw to main canvas
-    // For now, draw the WebGL result to the 2D canvas
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    gl.viewport(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+      // Render the processed texture to the WebGL canvas's default framebuffer
+      effectEngine.renderToScreen(processedTexture);
 
-    // Copy WebGL result to main canvas
-    ctx.drawImage(glCanvas, 0, 0);
+      // Copy WebGL result to main canvas
+      ctx.drawImage(glCanvas, 0, 0);
+    } catch (err) {
+      console.warn('[Draw] WebGL effects failed, falling back to simple path:', err);
+      // Fallback: draw the offscreen canvas without effects
+      ctx.drawImage(offscreen, 0, 0);
+    }
 
     // Cleanup source texture
     gl.deleteTexture(sourceTexture);
@@ -367,9 +406,11 @@ export function EditorCanvasEnhanced() {
     drawOverlays(ctx);
   }, [drawScene, drawOverlays, allActiveEffects, effectsInitialized, currentTime, CANVAS_WIDTH, CANVAS_HEIGHT]);
 
+  // Redraw when frame changes or draw function updates
   useEffect(() => {
+    console.log('[Canvas] Drawing frame:', currentFrame, 'Elements:', project.elements.length);
     draw();
-  }, [draw]);
+  }, [draw, currentFrame, project.elements.length]);
 
   // Handle mouse events for element manipulation
   const getMousePos = useCallback(

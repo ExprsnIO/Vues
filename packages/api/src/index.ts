@@ -43,6 +43,7 @@ import { paymentsAdminRouter } from './routes/payments-admin.js';
 import { liveAdminRouter } from './routes/live-admin.js';
 import { moderationAdminRouter } from './routes/moderation-admin.js';
 import { adminSettingsRouter } from './routes/admin-settings.js';
+import { renderAdminRouter } from './routes/render-admin.js';
 import { analyticsRoutes } from './routes/analytics.js';
 import { studioRouter } from './routes/studio.js';
 import { initializeIdentityService } from './services/identity/index.js';
@@ -202,6 +203,7 @@ app.route('/xrpc', paymentsAdminRouter);
 app.route('/xrpc', liveAdminRouter);
 app.route('/xrpc', moderationAdminRouter);
 app.route('/xrpc', adminSettingsRouter); // Admin settings for auth/CA/moderation
+app.route('/xrpc', renderAdminRouter); // Render pipeline admin
 app.route('/xrpc', analyticsRoutes); // Creator analytics
 // PLC routes - standard directory at /plc, XRPC routes already have /xrpc prefix
 app.route('/plc', plcRouter); // Standard PLC directory endpoints (did:plc resolution)

@@ -31,7 +31,8 @@ export default function EditorDashboardPage() {
 
   // Create project mutation
   const createMutation = useMutation({
-    mutationFn: api.createStudioProject.bind(api),
+    mutationFn: (data: { title: string; settings?: { width?: number; height?: number; frameRate?: number; duration?: number; aspectRatio?: string; backgroundColor?: string } }) =>
+      api.createStudioProject(data),
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ['studio', 'projects'] });
       router.push(`/editor/${result.projectId}`);

@@ -370,6 +370,61 @@ export class EffectEngine {
   }
 
   /**
+   * Render a texture to the screen (default framebuffer)
+   */
+  renderToScreen(texture: WebGLTexture): void {
+    if (!this.gl || !this.canvas) return;
+    const gl = this.gl;
+
+    // Compile a simple passthrough shader if not already done
+    if (!this.programs.has('__passthrough')) {
+      const vertShader = compileShader(gl, DEFAULT_VERTEX_SHADER, gl.VERTEX_SHADER);
+      const fragShader = compileShader(gl, `
+        precision mediump float;
+        varying vec2 v_texCoord;
+        uniform sampler2D u_texture;
+        void main() {
+          gl_FragColor = texture2D(u_texture, v_texCoord);
+        }
+      `, gl.FRAGMENT_SHADER);
+      const program = createProgram(gl, vertShader, fragShader);
+      this.programs.set('__passthrough', program);
+    }
+
+    const program = this.programs.get('__passthrough')!;
+
+    // Bind to default framebuffer (screen)
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+
+    // Use passthrough program
+    gl.useProgram(program);
+
+    // Bind input texture
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    const uTexture = gl.getUniformLocation(program, 'u_texture');
+    gl.uniform1i(uTexture, 0);
+
+    // Set up vertex attributes
+    const aPosition = gl.getAttribLocation(program, 'a_position');
+    const aTexCoord = gl.getAttribLocation(program, 'a_texCoord');
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.positionBuffer);
+    gl.enableVertexAttribArray(aPosition);
+    gl.vertexAttribPointer(aPosition, 2, gl.FLOAT, false, 0, 0);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.texCoordBuffer);
+    gl.enableVertexAttribArray(aTexCoord);
+    gl.vertexAttribPointer(aTexCoord, 2, gl.FLOAT, false, 0, 0);
+
+    // Clear and draw
+    gl.clearColor(0, 0, 0, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+
+  /**
    * Register built-in effects
    */
   private registerBuiltinEffects(): void {

@@ -64,11 +64,11 @@ interface StreamAnalytics {
 }
 
 export default function AnalyticsPage() {
-  const { session } = useAuth();
+  const { user } = useAuth();
   const [activeTab, setActiveTab] = useState<Tab>('overview');
   const [period, setPeriod] = useState<Period>('30d');
 
-  if (!session) {
+  if (!user) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center">
         <div className="text-center">
