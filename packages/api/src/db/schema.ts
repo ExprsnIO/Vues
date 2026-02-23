@@ -3240,6 +3240,128 @@ export const authConfig = pgTable('auth_config', {
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
 
+// ==========================================
+// Render Pipeline Phase 2 - Notifications, Presets, Clusters
+// ==========================================
+
+// Notification settings - per user notification preferences
+export const notificationSettings = pgTable('notification_settings', {
+  userDid: text('user_did')
+    .primaryKey()
+    .references(() => users.did, { onDelete: 'cascade' }),
+  email: text('email'), // Email address for notifications
+  emailEnabled: boolean('email_enabled').default(true),
+  webhookUrl: text('webhook_url'),
+  webhookSecret: text('webhook_secret'),
+  notifyOnComplete: boolean('notify_on_complete').default(true),
+  notifyOnFailed: boolean('notify_on_failed').default(true),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+// Notification log - track sent notifications
+export const notificationLog = pgTable(
+  'notification_log',
+  {
+    id: text('id').primaryKey(),
+    userDid: text('user_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    type: text('type').notNull(), // 'email' | 'webhook'
+    event: text('event').notNull(), // 'render.complete' | 'render.failed'
+    status: text('status').notNull(), // 'sent' | 'failed'
+    recipientEmail: text('recipient_email'),
+    webhookUrl: text('webhook_url'),
+    payload: jsonb('payload').$type<Record<string, unknown>>(),
+    errorMessage: text('error_message'),
+    responseCode: integer('response_code'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    userIdx: index('notification_log_user_idx').on(table.userDid),
+    typeIdx: index('notification_log_type_idx').on(table.type),
+    eventIdx: index('notification_log_event_idx').on(table.event),
+    createdIdx: index('notification_log_created_idx').on(table.createdAt),
+  })
+);
+
+// Render presets - system and user-defined render settings
+export const renderPresets = pgTable(
+  'render_presets',
+  {
+    id: text('id').primaryKey(),
+    userDid: text('user_did').references(() => users.did, { onDelete: 'cascade' }), // null = system preset
+    name: text('name').notNull(),
+    description: text('description'),
+    settings: jsonb('settings')
+      .notNull()
+      .$type<{
+        resolution: string;
+        quality: string;
+        format: string;
+        fps: number;
+        codec?: string;
+        bitrate?: number;
+      }>(),
+    isDefault: boolean('is_default').default(false),
+    isSystem: boolean('is_system').default(false),
+    sortOrder: integer('sort_order').default(0),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    userIdx: index('render_presets_user_idx').on(table.userDid),
+    systemIdx: index('render_presets_system_idx').on(table.isSystem),
+    defaultIdx: index('render_presets_default_idx').on(table.isDefault),
+  })
+);
+
+// Render clusters - manage multiple render worker clusters
+export const renderClusters = pgTable(
+  'render_clusters',
+  {
+    id: text('id').primaryKey(),
+    name: text('name').notNull(),
+    type: text('type').notNull(), // 'docker' | 'kubernetes'
+    endpoint: text('endpoint'), // API server URL for k8s
+    config: jsonb('config').$type<{
+      kubeconfig?: string;
+      namespace?: string;
+      dockerHost?: string;
+      labels?: Record<string, string>;
+    }>(),
+    status: text('status').notNull().default('active'), // 'active' | 'draining' | 'offline' | 'error'
+    region: text('region'),
+    maxWorkers: integer('max_workers'),
+    currentWorkers: integer('current_workers').default(0),
+    gpuEnabled: boolean('gpu_enabled').default(false),
+    gpuCount: integer('gpu_count').default(0),
+    priorityRouting: jsonb('priority_routing').$type<{
+      urgent?: boolean;
+      high?: boolean;
+      normal?: boolean;
+      low?: boolean;
+    }>(),
+    lastHealthCheck: timestamp('last_health_check'),
+    errorMessage: text('error_message'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    statusIdx: index('render_clusters_status_idx').on(table.status),
+    typeIdx: index('render_clusters_type_idx').on(table.type),
+    regionIdx: index('render_clusters_region_idx').on(table.region),
+  })
+);
+
+// Render Pipeline Phase 2 type exports
+export type NotificationSettings = typeof notificationSettings.$inferSelect;
+export type NewNotificationSettings = typeof notificationSettings.$inferInsert;
+export type NotificationLogEntry = typeof notificationLog.$inferSelect;
+export type NewNotificationLogEntry = typeof notificationLog.$inferInsert;
+export type RenderPreset = typeof renderPresets.$inferSelect;
+export type NewRenderPreset = typeof renderPresets.$inferInsert;
+export type RenderCluster = typeof renderClusters.$inferSelect;
+export type NewRenderCluster = typeof renderClusters.$inferInsert;
+
 // Admin Settings type exports
 export type AdminPermissionAuditEntry = typeof adminPermissionAudit.$inferSelect;
 export type NewAdminPermissionAuditEntry = typeof adminPermissionAudit.$inferInsert;

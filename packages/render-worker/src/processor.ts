@@ -1,6 +1,7 @@
 import ffmpeg from 'fluent-ffmpeg';
 import { promises as fs } from 'fs';
 import path from 'path';
+import { uploadToStorage, getContentType, getStorageConfigFromEnv } from './storage.js';
 
 export interface RenderJobData {
   jobId: string;
@@ -51,6 +52,8 @@ export interface RenderProgress {
 export interface RenderResult {
   success: boolean;
   outputPath?: string;
+  outputUrl?: string;
+  outputKey?: string;
   fileSize?: number;
   duration?: number;
   error?: string;
@@ -119,7 +122,24 @@ export class RenderProcessor {
 
       // Get output file stats
       const stats = await fs.stat(outputPath);
-      const duration = Math.floor((Date.now() - startTime) / 1000);
+      const renderDuration = Math.floor((Date.now() - startTime) / 1000);
+
+      // Upload to storage
+      const storageKey = `renders/${data.userDid}/${data.jobId}/${outputFileName}`;
+      const contentType = getContentType(formatSettings.ext);
+
+      let outputUrl: string | undefined;
+      let outputKey: string | undefined;
+
+      try {
+        const uploadResult = await uploadToStorage(outputPath, storageKey, contentType);
+        outputUrl = uploadResult.url;
+        outputKey = uploadResult.key;
+        console.log(`Uploaded to storage: ${outputKey} -> ${outputUrl}`);
+      } catch (uploadErr) {
+        console.error('Storage upload failed, keeping local file:', uploadErr);
+        // Continue without storage URL - file is still available locally
+      }
 
       // Clean up temp directory
       await fs.rm(jobTempDir, { recursive: true, force: true });
@@ -127,8 +147,10 @@ export class RenderProcessor {
       return {
         success: true,
         outputPath,
+        outputUrl,
+        outputKey,
         fileSize: stats.size,
-        duration,
+        duration: renderDuration,
       };
     } catch (err) {
       // Clean up on error

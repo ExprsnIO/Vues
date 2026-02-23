@@ -32,6 +32,7 @@ import configRoutes from './routes/config.js';
 import { createPdsApp, getPdsConfig, OnCommitCallback } from './pds/index.js';
 import { initializeChatWebSocket } from './websocket/chat.js';
 import { initializeEditorCollab } from './websocket/editorCollab.js';
+import { initializeRenderProgressWebSocket } from './websocket/renderProgress.js';
 import { createWellKnownRouterFromEnv } from './routes/well-known.js';
 import { identityRouter } from './routes/identity.js';
 import { registryRouter, initializeServiceRegistry } from './routes/registry.js';
@@ -44,6 +45,8 @@ import { liveAdminRouter } from './routes/live-admin.js';
 import { moderationAdminRouter } from './routes/moderation-admin.js';
 import { adminSettingsRouter } from './routes/admin-settings.js';
 import { renderAdminRouter } from './routes/render-admin.js';
+import { presetsRouter } from './routes/presets.js';
+import { clusterAdminRouter } from './routes/cluster-admin.js';
 import { analyticsRoutes } from './routes/analytics.js';
 import { studioRouter } from './routes/studio.js';
 import { initializeIdentityService } from './services/identity/index.js';
@@ -204,6 +207,8 @@ app.route('/xrpc', liveAdminRouter);
 app.route('/xrpc', moderationAdminRouter);
 app.route('/xrpc', adminSettingsRouter); // Admin settings for auth/CA/moderation
 app.route('/xrpc', renderAdminRouter); // Render pipeline admin
+app.route('/', presetsRouter); // Render presets (xrpc prefix in router)
+app.route('/', clusterAdminRouter); // Cluster admin (xrpc prefix in router)
 app.route('/xrpc', analyticsRoutes); // Creator analytics
 // PLC routes - standard directory at /plc, XRPC routes already have /xrpc prefix
 app.route('/plc', plcRouter); // Standard PLC directory endpoints (did:plc resolution)
@@ -374,6 +379,7 @@ async function main() {
   // Initialize WebSocket handlers
   initializeChatWebSocket(io);
   initializeEditorCollab(io);
+  initializeRenderProgressWebSocket(io);
 
   // Initialize relay firehose WebSocket if enabled
   if (relayEnabled && relayService) {

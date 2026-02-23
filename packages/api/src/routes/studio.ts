@@ -1259,3 +1259,72 @@ studioRouter.post('/io.exprsn.studio.createFromTemplate', authMiddleware, async 
 
   return c.json({ success: true, project });
 });
+
+/**
+ * Get render history for a project
+ * GET /xrpc/io.exprsn.studio.getRenderHistory
+ */
+studioRouter.get('/io.exprsn.studio.getRenderHistory', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  const projectId = c.req.query('projectId');
+  const limit = Math.min(parseInt(c.req.query('limit') || '20', 10), 100);
+  const cursor = c.req.query('cursor');
+
+  if (!projectId) {
+    throw new HTTPException(400, { message: 'projectId is required' });
+  }
+
+  // Import directly from db to avoid class method issues
+  const { db } = await import('../db/index.js');
+  const { renderJobs } = await import('../db/schema.js');
+  const { eq, and, desc, lt } = await import('drizzle-orm');
+
+  let whereCondition;
+  if (cursor) {
+    whereCondition = and(
+      eq(renderJobs.projectId, projectId),
+      eq(renderJobs.userDid, userDid),
+      lt(renderJobs.createdAt, new Date(cursor))
+    );
+  } else {
+    whereCondition = and(
+      eq(renderJobs.projectId, projectId),
+      eq(renderJobs.userDid, userDid)
+    );
+  }
+
+  const jobs = await db
+    .select({
+      id: renderJobs.id,
+      status: renderJobs.status,
+      progress: renderJobs.progress,
+      format: renderJobs.format,
+      quality: renderJobs.quality,
+      resolution: renderJobs.resolution,
+      outputUrl: renderJobs.outputUrl,
+      outputSize: renderJobs.outputSize,
+      duration: renderJobs.actualDurationSeconds,
+      createdAt: renderJobs.createdAt,
+      completedAt: renderJobs.renderCompletedAt,
+    })
+    .from(renderJobs)
+    .where(whereCondition)
+    .orderBy(desc(renderJobs.createdAt))
+    .limit(limit + 1);
+
+  const hasMore = jobs.length > limit;
+  const resultJobs = hasMore ? jobs.slice(0, limit) : jobs;
+  const lastJob = resultJobs[resultJobs.length - 1];
+  const cursorResult = hasMore && lastJob
+    ? lastJob.createdAt.toISOString()
+    : null;
+
+  return c.json({
+    jobs: resultJobs.map((job) => ({
+      ...job,
+      progress: job.progress ?? 0,
+      resolution: job.resolution as { width: number; height: number } | null,
+    })),
+    cursor: cursorResult,
+  });
+});

@@ -49,6 +49,7 @@ export interface User {
 
 interface AuthContextType {
   user: User | null;
+  token: string | null;
   isLoading: boolean;
   isAuthenticated: boolean;
   // Local auth methods
@@ -70,6 +71,7 @@ const AuthContext = createContext<AuthContextType | null>(null);
 
 export const AuthProvider: FC<PropsWithChildren> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
+  const [token, setToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
   // Initialize session on mount
@@ -81,6 +83,7 @@ export const AuthProvider: FC<PropsWithChildren> = ({ children }) => {
         if (localSession) {
           // Set API token
           api.setSession(localSession.accessJwt);
+          setToken(localSession.accessJwt);
 
           // Get user info from session or fetch fresh
           const localUser = getLocalUser();
@@ -111,6 +114,9 @@ export const AuthProvider: FC<PropsWithChildren> = ({ children }) => {
               const refreshed = await refreshLocalSession();
               if (!refreshed) {
                 await signOutLocal();
+                setToken(null);
+              } else {
+                setToken(refreshed.accessJwt);
               }
             }
           }
@@ -143,6 +149,7 @@ export const AuthProvider: FC<PropsWithChildren> = ({ children }) => {
   }) => {
     const session = await createAccount(data);
     api.setSession(session.accessJwt);
+    setToken(session.accessJwt);
     setUser({
       did: session.did,
       handle: session.handle,
@@ -154,6 +161,7 @@ export const AuthProvider: FC<PropsWithChildren> = ({ children }) => {
   const signIn = useCallback(async (identifier: string, password: string) => {
     const session = await signInLocal(identifier, password);
     api.setSession(session.accessJwt);
+    setToken(session.accessJwt);
     setUser({
       did: session.did,
       handle: session.handle,
@@ -172,6 +180,7 @@ export const AuthProvider: FC<PropsWithChildren> = ({ children }) => {
       // OAuth signout
       await oauthSignOut();
     }
+    setToken(null);
     setUser(null);
   }, []);
 
@@ -204,6 +213,7 @@ export const AuthProvider: FC<PropsWithChildren> = ({ children }) => {
     <AuthContext.Provider
       value={{
         user,
+        token,
         isLoading,
         isAuthenticated: !!user,
         signUp,

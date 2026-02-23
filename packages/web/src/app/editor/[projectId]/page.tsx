@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import dynamic from 'next/dynamic';
 import { useParams, useRouter } from 'next/navigation';
 import { Sidebar } from '@/components/Sidebar';
@@ -126,6 +126,7 @@ export default function EditorProjectPage() {
   const projectId = params.projectId as string;
   const { user, isLoading: authLoading, token } = useAuth();
   const router = useRouter();
+  const hasRedirected = useRef(false);
 
   const [loadedProject, setLoadedProject] = useState<EditorProject | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -134,10 +135,12 @@ export default function EditorProjectPage() {
   // Load project from API
   useEffect(() => {
     if (!projectId || authLoading) return;
-    if (!user || !token) {
-      router.push('/login?redirect=/editor/' + projectId);
+    if ((!user || !token) && !hasRedirected.current) {
+      hasRedirected.current = true;
+      router.replace('/login?redirect=/editor/' + projectId);
       return;
     }
+    if (!user || !token) return;
 
     setIsLoading(true);
     setError(null);

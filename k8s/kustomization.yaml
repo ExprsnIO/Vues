@@ -1,0 +1,40 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: exprsn
+
+resources:
+  # Base configuration
+  - base/namespace.yaml
+  - base/configmap.yaml
+  - base/secrets.yaml
+
+  # Infrastructure
+  - redis/statefulset.yaml
+  - postgres/statefulset.yaml
+
+  # API Backend
+  - api/deployment.yaml
+  - api/service.yaml
+  - api/hpa.yaml
+
+  # Web Frontend
+  - web/deployment.yaml
+  - web/service.yaml
+  - web/ingress.yaml
+
+  # Render Workers
+  - render-worker/deployment.yaml
+  - render-worker/hpa.yaml
+
+commonLabels:
+  app.kubernetes.io/part-of: exprsn-platform
+  app.kubernetes.io/managed-by: kustomize
+
+images:
+  - name: exprsn/api
+    newTag: latest
+  - name: exprsn/web
+    newTag: latest
+  - name: exprsn/render-worker
+    newTag: latest

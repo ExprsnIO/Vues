@@ -1,6 +1,6 @@
 import { Readable } from 'stream';
 
-export type StorageProviderType = 'aws' | 'digitalocean' | 'azure' | 'minio';
+export type StorageProviderType = 'aws' | 'digitalocean' | 'azure' | 'minio' | 'local';
 
 export interface StorageProvider {
   readonly name: string;
@@ -108,6 +108,11 @@ export interface StorageConfig {
     secretKey: string;
     useSSL: boolean;
   };
+
+  // Local filesystem storage
+  local?: {
+    basePath: string;
+  };
 }
 
 // Factory function to create the appropriate storage provider
@@ -128,6 +133,10 @@ export async function createStorageProvider(config: StorageConfig): Promise<Stor
     case 'minio': {
       const { MinIOProvider } = await import('./minio.js');
       return new MinIOProvider(config);
+    }
+    case 'local': {
+      const { LocalStorageProvider } = await import('./local.js');
+      return new LocalStorageProvider(config);
     }
     default:
       throw new Error(`Unknown storage provider: ${config.provider}`);
@@ -182,6 +191,15 @@ export function getStorageConfigFromEnv(): StorageConfig {
           accountName: process.env.AZURE_STORAGE_ACCOUNT || '',
           accountKey: process.env.AZURE_STORAGE_KEY || '',
           containerName: process.env.AZURE_CONTAINER_NAME || 'exprsn-uploads',
+        },
+      };
+
+    case 'local':
+      return {
+        ...baseConfig,
+        cdnUrl: process.env.LOCAL_STORAGE_URL || baseConfig.cdnUrl,
+        local: {
+          basePath: process.env.LOCAL_STORAGE_PATH || '/data/storage',
         },
       };
 

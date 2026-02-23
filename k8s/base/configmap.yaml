@@ -1,0 +1,38 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: exprsn-config
+  namespace: exprsn
+  labels:
+    app.kubernetes.io/name: exprsn
+data:
+  # API Configuration
+  NODE_ENV: "production"
+  API_PORT: "3002"
+
+  # Internal Service URLs
+  REDIS_URL: "redis://redis:6379"
+  DATABASE_HOST: "postgres"
+  DATABASE_PORT: "5432"
+  DATABASE_NAME: "exprsn"
+
+  # External URLs (override in environment-specific config)
+  PUBLIC_URL: "https://api.exprsn.io"
+  WEB_URL: "https://exprsn.io"
+
+  # Render Worker Configuration
+  WORKER_CONCURRENCY: "2"
+  HEALTH_PORT: "3100"
+  GRACEFUL_SHUTDOWN_TIMEOUT: "30000"
+  RENDER_OUTPUT_DIR: "/data/renders"
+  RENDER_TEMP_DIR: "/tmp/renders"
+
+  # Storage Configuration
+  STORAGE_PROVIDER: "minio"
+  STORAGE_BUCKET: "exprsn-uploads"
+  PROCESSED_BUCKET: "exprsn-processed"
+
+  # Feature Flags
+  ENABLE_OAUTH: "true"
+  ENABLE_PDS: "true"
+  ENABLE_RELAY: "true"

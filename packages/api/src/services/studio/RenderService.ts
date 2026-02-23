@@ -18,7 +18,7 @@ import {
   editorTransitions,
   editorAssets,
 } from '../../db/schema.js';
-import { eq, and, desc, asc, inArray, count, gte, sql } from 'drizzle-orm';
+import { eq, and, desc, asc, inArray, count, gte, lt, sql, type SQL } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import { getEffectsService } from './EffectsService.js';
 import type { ClipTransform, ClipEffect } from './EditorService.js';
@@ -1487,6 +1487,67 @@ export class S3StorageProvider implements StorageProvider {
 
     const buffer = await response.arrayBuffer();
     await fs.writeFile(localPath, Buffer.from(buffer));
+  }
+
+  /**
+   * Get render history for a project
+   * NOTE: This method has TypeScript visibility issues when called from other files.
+   * Use the inline implementation in studio.ts route instead.
+   */
+  async getRenderHistory(
+    projectId: string,
+    userDid: string,
+    options?: { limit?: number; cursor?: string }
+  ) {
+    const limit = options?.limit || 20;
+
+    let query = db
+      .select({
+        id: renderJobs.id,
+        status: renderJobs.status,
+        progress: renderJobs.progress,
+        format: renderJobs.format,
+        quality: renderJobs.quality,
+        resolution: renderJobs.resolution,
+        outputUrl: renderJobs.outputUrl,
+        outputSize: renderJobs.outputSize,
+        duration: renderJobs.actualDurationSeconds,
+        createdAt: renderJobs.createdAt,
+        completedAt: renderJobs.renderCompletedAt,
+      })
+      .from(renderJobs)
+      .where(
+        options?.cursor
+          ? and(
+              eq(renderJobs.projectId, projectId),
+              eq(renderJobs.userDid, userDid),
+              lt(renderJobs.createdAt, new Date(options.cursor))
+            )
+          : and(
+              eq(renderJobs.projectId, projectId),
+              eq(renderJobs.userDid, userDid)
+            )
+      )
+      .orderBy(desc(renderJobs.createdAt))
+      .limit(limit + 1);
+
+    const jobs = await query;
+
+    const hasMore = jobs.length > limit;
+    const resultJobs = hasMore ? jobs.slice(0, limit) : jobs;
+    const lastJob = resultJobs[resultJobs.length - 1];
+    const cursor = hasMore && lastJob
+      ? lastJob.createdAt.toISOString()
+      : null;
+
+    return {
+      jobs: resultJobs.map((job) => ({
+        ...job,
+        progress: job.progress ?? 0,
+        resolution: job.resolution as { width: number; height: number } | null,
+      })),
+      cursor,
+    };
   }
 
   private getContentType(key: string): string {

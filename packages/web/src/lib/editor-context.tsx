@@ -251,8 +251,11 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
     case 'SET_TOOL':
       return { ...state, selectedTool: action.tool };
 
-    case 'SET_FRAME':
-      return { ...state, currentFrame: Math.max(0, Math.min(action.frame, state.project.duration - 1)) };
+    case 'SET_FRAME': {
+      const newFrame = Math.max(0, Math.min(action.frame, state.project.duration - 1));
+      console.log('[Reducer] SET_FRAME:', action.frame, '->', newFrame);
+      return { ...state, currentFrame: newFrame };
+    }
 
     case 'SET_PLAYING':
       return { ...state, isPlaying: action.playing };
@@ -463,7 +466,10 @@ export function EditorProvider({
     deleteElements: useCallback((ids) => dispatch({ type: 'DELETE_ELEMENTS', ids }), []),
     addKeyframe: useCallback((elementId, property, keyframe) => dispatch({ type: 'ADD_KEYFRAME', elementId, property, keyframe }), []),
     updateKeyframe: useCallback((elementId, property, keyframeIndex, updates) => dispatch({ type: 'UPDATE_KEYFRAME', elementId, property, keyframeIndex, updates }), []),
-    setCurrentFrame: useCallback((frame) => dispatch({ type: 'SET_FRAME', frame }), []),
+    setCurrentFrame: useCallback((frame) => {
+      console.log('[Editor] setCurrentFrame:', frame);
+      dispatch({ type: 'SET_FRAME', frame });
+    }, []),
     play: useCallback(() => dispatch({ type: 'SET_PLAYING', playing: true }), []),
     pause: useCallback(() => dispatch({ type: 'SET_PLAYING', playing: false }), []),
     togglePlay: useCallback(() => dispatch({ type: 'SET_PLAYING', playing: !stateRef.current.isPlaying }), []),

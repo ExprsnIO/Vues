@@ -2246,6 +2246,139 @@ class ApiClient {
       body: JSON.stringify({ streamId }),
     });
   }
+
+  // =============================================
+  // Cluster Admin API
+  // =============================================
+
+  async adminClusterList(): Promise<{
+    clusters: Array<{
+      id: string;
+      name: string;
+      type: 'docker' | 'kubernetes';
+      endpoint: string | null;
+      status: 'active' | 'draining' | 'offline' | 'error';
+      region: string | null;
+      maxWorkers: number | null;
+      currentWorkers: number;
+      gpuEnabled: boolean;
+      gpuCount: number;
+      lastHealthCheck: string | null;
+      errorMessage: string | null;
+      createdAt: string;
+      workerStats?: { total: number; active: number; offline: number };
+    }>;
+  }> {
+    return this.fetch('/xrpc/io.exprsn.admin.cluster.list');
+  }
+
+  async adminClusterGet(clusterId: string): Promise<{
+    cluster: {
+      id: string;
+      name: string;
+      type: 'docker' | 'kubernetes';
+      endpoint: string | null;
+      status: string;
+      region: string | null;
+      maxWorkers: number | null;
+      currentWorkers: number;
+      gpuEnabled: boolean;
+      gpuCount: number;
+      createdAt: string;
+    };
+    workers: Array<{
+      id: string;
+      hostname: string;
+      status: string;
+      activeJobs: number;
+      totalProcessed: number;
+      lastHeartbeat: string | null;
+    }>;
+  }> {
+    return this.fetch(`/xrpc/io.exprsn.admin.cluster.get?clusterId=${clusterId}`);
+  }
+
+  async adminClusterCreate(data: {
+    name: string;
+    type: 'docker' | 'kubernetes';
+    endpoint?: string;
+    region?: string;
+    maxWorkers?: number;
+    gpuEnabled?: boolean;
+  }): Promise<{ cluster: { id: string; name: string } }> {
+    return this.fetch('/xrpc/io.exprsn.admin.cluster.create', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async adminClusterUpdate(data: {
+    clusterId: string;
+    name?: string;
+    endpoint?: string;
+    region?: string;
+    maxWorkers?: number;
+    gpuEnabled?: boolean;
+    status?: 'active' | 'draining' | 'offline';
+  }): Promise<{ cluster: { id: string; name: string; status: string } }> {
+    return this.fetch('/xrpc/io.exprsn.admin.cluster.update', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async adminClusterDelete(clusterId: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.cluster.delete', {
+      method: 'POST',
+      body: JSON.stringify({ clusterId }),
+    });
+  }
+
+  async adminClusterScale(clusterId: string, replicas: number): Promise<{
+    cluster: { id: string; maxWorkers: number };
+    message: string;
+  }> {
+    return this.fetch('/xrpc/io.exprsn.admin.cluster.scale', {
+      method: 'POST',
+      body: JSON.stringify({ clusterId, replicas }),
+    });
+  }
+
+  async adminClusterGetMetrics(clusterId: string): Promise<{
+    clusterId: string;
+    metrics: {
+      workerCount: number;
+      activeWorkers: number;
+      offlineWorkers: number;
+      totalJobsProcessed: number;
+      totalJobsFailed: number;
+      activeJobs: number;
+      averageProcessingTimeSeconds: number;
+      successRate: number;
+    };
+    timestamp: string;
+  }> {
+    return this.fetch(`/xrpc/io.exprsn.admin.cluster.getMetrics?clusterId=${clusterId}`);
+  }
+
+  async adminClusterDrain(clusterId: string): Promise<{
+    cluster: { id: string; status: string };
+    message: string;
+  }> {
+    return this.fetch('/xrpc/io.exprsn.admin.cluster.drain', {
+      method: 'POST',
+      body: JSON.stringify({ clusterId }),
+    });
+  }
+
+  async adminClusterActivate(clusterId: string): Promise<{
+    cluster: { id: string; status: string };
+  }> {
+    return this.fetch('/xrpc/io.exprsn.admin.cluster.activate', {
+      method: 'POST',
+      body: JSON.stringify({ clusterId }),
+    });
+  }
 }
 
 // Social links type

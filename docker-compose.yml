@@ -211,6 +211,19 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # Mailhog - Email testing for development
+  mailhog:
+    image: mailhog/mailhog:v1.0.1
+    container_name: exprsn-mailhog
+    ports:
+      - "1025:1025"  # SMTP server
+      - "8025:8025"  # Web UI
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8025"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
 volumes:
   postgres_data:
   redis_data:

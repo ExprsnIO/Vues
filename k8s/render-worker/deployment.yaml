@@ -1,0 +1,135 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: render-worker
+  namespace: exprsn
+  labels:
+    app: render-worker
+    app.kubernetes.io/name: render-worker
+    app.kubernetes.io/component: worker
+    app.kubernetes.io/part-of: exprsn-platform
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: render-worker
+  template:
+    metadata:
+      labels:
+        app: render-worker
+        app.kubernetes.io/name: render-worker
+    spec:
+      containers:
+        - name: render-worker
+          image: exprsn/render-worker:latest
+          imagePullPolicy: Always
+          ports:
+            - name: health
+              containerPort: 3100
+              protocol: TCP
+          env:
+            - name: NODE_ENV
+              valueFrom:
+                configMapKeyRef:
+                  name: exprsn-config
+                  key: NODE_ENV
+            - name: REDIS_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: exprsn-config
+                  key: REDIS_URL
+            - name: DATABASE_URL
+              value: "postgres://$(DATABASE_USER):$(DATABASE_PASSWORD)@$(DATABASE_HOST):$(DATABASE_PORT)/$(DATABASE_NAME)"
+            - name: DATABASE_USER
+              valueFrom:
+                secretKeyRef:
+                  name: exprsn-secrets
+                  key: DATABASE_USER
+            - name: DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: exprsn-secrets
+                  key: DATABASE_PASSWORD
+            - name: DATABASE_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: exprsn-config
+                  key: DATABASE_HOST
+            - name: DATABASE_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: exprsn-config
+                  key: DATABASE_PORT
+            - name: DATABASE_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: exprsn-config
+                  key: DATABASE_NAME
+            - name: WORKER_CONCURRENCY
+              valueFrom:
+                configMapKeyRef:
+                  name: exprsn-config
+                  key: WORKER_CONCURRENCY
+            - name: HEALTH_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: exprsn-config
+                  key: HEALTH_PORT
+            - name: GRACEFUL_SHUTDOWN_TIMEOUT
+              valueFrom:
+                configMapKeyRef:
+                  name: exprsn-config
+                  key: GRACEFUL_SHUTDOWN_TIMEOUT
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: exprsn-secrets
+                  key: MINIO_ACCESS_KEY
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: exprsn-secrets
+                  key: MINIO_SECRET_KEY
+            - name: MINIO_ENDPOINT
+              value: "http://minio:9000"
+            - name: MINIO_BUCKET
+              valueFrom:
+                configMapKeyRef:
+                  name: exprsn-config
+                  key: STORAGE_BUCKET
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3100
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 3100
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: render-output
+              mountPath: /data/renders
+            - name: render-temp
+              mountPath: /tmp/renders
+      volumes:
+        - name: render-output
+          emptyDir:
+            sizeLimit: 10Gi
+        - name: render-temp
+          emptyDir:
+            sizeLimit: 5Gi
+      terminationGracePeriodSeconds: 60
