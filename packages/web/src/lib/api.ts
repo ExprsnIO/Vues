@@ -405,6 +405,51 @@ class ApiClient {
     });
   }
 
+  // Password management
+  async setUserPassword(data: {
+    did: string;
+    password: string;
+  }): Promise<{ success: boolean; message: string }> {
+    return this.fetch('/xrpc/io.exprsn.admin.users.setPassword', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async resetUserPassword(data: {
+    did: string;
+  }): Promise<{ success: boolean; temporaryPassword: string; message: string }> {
+    return this.fetch('/xrpc/io.exprsn.admin.users.resetPassword', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async forceUserLogout(data: {
+    did: string;
+  }): Promise<{ success: boolean; sessionsInvalidated: number; message: string }> {
+    return this.fetch('/xrpc/io.exprsn.admin.users.forceLogout', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async getUserAccountInfo(did: string): Promise<{
+    account: {
+      did: string;
+      handle: string;
+      email: string | null;
+      status: string;
+      hasPassword: boolean;
+      activeSessions: number;
+      createdAt: string;
+      updatedAt: string;
+    };
+  }> {
+    const params = new URLSearchParams({ did });
+    return this.fetch(`/xrpc/io.exprsn.admin.users.getAccountInfo?${params}`);
+  }
+
   async getAdminReports(options: {
     status?: string;
     contentType?: string;

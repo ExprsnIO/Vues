@@ -15,10 +15,44 @@ export default function AdminUserDetailPage() {
   const queryClient = useQueryClient();
 
   const [showSanctionModal, setShowSanctionModal] = useState(false);
+  const [showPasswordModal, setShowPasswordModal] = useState(false);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['admin', 'user', did],
     queryFn: () => api.getAdminUser(did),
+  });
+
+  const { data: accountData } = useQuery({
+    queryKey: ['admin', 'user', 'account', did],
+    queryFn: () => api.getUserAccountInfo(did),
+  });
+
+  const setPasswordMutation = useMutation({
+    mutationFn: (password: string) => api.setUserPassword({ did, password }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'user', 'account', did] });
+      setShowPasswordModal(false);
+      toast.success('Password updated successfully');
+    },
+    onError: () => toast.error('Failed to update password'),
+  });
+
+  const resetPasswordMutation = useMutation({
+    mutationFn: () => api.resetUserPassword({ did }),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'user', 'account', did] });
+      toast.success(`Temporary password: ${data.temporaryPassword}`, { duration: 10000 });
+    },
+    onError: () => toast.error('Failed to reset password'),
+  });
+
+  const forceLogoutMutation = useMutation({
+    mutationFn: () => api.forceUserLogout({ did }),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'user', 'account', did] });
+      toast.success(`Logged out ${data.sessionsInvalidated} session(s)`);
+    },
+    onError: () => toast.error('Failed to logout user'),
   });
 
   const verifyMutation = useMutation({
@@ -132,6 +166,12 @@ export default function AdminUserDetailPage() {
               {user.verified ? 'Remove Verification' : 'Verify User'}
             </button>
             <button
+              onClick={() => setShowPasswordModal(true)}
+              className="px-4 py-2 bg-accent/10 hover:bg-accent/20 text-accent rounded-lg transition-colors text-sm"
+            >
+              Manage Password
+            </button>
+            <button
               onClick={() => setShowSanctionModal(true)}
               className="px-4 py-2 bg-red-500/10 hover:bg-red-500/20 text-red-500 rounded-lg transition-colors text-sm"
             >
@@ -226,6 +266,174 @@ export default function AdminUserDetailPage() {
           isLoading={sanctionMutation.isPending}
         />
       )}
+
+      {/* Password Modal */}
+      {showPasswordModal && (
+        <PasswordModal
+          account={accountData?.account}
+          onClose={() => setShowPasswordModal(false)}
+          onSetPassword={(password) => setPasswordMutation.mutate(password)}
+          onResetPassword={() => resetPasswordMutation.mutate()}
+          onForceLogout={() => forceLogoutMutation.mutate()}
+          isLoading={setPasswordMutation.isPending || resetPasswordMutation.isPending || forceLogoutMutation.isPending}
+        />
+      )}
+    </div>
+  );
+}
+
+function PasswordModal({
+  account,
+  onClose,
+  onSetPassword,
+  onResetPassword,
+  onForceLogout,
+  isLoading,
+}: {
+  account?: {
+    did: string;
+    handle: string;
+    email: string | null;
+    status: string;
+    hasPassword: boolean;
+    activeSessions: number;
+    createdAt: string;
+    updatedAt: string;
+  };
+  onClose: () => void;
+  onSetPassword: (password: string) => void;
+  onResetPassword: () => void;
+  onForceLogout: () => void;
+  isLoading: boolean;
+}) {
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [showConfirmReset, setShowConfirmReset] = useState(false);
+
+  const passwordsMatch = newPassword === confirmPassword;
+  const passwordValid = newPassword.length >= 8;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative bg-background border border-border rounded-2xl p-6 w-full max-w-md">
+        <h2 className="text-xl font-bold text-text-primary mb-4">Password Management</h2>
+
+        {/* Account Info */}
+        {account && (
+          <div className="mb-6 p-4 bg-surface rounded-lg">
+            <div className="grid grid-cols-2 gap-3 text-sm">
+              <div>
+                <p className="text-text-muted">Handle</p>
+                <p className="text-text-primary font-medium">@{account.handle}</p>
+              </div>
+              <div>
+                <p className="text-text-muted">Email</p>
+                <p className="text-text-primary font-medium">{account.email || 'Not set'}</p>
+              </div>
+              <div>
+                <p className="text-text-muted">Password Set</p>
+                <p className={`font-medium ${account.hasPassword ? 'text-green-500' : 'text-orange-500'}`}>
+                  {account.hasPassword ? 'Yes' : 'No'}
+                </p>
+              </div>
+              <div>
+                <p className="text-text-muted">Active Sessions</p>
+                <p className="text-text-primary font-medium">{account.activeSessions}</p>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Set New Password */}
+        <div className="space-y-4 mb-6">
+          <h3 className="text-sm font-semibold text-text-secondary">Set New Password</h3>
+          <div>
+            <input
+              type="password"
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+              placeholder="New password (min 8 characters)"
+              className="w-full px-4 py-2 bg-surface border border-border rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-accent"
+            />
+          </div>
+          <div>
+            <input
+              type="password"
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+              placeholder="Confirm password"
+              className={`w-full px-4 py-2 bg-surface border rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-accent ${
+                confirmPassword && !passwordsMatch ? 'border-red-500' : 'border-border'
+              }`}
+            />
+            {confirmPassword && !passwordsMatch && (
+              <p className="text-red-500 text-xs mt-1">Passwords do not match</p>
+            )}
+          </div>
+          <button
+            onClick={() => onSetPassword(newPassword)}
+            disabled={isLoading || !passwordValid || !passwordsMatch}
+            className="w-full py-2 bg-accent hover:bg-accent/90 text-white rounded-lg transition-colors disabled:opacity-50"
+          >
+            {isLoading ? 'Setting...' : 'Set Password'}
+          </button>
+        </div>
+
+        {/* Quick Actions */}
+        <div className="border-t border-border pt-4 space-y-3">
+          <h3 className="text-sm font-semibold text-text-secondary">Quick Actions</h3>
+
+          {!showConfirmReset ? (
+            <button
+              onClick={() => setShowConfirmReset(true)}
+              disabled={isLoading}
+              className="w-full py-2 bg-orange-500/10 hover:bg-orange-500/20 text-orange-500 rounded-lg transition-colors text-sm"
+            >
+              Generate Temporary Password
+            </button>
+          ) : (
+            <div className="p-3 bg-orange-500/10 rounded-lg">
+              <p className="text-orange-500 text-sm mb-2">
+                This will generate a temporary password and invalidate all sessions. Are you sure?
+              </p>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setShowConfirmReset(false)}
+                  className="flex-1 py-1.5 bg-surface-hover text-text-primary rounded text-sm"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => {
+                    onResetPassword();
+                    setShowConfirmReset(false);
+                  }}
+                  disabled={isLoading}
+                  className="flex-1 py-1.5 bg-orange-500 text-white rounded text-sm"
+                >
+                  Confirm Reset
+                </button>
+              </div>
+            </div>
+          )}
+
+          <button
+            onClick={onForceLogout}
+            disabled={isLoading || !account?.activeSessions}
+            className="w-full py-2 bg-red-500/10 hover:bg-red-500/20 text-red-500 rounded-lg transition-colors text-sm disabled:opacity-50"
+          >
+            Force Logout ({account?.activeSessions || 0} sessions)
+          </button>
+        </div>
+
+        <button
+          onClick={onClose}
+          className="w-full mt-4 py-2 bg-surface-hover hover:bg-border text-text-primary rounded-lg transition-colors"
+        >
+          Close
+        </button>
+      </div>
     </div>
   );
 }

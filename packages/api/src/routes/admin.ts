@@ -2245,6 +2245,211 @@ adminRouter.post(
   }
 );
 
+// ============================================
+// Password Management (Admin)
+// ============================================
+
+import bcrypt from 'bcryptjs';
+import { actorRepos, sessions } from '../db/schema.js';
+
+// Set a new password for a user
+adminRouter.post(
+  '/io.exprsn.admin.users.setPassword',
+  requirePermission(ADMIN_PERMISSIONS.USERS_EDIT),
+  async (c) => {
+    const body = await c.req.json<{
+      did: string;
+      password: string;
+    }>();
+    const adminUser = c.get('adminUser');
+
+    if (!body.did || !body.password) {
+      return c.json({ error: 'InvalidRequest', message: 'did and password are required' }, 400);
+    }
+
+    if (body.password.length < 8) {
+      return c.json({ error: 'InvalidRequest', message: 'Password must be at least 8 characters' }, 400);
+    }
+
+    // Verify user exists
+    const [user] = await db
+      .select()
+      .from(actorRepos)
+      .where(eq(actorRepos.did, body.did))
+      .limit(1);
+
+    if (!user) {
+      return c.json({ error: 'NotFound', message: 'User not found' }, 404);
+    }
+
+    // Hash the new password
+    const passwordHash = await bcrypt.hash(body.password, 10);
+
+    // Update the password
+    await db
+      .update(actorRepos)
+      .set({ passwordHash, updatedAt: new Date() })
+      .where(eq(actorRepos.did, body.did));
+
+    // Audit log
+    await db.insert(adminAuditLog).values({
+      id: nanoid(),
+      adminId: adminUser.id,
+      action: 'user.setPassword',
+      targetType: 'user',
+      targetId: body.did,
+      details: { handle: user.handle },
+      createdAt: new Date(),
+    });
+
+    return c.json({ success: true, message: 'Password updated successfully' });
+  }
+);
+
+// Generate a temporary password for a user
+adminRouter.post(
+  '/io.exprsn.admin.users.resetPassword',
+  requirePermission(ADMIN_PERMISSIONS.USERS_EDIT),
+  async (c) => {
+    const body = await c.req.json<{
+      did: string;
+    }>();
+    const adminUser = c.get('adminUser');
+
+    if (!body.did) {
+      return c.json({ error: 'InvalidRequest', message: 'did is required' }, 400);
+    }
+
+    // Verify user exists
+    const [user] = await db
+      .select()
+      .from(actorRepos)
+      .where(eq(actorRepos.did, body.did))
+      .limit(1);
+
+    if (!user) {
+      return c.json({ error: 'NotFound', message: 'User not found' }, 404);
+    }
+
+    // Generate a random temporary password
+    const tempPassword = `temp_${nanoid(12)}`;
+    const passwordHash = await bcrypt.hash(tempPassword, 10);
+
+    // Update the password
+    await db
+      .update(actorRepos)
+      .set({ passwordHash, updatedAt: new Date() })
+      .where(eq(actorRepos.did, body.did));
+
+    // Invalidate all existing sessions
+    await db.delete(sessions).where(eq(sessions.did, body.did));
+
+    // Audit log
+    await db.insert(adminAuditLog).values({
+      id: nanoid(),
+      adminId: adminUser.id,
+      action: 'user.resetPassword',
+      targetType: 'user',
+      targetId: body.did,
+      details: { handle: user.handle },
+      createdAt: new Date(),
+    });
+
+    return c.json({
+      success: true,
+      temporaryPassword: tempPassword,
+      message: 'Password reset. User must change password on next login.'
+    });
+  }
+);
+
+// Force logout a user (invalidate all sessions)
+adminRouter.post(
+  '/io.exprsn.admin.users.forceLogout',
+  requirePermission(ADMIN_PERMISSIONS.USERS_EDIT),
+  async (c) => {
+    const body = await c.req.json<{
+      did: string;
+    }>();
+    const adminUser = c.get('adminUser');
+
+    if (!body.did) {
+      return c.json({ error: 'InvalidRequest', message: 'did is required' }, 400);
+    }
+
+    // Count existing sessions
+    const [sessionCount] = await db
+      .select({ count: count() })
+      .from(sessions)
+      .where(eq(sessions.did, body.did));
+
+    // Delete all sessions for the user
+    await db.delete(sessions).where(eq(sessions.did, body.did));
+
+    // Audit log
+    await db.insert(adminAuditLog).values({
+      id: nanoid(),
+      adminId: adminUser.id,
+      action: 'user.forceLogout',
+      targetType: 'user',
+      targetId: body.did,
+      details: { sessionsInvalidated: sessionCount?.count || 0 },
+      createdAt: new Date(),
+    });
+
+    return c.json({
+      success: true,
+      sessionsInvalidated: sessionCount?.count || 0,
+      message: 'All sessions invalidated'
+    });
+  }
+);
+
+// Get account info (for password management UI)
+adminRouter.get(
+  '/io.exprsn.admin.users.getAccountInfo',
+  requirePermission(ADMIN_PERMISSIONS.USERS_VIEW),
+  async (c) => {
+    const did = c.req.query('did');
+
+    if (!did) {
+      return c.json({ error: 'InvalidRequest', message: 'did is required' }, 400);
+    }
+
+    // Get actor repo info
+    const [actor] = await db
+      .select({
+        did: actorRepos.did,
+        handle: actorRepos.handle,
+        email: actorRepos.email,
+        status: actorRepos.status,
+        hasPassword: sql<boolean>`${actorRepos.passwordHash} IS NOT NULL`,
+        createdAt: actorRepos.createdAt,
+        updatedAt: actorRepos.updatedAt,
+      })
+      .from(actorRepos)
+      .where(eq(actorRepos.did, did))
+      .limit(1);
+
+    if (!actor) {
+      return c.json({ error: 'NotFound', message: 'User account not found' }, 404);
+    }
+
+    // Count active sessions
+    const [sessionCount] = await db
+      .select({ count: count() })
+      .from(sessions)
+      .where(eq(sessions.did, did));
+
+    return c.json({
+      account: {
+        ...actor,
+        activeSessions: sessionCount?.count || 0,
+      },
+    });
+  }
+);
+
 // Helper function for sanction severity ordering
 function severityOrder(sanctionType: string): number {
   const order: Record<string, number> = {
