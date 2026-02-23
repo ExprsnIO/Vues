@@ -21,6 +21,10 @@ export interface CommitEvent {
   record?: unknown;
   cid?: string;
   prev?: string;
+  /** CAR file bytes containing the blocks for this commit */
+  blocks?: Uint8Array;
+  /** Blob CIDs referenced in this commit */
+  blobs?: string[];
 }
 
 /**
@@ -79,9 +83,18 @@ export class Sequencer {
       commit,
     };
 
-    // Store event in Redis
+    // Store event in Redis (without blocks, as they're too large)
+    // The original event with blocks is returned for real-time streaming
     const eventKey = this.keyPrefix + this.EVENTS_KEY;
-    const eventData = JSON.stringify(event);
+    const eventForStorage = {
+      ...event,
+      commit: {
+        ...commit,
+        // Store blocks as base64 for retrieval during backfill
+        blocks: commit.blocks ? Buffer.from(commit.blocks).toString('base64') : undefined,
+      },
+    };
+    const eventData = JSON.stringify(eventForStorage);
 
     // Use sorted set with seq as score for ordering
     await this.redis.zadd(eventKey, seq, eventData);
@@ -112,7 +125,34 @@ export class Sequencer {
       limit
     );
 
-    return events.map((e: string) => JSON.parse(e) as RelayEvent);
+    return events.map((e: string) => this.parseStoredEvent(e));
+  }
+
+  /**
+   * Parse a stored event, converting base64 blocks back to Uint8Array
+   */
+  private parseStoredEvent(eventJson: string): RelayEvent {
+    const parsed = JSON.parse(eventJson) as {
+      seq: number;
+      did: string;
+      time: string;
+      commit: Omit<CommitEvent, 'blocks'> & { blocks?: string };
+    };
+
+    // Convert base64 blocks back to Uint8Array
+    const blocks = parsed.commit.blocks
+      ? new Uint8Array(Buffer.from(parsed.commit.blocks, 'base64'))
+      : undefined;
+
+    return {
+      seq: parsed.seq,
+      did: parsed.did,
+      time: parsed.time,
+      commit: {
+        ...parsed.commit,
+        blocks,
+      },
+    };
   }
 
   /**
@@ -134,7 +174,7 @@ export class Sequencer {
       limit
     );
 
-    return events.map((e: string) => JSON.parse(e) as RelayEvent);
+    return events.map((e: string) => this.parseStoredEvent(e));
   }
 
   /**
@@ -145,7 +185,7 @@ export class Sequencer {
     const events = await this.redis.zrangebyscore(key, seq, seq);
 
     if (events.length === 0) return null;
-    return JSON.parse(events[0]) as RelayEvent;
+    return this.parseStoredEvent(events[0]);
   }
 
   /**

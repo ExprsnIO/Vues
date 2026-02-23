@@ -252,16 +252,24 @@ export class Firehose {
    * Convert relay event to commit frame
    */
   private eventToCommitFrame(event: RelayEvent): CommitFrame {
+    // Use blocks from event if available, otherwise empty
+    const blocks = event.commit.blocks instanceof Uint8Array
+      ? event.commit.blocks
+      : new Uint8Array(0);
+
+    // Mark as tooBig if no blocks (subscribers should fetch via getRepo)
+    const tooBig = blocks.length === 0;
+
     return {
       seq: event.seq,
       rebase: false,
-      tooBig: false,
+      tooBig,
       repo: event.did,
       commit: event.commit.cid || '',
       prev: event.commit.prev || null,
       rev: event.commit.rev,
-      since: null,
-      blocks: new Uint8Array(0), // Would include actual blocks
+      since: event.commit.prev || null,
+      blocks,
       ops: [
         {
           action: event.commit.operation,
@@ -269,7 +277,7 @@ export class Firehose {
           cid: event.commit.cid || null,
         },
       ],
-      blobs: [],
+      blobs: event.commit.blobs || [],
       time: event.time,
     };
   }

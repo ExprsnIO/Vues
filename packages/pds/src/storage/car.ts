@@ -1,8 +1,10 @@
 import { CID } from 'multiformats/cid';
 import { CarWriter, CarReader } from '@ipld/car';
+import * as dagCbor from '@ipld/dag-cbor';
 import { BlockStore } from '../mst/index.js';
 import { MerkleSearchTree } from '../mst/mst.js';
 import { decodeCommit, Commit, encodeCommit } from '../repo/commit.js';
+import { dataToNode, type MstNodeData } from '../mst/node.js';
 
 /**
  * CAR file header
@@ -65,7 +67,7 @@ export async function exportRepoCar(
 }
 
 /**
- * Recursively collect MST blocks
+ * Recursively collect MST blocks by properly traversing the tree
  */
 async function collectMstBlocks(
   store: BlockStore,
@@ -85,9 +87,40 @@ async function collectMstBlocks(
 
   blocks.push({ cid, bytes });
 
-  // Try to parse as MST node and follow links
-  // This is a simplified approach - real implementation would properly decode
-  // MST nodes and follow all CID references
+  // Try to parse as MST node and follow all CID references
+  try {
+    const decoded = dagCbor.decode(bytes) as MstNodeData;
+
+    // Follow left subtree if present
+    if (decoded.l) {
+      const leftCid = CID.decode(decoded.l);
+      await collectMstBlocks(store, leftCid, blocks, visited);
+    }
+
+    // Follow each entry's value (record) and right subtree
+    if (decoded.e && Array.isArray(decoded.e)) {
+      for (const entry of decoded.e) {
+        // Collect the record block (value)
+        if (entry.v) {
+          const valueCid = CID.decode(entry.v);
+          const valueBytes = await store.get(valueCid);
+          if (valueBytes && !visited.has(valueCid.toString())) {
+            visited.add(valueCid.toString());
+            blocks.push({ cid: valueCid, bytes: valueBytes });
+          }
+        }
+
+        // Follow right subtree if present
+        if (entry.t) {
+          const subtreeCid = CID.decode(entry.t);
+          await collectMstBlocks(store, subtreeCid, blocks, visited);
+        }
+      }
+    }
+  } catch (error) {
+    // Not an MST node, might be a record block - that's fine
+    // Just include the block as-is
+  }
 }
 
 /**

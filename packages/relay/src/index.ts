@@ -200,6 +200,15 @@ export {
   RelaySubscriptionManager,
 } from './external-client.js';
 
+// Export CAR builder utilities
+export {
+  createCar,
+  createCid,
+  createBlock,
+  buildCommitCar,
+  buildDeleteCar,
+} from './car-builder.js';
+
 // Export types
 export type {
   RelayEvent,
