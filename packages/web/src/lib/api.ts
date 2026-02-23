@@ -450,6 +450,64 @@ class ApiClient {
     return this.fetch(`/xrpc/io.exprsn.admin.users.getAccountInfo?${params}`);
   }
 
+  // Studio Project Management
+  async listStudioProjects(options: {
+    limit?: number;
+    cursor?: string;
+  } = {}): Promise<{
+    projects: Array<{
+      id: string;
+      ownerDid: string;
+      title: string;
+      settings: {
+        width: number;
+        height: number;
+        frameRate: number;
+        duration: number;
+        aspectRatio?: string;
+        backgroundColor?: string;
+      };
+      createdAt: string;
+      updatedAt: string;
+    }>;
+  }> {
+    const params = new URLSearchParams();
+    if (options.limit) params.set('limit', String(options.limit));
+    if (options.cursor) params.set('cursor', options.cursor);
+    return this.fetch(`/xrpc/io.exprsn.studio.listProjects?${params}`);
+  }
+
+  async createStudioProject(data: {
+    title: string;
+    settings?: {
+      width?: number;
+      height?: number;
+      frameRate?: number;
+      duration?: number;
+      aspectRatio?: string;
+      backgroundColor?: string;
+    };
+  }): Promise<{ projectId: string }> {
+    return this.fetch('/xrpc/io.exprsn.studio.createProject', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async deleteStudioProject(projectId: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.studio.deleteProject', {
+      method: 'POST',
+      body: JSON.stringify({ projectId }),
+    });
+  }
+
+  async duplicateStudioProject(projectId: string, newName?: string): Promise<{ projectId: string }> {
+    return this.fetch('/xrpc/io.exprsn.studio.duplicateProject', {
+      method: 'POST',
+      body: JSON.stringify({ projectId, newName }),
+    });
+  }
+
   async getAdminReports(options: {
     status?: string;
     contentType?: string;
