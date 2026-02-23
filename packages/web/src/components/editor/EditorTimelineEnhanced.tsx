@@ -1,8 +1,8 @@
 'use client';
 
 import { useRef, useCallback, useState, useMemo } from 'react';
-import { useEditor } from '@/app/editor/page';
-import type { EditorElement, AudioTrack } from '@/app/editor/page';
+import { useEditor } from '@/lib/editor-context';
+import type { EditorElement, AudioTrack } from '@/lib/editor-context';
 import { useBeatSnapping, formatBpm } from '@/hooks/useBeatSnapping';
 
 export function EditorTimelineEnhanced() {

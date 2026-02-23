@@ -1,8 +1,8 @@
 'use client';
 
 import { useState, useCallback } from 'react';
-import { useEditor } from '@/app/editor/page';
-import type { EditorElement, Keyframe } from '@/app/editor/page';
+import { useEditor } from '@/lib/editor-context';
+import type { EditorElement, Keyframe } from '@/lib/editor-context';
 import { VisualEffectsPanel } from './effects/VisualEffectsPanel';
 import type { EffectInstance } from './effects';
 import { ExpressionEditor } from './ExpressionEditor';

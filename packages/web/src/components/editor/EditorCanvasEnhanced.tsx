@@ -1,8 +1,8 @@
 'use client';
 
 import { useRef, useEffect, useCallback, useState, useMemo } from 'react';
-import { useEditor } from '@/app/editor/page';
-import type { EditorElement } from '@/app/editor/page';
+import { useEditor } from '@/lib/editor-context';
+import type { EditorElement } from '@/lib/editor-context';
 import { effectEngine, type EffectInstance } from './effects';
 import { builtinFilters } from './effects/filters';
 import { expressionEngine } from '@/engine/scripting';
