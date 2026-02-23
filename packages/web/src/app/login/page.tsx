@@ -1,7 +1,7 @@
 'use client';
 
-import { useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { useState, useEffect } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { useAuth } from '@/lib/auth-context';
 
@@ -9,12 +9,21 @@ type LoginMode = 'local' | 'oauth';
 
 export default function LoginPage() {
   const router = useRouter();
-  const { signIn, signInWithOAuth } = useAuth();
+  const searchParams = useSearchParams();
+  const redirectTo = searchParams.get('redirect') || '/';
+  const { user, isLoading: authLoading, signIn, signInWithOAuth } = useAuth();
   const [mode, setMode] = useState<LoginMode>('local');
   const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
+
+  // Redirect if already logged in
+  useEffect(() => {
+    if (!authLoading && user) {
+      router.push(redirectTo);
+    }
+  }, [user, authLoading, redirectTo, router]);
 
   const handleLocalSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -23,7 +32,7 @@ export default function LoginPage() {
 
     try {
       await signIn(identifier, password);
-      router.push('/');
+      router.push(redirectTo);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to sign in');
       setIsLoading(false);
