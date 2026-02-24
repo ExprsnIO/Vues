@@ -35,6 +35,7 @@ import { initializeEditorCollab } from './websocket/editorCollab.js';
 import { initializeRenderProgressWebSocket } from './websocket/renderProgress.js';
 import { initializeAdminWebSocket } from './websocket/admin.js';
 import { initializeWatchPartyWebSocket } from './websocket/watchParty.js';
+import { initializeLiveChatWebSocket } from './websocket/liveChat.js';
 import { createWellKnownRouterFromEnv } from './routes/well-known.js';
 import { identityRouter } from './routes/identity.js';
 import { registryRouter, initializeServiceRegistry } from './routes/registry.js';
@@ -51,9 +52,11 @@ import { presetsRouter } from './routes/presets.js';
 import { clusterAdminRouter } from './routes/cluster-admin.js';
 import { analyticsRoutes } from './routes/analytics.js';
 import { studioRouter } from './routes/studio.js';
+import { effectsRouter } from './routes/effects.js';
 import soundsRouter from './routes/sounds.js';
 import challengesRouter from './routes/challenges.js';
 import { watchPartyRouter } from './routes/watchParty.js';
+import { reactionsRouter } from './routes/reactions.js';
 import { initializeIdentityService } from './services/identity/index.js';
 import { cronService } from './services/cron/index.js';
 import { oauthAgent } from './services/oauth/OAuthAgent.js';
@@ -187,6 +190,7 @@ app.route('/xrpc', authRouter);
 app.route('/xrpc', xrpcRouter);
 app.route('/xrpc', settingsRouter);
 app.route('/xrpc', socialRouter);
+app.route('/xrpc', reactionsRouter);
 app.route('/xrpc', chatRouter);
 app.route('/xrpc', actorRouter);
 app.route('/xrpc', notificationRouter);
@@ -202,6 +206,7 @@ app.route('/xrpc', soundsRouter);
 app.route('/xrpc', challengesRouter);
 app.route('/xrpc', watchPartyRouter);
 app.route('/xrpc', studioRouter);
+app.route('/xrpc', effectsRouter);
 app.route('/xrpc', configRoutes);
 // Identity, registry, federation, sync, and PLC routes
 app.route('/xrpc', identityRouter);
@@ -408,6 +413,7 @@ async function main() {
   initializeRenderProgressWebSocket(io);
   initializeAdminWebSocket(io);
   initializeWatchPartyWebSocket(io);
+  initializeLiveChatWebSocket(io);
 
   // Initialize relay firehose WebSocket if enabled
   if (relayEnabled && relayService) {

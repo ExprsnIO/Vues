@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useAuth } from '@/lib/auth-context';
 import Link from 'next/link';
+import { LineChart, BarChart, DoughnutChart } from '@/components/analytics';
 
 type Tab = 'overview' | 'videos' | 'followers' | 'streams' | 'earnings';
 type Period = '7d' | '30d' | '90d' | 'all';
@@ -209,6 +210,50 @@ function OverviewTab({ period }: { period: Period }) {
         </div>
       </div>
 
+      {/* Engagement Breakdown */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div className="bg-surface border border-border rounded-xl p-6">
+          <h3 className="text-lg font-semibold text-text-primary mb-4">Engagement Breakdown</h3>
+          <DoughnutChart
+            labels={['Likes', 'Comments', 'Shares', 'Reposts']}
+            data={[
+              data.metrics.likes,
+              data.metrics.comments,
+              data.metrics.shares,
+              data.metrics.reposts,
+            ]}
+            centerLabel={{
+              text: formatNumber(
+                data.metrics.likes +
+                  data.metrics.comments +
+                  data.metrics.shares +
+                  data.metrics.reposts
+              ),
+              subtext: 'Total',
+            }}
+          />
+        </div>
+        <div className="bg-surface border border-border rounded-xl p-6">
+          <h3 className="text-lg font-semibold text-text-primary mb-4">Views vs Engagement</h3>
+          <BarChart
+            labels={['Views', 'Likes', 'Comments', 'Shares']}
+            datasets={[
+              {
+                label: 'Count',
+                data: [
+                  data.metrics.views,
+                  data.metrics.likes,
+                  data.metrics.comments,
+                  data.metrics.shares,
+                ],
+              },
+            ]}
+            height={200}
+            showLegend={false}
+          />
+        </div>
+      </div>
+
       {/* Earnings Summary */}
       {data.earnings && (
         <div className="bg-surface border border-border rounded-xl p-6">
@@ -381,24 +426,25 @@ function FollowersTab({ period }: { period: Period }) {
         />
       </div>
 
-      {/* Growth Chart (Simple Bar Chart) */}
+      {/* Growth Chart */}
       {growth.length > 0 && (
         <div className="bg-surface border border-border rounded-xl p-6">
           <h3 className="text-lg font-semibold text-text-primary mb-4">Follower Growth</h3>
-          <div className="h-48 flex items-end gap-1">
-            {growth.slice(-30).map((day, i) => {
-              const maxCount = Math.max(...growth.map((g) => g.count), 1);
-              const height = (day.count / maxCount) * 100;
-              return (
-                <div
-                  key={i}
-                  className="flex-1 bg-accent/80 hover:bg-accent rounded-t transition-colors"
-                  style={{ height: `${Math.max(height, 2)}%` }}
-                  title={`${day.date}: ${day.count} new followers`}
-                />
-              );
+          <LineChart
+            labels={growth.slice(-30).map((g) => {
+              const date = new Date(g.date);
+              return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
             })}
-          </div>
+            datasets={[
+              {
+                label: 'New Followers',
+                data: growth.slice(-30).map((g) => g.count),
+                fill: true,
+              },
+            ]}
+            height={200}
+            showLegend={false}
+          />
         </div>
       )}
 

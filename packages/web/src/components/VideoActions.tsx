@@ -9,6 +9,7 @@ import { useLoginModal } from './LoginModal';
 import { CommentThread } from './comments/CommentThread';
 import { CollabLoopModal } from './CollabLoopModal';
 import { ReportModal } from './ReportModal';
+import { ReactionPicker } from './ReactionPicker';
 import toast from 'react-hot-toast';
 
 interface VideoActionsProps {
@@ -140,6 +141,9 @@ export function VideoActions({ video }: VideoActionsProps) {
             {formatCount(likeCount)}
           </span>
         </button>
+
+        {/* Reactions */}
+        <ReactionPicker videoUri={video.uri} />
 
         {/* Comment */}
         <button onClick={handleComment} className="flex flex-col items-center">

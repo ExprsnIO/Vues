@@ -44,7 +44,69 @@ export interface FeedResponse {
 }
 
 export type ReactionType = 'like' | 'love' | 'dislike';
+export type VideoReactionType = 'fire' | 'love' | 'laugh' | 'wow' | 'sad' | 'angry';
 export type CommentSortType = 'top' | 'recent' | 'hot';
+
+export interface VideoReactionsResponse {
+  videoUri: string;
+  counts: Record<VideoReactionType, number>;
+  totalReactions: number;
+  userReactions: VideoReactionType[];
+}
+
+// Effects types
+export interface EffectParam {
+  name: string;
+  label: string;
+  type: 'number' | 'color' | 'select' | 'boolean' | 'range';
+  default: number | string | boolean;
+  min?: number;
+  max?: number;
+  step?: number;
+  options?: Array<{ value: string | number; label: string }>;
+}
+
+export interface EffectDefinition {
+  type: string;
+  name: string;
+  description: string;
+  category: string;
+  params: EffectParam[];
+}
+
+export interface EffectInstance {
+  type: string;
+  params: Record<string, number | string | boolean>;
+}
+
+export interface EffectPreset {
+  id: string;
+  name: string;
+  description: string;
+  category: string;
+  effects: EffectInstance[];
+  thumbnail?: string;
+  isCustom?: boolean;
+}
+
+export interface EffectCategory {
+  id: string;
+  name: string;
+  description: string;
+  icon: string;
+}
+
+export interface EffectsListResponse {
+  categories: EffectCategory[];
+  effectsByCategory: Record<string, EffectDefinition[]>;
+  totalEffects: number;
+}
+
+export interface EffectPresetsResponse {
+  presets: EffectPreset[];
+  userPresets: EffectPreset[];
+  categories: string[];
+}
 
 export interface CommentView {
   uri: string;
@@ -204,6 +266,60 @@ class ApiClient {
     return this.fetch('/xrpc/io.exprsn.video.unlike', {
       method: 'POST',
       body: JSON.stringify({ uri: likeUri }),
+    });
+  }
+
+  // Video Reactions
+  async react(videoUri: string, reactionType: VideoReactionType): Promise<{ id: string; videoUri: string; reactionType: string; createdAt: string }> {
+    return this.fetch('/xrpc/io.exprsn.video.react', {
+      method: 'POST',
+      body: JSON.stringify({ videoUri, reactionType }),
+    });
+  }
+
+  async unreact(videoUri: string, reactionType: VideoReactionType): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.video.unreact', {
+      method: 'POST',
+      body: JSON.stringify({ videoUri, reactionType }),
+    });
+  }
+
+  async getReactions(videoUri: string): Promise<VideoReactionsResponse> {
+    const params = new URLSearchParams({ videoUri });
+    return this.fetch(`/xrpc/io.exprsn.video.getReactions?${params}`);
+  }
+
+  async getReactionTypes(): Promise<{ reactionTypes: Array<{ type: string; emoji: string; label: string }> }> {
+    return this.fetch('/xrpc/io.exprsn.video.getReactionTypes');
+  }
+
+  // Video Effects
+  async getEffectsList(): Promise<EffectsListResponse> {
+    return this.fetch('/xrpc/io.exprsn.studio.effects.list');
+  }
+
+  async getEffectPresets(): Promise<EffectPresetsResponse> {
+    return this.fetch('/xrpc/io.exprsn.studio.effects.presets');
+  }
+
+  async saveEffectPreset(data: { name: string; description?: string; effects: EffectInstance[] }): Promise<EffectPreset> {
+    return this.fetch('/xrpc/io.exprsn.studio.effects.savePreset', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async deleteEffectPreset(presetId: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.studio.effects.deletePreset', {
+      method: 'POST',
+      body: JSON.stringify({ presetId }),
+    });
+  }
+
+  async previewEffects(effects: EffectInstance[]): Promise<{ filterString: string; effectCount: number }> {
+    return this.fetch('/xrpc/io.exprsn.studio.effects.preview', {
+      method: 'POST',
+      body: JSON.stringify({ effects }),
     });
   }
 

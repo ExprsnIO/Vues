@@ -74,6 +74,13 @@ export const videos = pgTable(
     shareCount: integer('share_count').default(0).notNull(),
     repostCount: integer('repost_count').default(0).notNull(),
     bookmarkCount: integer('bookmark_count').default(0).notNull(),
+    // Emoji reaction counts
+    fireCount: integer('fire_count').default(0).notNull(),
+    loveCount: integer('love_count').default(0).notNull(),
+    laughCount: integer('laugh_count').default(0).notNull(),
+    wowCount: integer('wow_count').default(0).notNull(),
+    sadCount: integer('sad_count').default(0).notNull(),
+    angryCount: integer('angry_count').default(0).notNull(),
     indexedAt: timestamp('indexed_at').defaultNow().notNull(),
     createdAt: timestamp('created_at').notNull(),
   },
@@ -158,6 +165,31 @@ export const commentReactions = pgTable(
     uniqueReaction: uniqueIndex('comment_reactions_unique_idx').on(
       table.commentUri,
       table.authorDid
+    ),
+  })
+);
+
+// Video emoji reactions (fire, love, laugh, wow, sad, angry)
+export const videoReactions = pgTable(
+  'video_reactions',
+  {
+    id: text('id').primaryKey(),
+    videoUri: text('video_uri')
+      .notNull()
+      .references(() => videos.uri, { onDelete: 'cascade' }),
+    authorDid: text('author_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    reactionType: text('reaction_type').notNull(), // 'fire' | 'love' | 'laugh' | 'wow' | 'sad' | 'angry'
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    videoIdx: index('video_reactions_video_idx').on(table.videoUri),
+    authorIdx: index('video_reactions_author_idx').on(table.authorDid),
+    uniqueReaction: uniqueIndex('video_reactions_unique_idx').on(
+      table.videoUri,
+      table.authorDid,
+      table.reactionType
     ),
   })
 );
@@ -1117,6 +1149,8 @@ export type Comment = typeof comments.$inferSelect;
 export type NewComment = typeof comments.$inferInsert;
 export type CommentReaction = typeof commentReactions.$inferSelect;
 export type NewCommentReaction = typeof commentReactions.$inferInsert;
+export type VideoReaction = typeof videoReactions.$inferSelect;
+export type NewVideoReaction = typeof videoReactions.$inferInsert;
 export type Follow = typeof follows.$inferSelect;
 export type NewFollow = typeof follows.$inferInsert;
 export type Sound = typeof sounds.$inferSelect;
