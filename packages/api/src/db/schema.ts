@@ -353,6 +353,23 @@ export const userSettings = pgTable('user_settings', {
   layout: jsonb('layout').$type<{
     commentsPosition: 'side' | 'bottom';
   }>(),
+  editor: jsonb('editor').$type<{
+    defaultPresetId: string | null;
+    favoritePresetIds: string[];
+    recentPresetIds: string[];
+    customPresets: Array<{
+      id: string;
+      name: string;
+      description?: string;
+      effects: Array<{
+        type: string;
+        params: Record<string, number | string | boolean>;
+      }>;
+      createdAt: string;
+    }>;
+    showPresetDescriptions: boolean;
+    autoApplyDefault: boolean;
+  }>(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });

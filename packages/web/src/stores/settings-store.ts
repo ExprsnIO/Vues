@@ -11,6 +11,8 @@ import type {
   PrivacySettings,
   ContentSettings,
   LayoutSettings,
+  EditorSettings,
+  CustomEffectPreset,
 } from '@exprsn/shared';
 import { api } from '../lib/api';
 
@@ -54,6 +56,14 @@ const DEFAULT_SETTINGS: UserSettings = {
   layout: {
     commentsPosition: 'side',
   },
+  editor: {
+    defaultPresetId: null,
+    favoritePresetIds: [],
+    recentPresetIds: [],
+    customPresets: [],
+    showPresetDescriptions: true,
+    autoApplyDefault: false,
+  },
   updatedAt: new Date().toISOString(),
 };
 
@@ -72,6 +82,11 @@ interface SettingsState {
   updateNotifications: (settings: Partial<NotificationSettings>) => void;
   updatePrivacy: (settings: Partial<PrivacySettings>) => void;
   updateContent: (settings: Partial<ContentSettings>) => void;
+  updateEditor: (settings: Partial<EditorSettings>) => void;
+  addCustomPreset: (preset: Omit<CustomEffectPreset, 'id' | 'createdAt'>) => void;
+  removeCustomPreset: (presetId: string) => void;
+  toggleFavoritePreset: (presetId: string) => void;
+  addRecentPreset: (presetId: string) => void;
   resetSettings: () => void;
 
   // Sync with server
@@ -171,6 +186,86 @@ export const useSettingsStore = create<SettingsState>()(
           },
         }));
         get().syncToServer({ content });
+      },
+
+      updateEditor: (editor: Partial<EditorSettings>) => {
+        set((state) => ({
+          settings: {
+            ...state.settings,
+            editor: { ...state.settings.editor, ...editor },
+            updatedAt: new Date().toISOString(),
+          },
+        }));
+        get().syncToServer({ editor });
+      },
+
+      addCustomPreset: (preset: Omit<CustomEffectPreset, 'id' | 'createdAt'>) => {
+        const newPreset: CustomEffectPreset = {
+          ...preset,
+          id: `custom-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+          createdAt: new Date().toISOString(),
+        };
+        set((state) => {
+          const customPresets = [...state.settings.editor.customPresets, newPreset];
+          return {
+            settings: {
+              ...state.settings,
+              editor: { ...state.settings.editor, customPresets },
+              updatedAt: new Date().toISOString(),
+            },
+          };
+        });
+        get().syncToServer({ editor: get().settings.editor });
+      },
+
+      removeCustomPreset: (presetId: string) => {
+        set((state) => {
+          const customPresets = state.settings.editor.customPresets.filter(p => p.id !== presetId);
+          const favoritePresetIds = state.settings.editor.favoritePresetIds.filter(id => id !== presetId);
+          const recentPresetIds = state.settings.editor.recentPresetIds.filter(id => id !== presetId);
+          const defaultPresetId = state.settings.editor.defaultPresetId === presetId ? null : state.settings.editor.defaultPresetId;
+          return {
+            settings: {
+              ...state.settings,
+              editor: { ...state.settings.editor, customPresets, favoritePresetIds, recentPresetIds, defaultPresetId },
+              updatedAt: new Date().toISOString(),
+            },
+          };
+        });
+        get().syncToServer({ editor: get().settings.editor });
+      },
+
+      toggleFavoritePreset: (presetId: string) => {
+        set((state) => {
+          const favoritePresetIds = state.settings.editor.favoritePresetIds.includes(presetId)
+            ? state.settings.editor.favoritePresetIds.filter(id => id !== presetId)
+            : [...state.settings.editor.favoritePresetIds, presetId];
+          return {
+            settings: {
+              ...state.settings,
+              editor: { ...state.settings.editor, favoritePresetIds },
+              updatedAt: new Date().toISOString(),
+            },
+          };
+        });
+        get().syncToServer({ editor: get().settings.editor });
+      },
+
+      addRecentPreset: (presetId: string) => {
+        set((state) => {
+          const recentPresetIds = [
+            presetId,
+            ...state.settings.editor.recentPresetIds.filter(id => id !== presetId),
+          ].slice(0, 10); // Keep max 10 recent
+          return {
+            settings: {
+              ...state.settings,
+              editor: { ...state.settings.editor, recentPresetIds },
+              updatedAt: new Date().toISOString(),
+            },
+          };
+        });
+        get().syncToServer({ editor: get().settings.editor });
       },
 
       resetSettings: () => {
@@ -282,5 +377,23 @@ export const usePlayback = () => {
   return {
     ...settings.playback,
     update: updatePlayback,
+  };
+};
+
+export const useEditor = () => {
+  const settings = useSettingsStore((state) => state.settings);
+  const updateEditor = useSettingsStore((state) => state.updateEditor);
+  const addCustomPreset = useSettingsStore((state) => state.addCustomPreset);
+  const removeCustomPreset = useSettingsStore((state) => state.removeCustomPreset);
+  const toggleFavoritePreset = useSettingsStore((state) => state.toggleFavoritePreset);
+  const addRecentPreset = useSettingsStore((state) => state.addRecentPreset);
+
+  return {
+    ...settings.editor,
+    update: updateEditor,
+    addCustomPreset,
+    removeCustomPreset,
+    toggleFavoritePreset,
+    addRecentPreset,
   };
 };

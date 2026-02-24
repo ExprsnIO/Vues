@@ -53,6 +53,27 @@ export interface LayoutSettings {
   commentsPosition: CommentsPosition;
 }
 
+// Editor/Video effect settings
+export interface CustomEffectPreset {
+  id: string;
+  name: string;
+  description?: string;
+  effects: Array<{
+    type: string;
+    params: Record<string, number | string | boolean>;
+  }>;
+  createdAt: string;
+}
+
+export interface EditorSettings {
+  defaultPresetId: string | null; // Preset to apply by default when editing
+  favoritePresetIds: string[]; // Bookmarked preset IDs (system or custom)
+  recentPresetIds: string[]; // Recently used preset IDs (max 10)
+  customPresets: CustomEffectPreset[]; // User-created presets stored in settings
+  showPresetDescriptions: boolean; // Show/hide descriptions in preset list
+  autoApplyDefault: boolean; // Auto-apply default preset when starting editor
+}
+
 // Complete user settings
 export interface UserSettings {
   themeId: ThemeId;
@@ -63,6 +84,7 @@ export interface UserSettings {
   privacy: PrivacySettings;
   content: ContentSettings;
   layout: LayoutSettings;
+  editor: EditorSettings;
   updatedAt: string;
 }
 
@@ -76,6 +98,7 @@ export type UserSettingsUpdate = Partial<{
   privacy: Partial<PrivacySettings>;
   content: Partial<ContentSettings>;
   layout: Partial<LayoutSettings>;
+  editor: Partial<EditorSettings>;
 }>;
 
 // Default settings
@@ -118,6 +141,14 @@ export const DEFAULT_SETTINGS: UserSettings = {
   },
   layout: {
     commentsPosition: 'side',
+  },
+  editor: {
+    defaultPresetId: null,
+    favoritePresetIds: [],
+    recentPresetIds: [],
+    customPresets: [],
+    showPresetDescriptions: true,
+    autoApplyDefault: false,
   },
   updatedAt: new Date().toISOString(),
 };

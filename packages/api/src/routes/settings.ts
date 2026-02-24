@@ -12,6 +12,7 @@ import type {
   PrivacySettings,
   ContentSettings,
   LayoutSettings,
+  EditorSettings,
   DEFAULT_SETTINGS,
 } from '@exprsn/shared';
 
@@ -57,6 +58,14 @@ const defaultSettings: Omit<UserSettings, 'updatedAt'> = {
   },
   layout: {
     commentsPosition: 'side',
+  },
+  editor: {
+    defaultPresetId: null,
+    favoritePresetIds: [],
+    recentPresetIds: [],
+    customPresets: [],
+    showPresetDescriptions: true,
+    autoApplyDefault: false,
   },
 };
 
@@ -122,6 +131,10 @@ settingsRouter.get('/io.exprsn.settings.getSettings', optionalAuthMiddleware, as
       ...defaultSettings.layout,
       ...(existing.layout as LayoutSettings | null),
     },
+    editor: {
+      ...defaultSettings.editor,
+      ...(existing.editor as EditorSettings | null),
+    },
     updatedAt: existing.updatedAt.toISOString(),
   };
 
@@ -179,6 +192,9 @@ settingsRouter.post('/io.exprsn.settings.updateSettings', authMiddleware, async 
       layout: update.layout
         ? { ...defaultSettings.layout, ...update.layout }
         : defaultSettings.layout,
+      editor: update.editor
+        ? { ...defaultSettings.editor, ...update.editor }
+        : defaultSettings.editor,
       createdAt: now,
       updatedAt: now,
     };
@@ -248,6 +264,13 @@ settingsRouter.post('/io.exprsn.settings.updateSettings', authMiddleware, async 
     };
   }
 
+  if (update.editor) {
+    updateRow.editor = {
+      ...(existing.editor as EditorSettings | null),
+      ...update.editor,
+    };
+  }
+
   await db.update(userSettings).set(updateRow).where(eq(userSettings.userDid, userDid));
 
   // Fetch updated settings
@@ -281,6 +304,10 @@ settingsRouter.post('/io.exprsn.settings.updateSettings', authMiddleware, async 
     layout: {
       ...defaultSettings.layout,
       ...(updated!.layout as LayoutSettings | null),
+    },
+    editor: {
+      ...defaultSettings.editor,
+      ...(updated!.editor as EditorSettings | null),
     },
     updatedAt: updated!.updatedAt.toISOString(),
   };
