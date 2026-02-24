@@ -56,6 +56,7 @@ export function EffectsPanel({ onEffectsChange, initialEffects = [] }: EffectsPa
   const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState<'effects' | 'presets'>('presets');
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
+  const [selectedPresetCategory, setSelectedPresetCategory] = useState<string | null>(null);
   const [appliedEffects, setAppliedEffects] = useState<AppliedEffect[]>(initialEffects);
   const [expandedEffect, setExpandedEffect] = useState<string | null>(null);
 
@@ -81,6 +82,26 @@ export function EffectsPanel({ onEffectsChange, initialEffects = [] }: EffectsPa
   const effectsByCategory: Record<string, EffectDefinition[]> = effectsData?.effectsByCategory || {};
   const presets: EffectPreset[] = presetsData?.presets || [];
   const userPresets: EffectPreset[] = presetsData?.userPresets || [];
+  const presetCategories: string[] = presetsData?.categories || ['style', 'color', 'mood', 'social', 'portrait', 'landscape', 'custom'];
+
+  // Category display names
+  const presetCategoryNames: Record<string, string> = {
+    style: 'Style',
+    color: 'Color',
+    mood: 'Mood',
+    social: 'Social',
+    portrait: 'Portrait',
+    landscape: 'Landscape',
+    custom: 'My Presets',
+  };
+
+  // Group presets by category
+  const presetsByCategory = presets.reduce((acc, preset) => {
+    const cat = preset.category || 'style';
+    if (!acc[cat]) acc[cat] = [];
+    acc[cat].push(preset);
+    return acc;
+  }, {} as Record<string, EffectPreset[]>);
 
   // Apply preset
   const handleApplyPreset = useCallback(
@@ -211,25 +232,76 @@ export function EffectsPanel({ onEffectsChange, initialEffects = [] }: EffectsPa
       <div className="flex-1 overflow-y-auto p-4">
         {activeTab === 'presets' && (
           <div className="space-y-4">
-            {/* System Presets */}
-            <div className="grid grid-cols-2 gap-2">
-              {presets.map((preset) => (
+            {/* Category Filter */}
+            <div className="flex flex-wrap gap-1">
+              <button
+                onClick={() => setSelectedPresetCategory(null)}
+                className={`px-2 py-1 text-xs rounded transition-colors ${
+                  selectedPresetCategory === null
+                    ? 'bg-accent text-text-inverse'
+                    : 'bg-surface-hover text-text-muted hover:text-text-primary'
+                }`}
+              >
+                All
+              </button>
+              {presetCategories.filter(c => c !== 'custom').map((cat) => (
                 <button
-                  key={preset.id}
-                  onClick={() => handleApplyPreset(preset)}
-                  className="p-3 bg-surface-hover rounded-lg text-left hover:bg-border transition-colors"
+                  key={cat}
+                  onClick={() => setSelectedPresetCategory(cat)}
+                  className={`px-2 py-1 text-xs rounded transition-colors ${
+                    selectedPresetCategory === cat
+                      ? 'bg-accent text-text-inverse'
+                      : 'bg-surface-hover text-text-muted hover:text-text-primary'
+                  }`}
                 >
-                  <div className="font-medium text-sm text-text-primary">{preset.name}</div>
-                  <div className="text-xs text-text-muted mt-1">{preset.description}</div>
+                  {presetCategoryNames[cat] || cat}
                 </button>
               ))}
             </div>
+
+            {/* Presets by Category */}
+            {selectedPresetCategory === null ? (
+              // Show all categories
+              Object.entries(presetsByCategory).map(([category, categoryPresets]) => (
+                <div key={category}>
+                  <h3 className="text-xs font-medium text-text-muted uppercase mb-2 mt-3">
+                    {presetCategoryNames[category] || category}
+                  </h3>
+                  <div className="grid grid-cols-2 gap-2">
+                    {categoryPresets.map((preset) => (
+                      <button
+                        key={preset.id}
+                        onClick={() => handleApplyPreset(preset)}
+                        className="p-3 bg-surface-hover rounded-lg text-left hover:bg-border transition-colors"
+                      >
+                        <div className="font-medium text-sm text-text-primary">{preset.name}</div>
+                        <div className="text-xs text-text-muted mt-1 line-clamp-1">{preset.description}</div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))
+            ) : (
+              // Show selected category only
+              <div className="grid grid-cols-2 gap-2">
+                {(presetsByCategory[selectedPresetCategory] || []).map((preset) => (
+                  <button
+                    key={preset.id}
+                    onClick={() => handleApplyPreset(preset)}
+                    className="p-3 bg-surface-hover rounded-lg text-left hover:bg-border transition-colors"
+                  >
+                    <div className="font-medium text-sm text-text-primary">{preset.name}</div>
+                    <div className="text-xs text-text-muted mt-1 line-clamp-1">{preset.description}</div>
+                  </button>
+                ))}
+              </div>
+            )}
 
             {/* User Presets */}
             {userPresets.length > 0 && (
               <>
                 <div className="pt-4 border-t border-border">
-                  <h3 className="text-sm font-medium text-text-muted mb-2">My Presets</h3>
+                  <h3 className="text-xs font-medium text-text-muted uppercase mb-2">My Presets</h3>
                 </div>
                 <div className="grid grid-cols-2 gap-2">
                   {userPresets.map((preset) => (
@@ -239,7 +311,7 @@ export function EffectsPanel({ onEffectsChange, initialEffects = [] }: EffectsPa
                       className="p-3 bg-accent/10 rounded-lg text-left hover:bg-accent/20 transition-colors"
                     >
                       <div className="font-medium text-sm text-text-primary">{preset.name}</div>
-                      <div className="text-xs text-text-muted mt-1">{preset.description}</div>
+                      <div className="text-xs text-text-muted mt-1 line-clamp-1">{preset.description}</div>
                     </button>
                   ))}
                 </div>
