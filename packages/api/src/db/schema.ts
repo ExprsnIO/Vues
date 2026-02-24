@@ -582,6 +582,20 @@ export const systemConfig = pgTable('system_config', {
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
 
+// Setup state - tracks first-run setup wizard progress
+export const setupState = pgTable('setup_state', {
+  id: text('id').primaryKey().default('singleton'),
+  status: text('status').notNull().default('pending'), // pending | in_progress | completed
+  currentStep: integer('current_step').default(0),
+  completedSteps: jsonb('completed_steps').$type<string[]>().default([]),
+  setupToken: text('setup_token'), // One-time token for remote setup access
+  tokenExpiresAt: timestamp('token_expires_at'),
+  completedAt: timestamp('completed_at'),
+  completedBy: text('completed_by'), // DID of admin who completed setup
+  createdAt: timestamp('created_at').defaultNow(),
+  updatedAt: timestamp('updated_at').defaultNow(),
+});
+
 // Admin audit log
 export const adminAuditLog = pgTable(
   'admin_audit_log',
@@ -1143,6 +1157,8 @@ export type FeaturedContent = typeof featuredContent.$inferSelect;
 export type NewFeaturedContent = typeof featuredContent.$inferInsert;
 export type SystemConfig = typeof systemConfig.$inferSelect;
 export type NewSystemConfig = typeof systemConfig.$inferInsert;
+export type SetupState = typeof setupState.$inferSelect;
+export type NewSetupState = typeof setupState.$inferInsert;
 export type AdminAuditLogEntry = typeof adminAuditLog.$inferSelect;
 export type NewAdminAuditLogEntry = typeof adminAuditLog.$inferInsert;
 export type AnalyticsSnapshot = typeof analyticsSnapshots.$inferSelect;
@@ -3373,4 +3389,300 @@ export type ModerationConfig = typeof moderationConfig.$inferSelect;
 export type NewModerationConfig = typeof moderationConfig.$inferInsert;
 export type AuthConfig = typeof authConfig.$inferSelect;
 export type NewAuthConfig = typeof authConfig.$inferInsert;
+
+// ==========================================
+// Watch Party - Synchronized Video Watching
+// ==========================================
+
+// Watch Parties - synchronized video watching sessions
+export const watchParties = pgTable(
+  'watch_parties',
+  {
+    id: text('id').primaryKey(),
+    hostDid: text('host_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    inviteCode: text('invite_code').notNull(),
+    status: text('status').default('active').notNull(), // 'waiting' | 'active' | 'ended'
+    maxParticipants: integer('max_participants').default(10).notNull(),
+    participantCount: integer('participant_count').default(1).notNull(),
+    currentVideoUri: text('current_video_uri').references(() => videos.uri),
+    currentPosition: integer('current_position').default(0).notNull(), // milliseconds
+    isPlaying: boolean('is_playing').default(false).notNull(),
+    visibility: text('visibility').default('private').notNull(), // 'private' | 'friends' | 'public'
+    chatEnabled: boolean('chat_enabled').default(true).notNull(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    endedAt: timestamp('ended_at'),
+  },
+  (table) => ({
+    hostIdx: index('watch_parties_host_idx').on(table.hostDid),
+    inviteCodeIdx: uniqueIndex('watch_parties_invite_code_idx').on(table.inviteCode),
+    statusIdx: index('watch_parties_status_idx').on(table.status),
+    createdIdx: index('watch_parties_created_idx').on(table.createdAt),
+  })
+);
+
+// Watch Party Participants
+export const watchPartyParticipants = pgTable(
+  'watch_party_participants',
+  {
+    id: text('id').primaryKey(),
+    partyId: text('party_id')
+      .notNull()
+      .references(() => watchParties.id, { onDelete: 'cascade' }),
+    userDid: text('user_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    role: text('role').default('viewer').notNull(), // 'host' | 'cohost' | 'viewer'
+    isPresent: boolean('is_present').default(true).notNull(),
+    joinedAt: timestamp('joined_at').defaultNow().notNull(),
+    leftAt: timestamp('left_at'),
+  },
+  (table) => ({
+    partyIdx: index('watch_party_participants_party_idx').on(table.partyId),
+    userIdx: index('watch_party_participants_user_idx').on(table.userDid),
+    uniqueParticipant: uniqueIndex('watch_party_participants_unique_idx').on(
+      table.partyId,
+      table.userDid
+    ),
+  })
+);
+
+// Watch Party Queue - videos queued for watching
+export const watchPartyQueue = pgTable(
+  'watch_party_queue',
+  {
+    id: text('id').primaryKey(),
+    partyId: text('party_id')
+      .notNull()
+      .references(() => watchParties.id, { onDelete: 'cascade' }),
+    videoUri: text('video_uri')
+      .notNull()
+      .references(() => videos.uri, { onDelete: 'cascade' }),
+    addedBy: text('added_by')
+      .notNull()
+      .references(() => users.did),
+    position: integer('position').notNull(),
+    playedAt: timestamp('played_at'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    partyIdx: index('watch_party_queue_party_idx').on(table.partyId),
+    positionIdx: index('watch_party_queue_position_idx').on(table.partyId, table.position),
+  })
+);
+
+// Watch Party Chat Messages
+export const watchPartyMessages = pgTable(
+  'watch_party_messages',
+  {
+    id: text('id').primaryKey(),
+    partyId: text('party_id')
+      .notNull()
+      .references(() => watchParties.id, { onDelete: 'cascade' }),
+    senderDid: text('sender_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    text: text('text').notNull(),
+    messageType: text('message_type').default('text').notNull(), // 'text' | 'reaction' | 'system'
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    partyIdx: index('watch_party_messages_party_idx').on(table.partyId),
+    createdIdx: index('watch_party_messages_created_idx').on(table.createdAt),
+    partyCreatedIdx: index('watch_party_messages_party_created_idx').on(
+      table.partyId,
+      table.createdAt
+    ),
+  })
+);
+
+// Watch Party type exports
+export type WatchParty = typeof watchParties.$inferSelect;
+export type NewWatchParty = typeof watchParties.$inferInsert;
+export type WatchPartyParticipant = typeof watchPartyParticipants.$inferSelect;
+export type NewWatchPartyParticipant = typeof watchPartyParticipants.$inferInsert;
+export type WatchPartyQueueItem = typeof watchPartyQueue.$inferSelect;
+export type NewWatchPartyQueueItem = typeof watchPartyQueue.$inferInsert;
+export type WatchPartyMessage = typeof watchPartyMessages.$inferSelect;
+export type NewWatchPartyMessage = typeof watchPartyMessages.$inferInsert;
+
+// ==========================================
+// Sound Trends - Trending Audio Tracking
+// ==========================================
+
+// Trending Sounds - calculated periodically like trendingVideos
+export const trendingSounds = pgTable(
+  'trending_sounds',
+  {
+    soundId: text('sound_id')
+      .primaryKey()
+      .references(() => sounds.id, { onDelete: 'cascade' }),
+    score: real('score').notNull(),
+    velocity: real('velocity').default(0).notNull(), // rate of use increase
+    rank: integer('rank').notNull(),
+    recentUseCount: integer('recent_use_count').default(0).notNull(), // uses in last 24h
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    scoreIdx: index('trending_sounds_score_idx').on(table.score),
+    rankIdx: index('trending_sounds_rank_idx').on(table.rank),
+    velocityIdx: index('trending_sounds_velocity_idx').on(table.velocity),
+  })
+);
+
+// Sound usage tracking - for velocity calculation
+export const soundUsageHistory = pgTable(
+  'sound_usage_history',
+  {
+    id: text('id').primaryKey(),
+    soundId: text('sound_id')
+      .notNull()
+      .references(() => sounds.id, { onDelete: 'cascade' }),
+    videoUri: text('video_uri')
+      .notNull()
+      .references(() => videos.uri, { onDelete: 'cascade' }),
+    userDid: text('user_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    soundIdx: index('sound_usage_history_sound_idx').on(table.soundId),
+    createdIdx: index('sound_usage_history_created_idx').on(table.createdAt),
+    soundCreatedIdx: index('sound_usage_history_sound_created_idx').on(
+      table.soundId,
+      table.createdAt
+    ),
+  })
+);
+
+// Sound Trends type exports
+export type TrendingSound = typeof trendingSounds.$inferSelect;
+export type NewTrendingSound = typeof trendingSounds.$inferInsert;
+export type SoundUsageHistory = typeof soundUsageHistory.$inferSelect;
+export type NewSoundUsageHistory = typeof soundUsageHistory.$inferInsert;
+
+// ==========================================
+// Video Challenges - Hashtag-based Challenges
+// ==========================================
+
+// Challenge prize structure type
+export interface ChallengePrizes {
+  first?: string;
+  second?: string;
+  third?: string;
+  participation?: string;
+}
+
+// Video Challenges - admin-created hashtag challenges
+export const challenges = pgTable(
+  'challenges',
+  {
+    id: text('id').primaryKey(),
+    name: text('name').notNull(),
+    description: text('description'),
+    hashtag: text('hashtag').notNull(), // e.g., "DanceChallenge2024"
+    rules: text('rules'), // Challenge rules/guidelines
+    coverImageUrl: text('cover_image_url'),
+    bannerImageUrl: text('banner_image_url'),
+    prizes: jsonb('prizes').$type<ChallengePrizes>(),
+    status: text('status').default('upcoming').notNull(), // 'draft' | 'upcoming' | 'active' | 'voting' | 'ended'
+    visibility: text('visibility').default('public').notNull(), // 'public' | 'unlisted'
+    entryCount: integer('entry_count').default(0).notNull(),
+    participantCount: integer('participant_count').default(0).notNull(),
+    totalViews: integer('total_views').default(0).notNull(),
+    totalEngagement: integer('total_engagement').default(0).notNull(), // likes + comments + shares
+    startAt: timestamp('start_at').notNull(),
+    endAt: timestamp('end_at').notNull(),
+    votingEndAt: timestamp('voting_end_at'), // Optional voting period after challenge ends
+    createdBy: text('created_by')
+      .notNull()
+      .references(() => adminUsers.id),
+    featuredSoundId: text('featured_sound_id').references(() => sounds.id), // Optional challenge sound
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    hashtagIdx: uniqueIndex('challenges_hashtag_idx').on(table.hashtag),
+    statusIdx: index('challenges_status_idx').on(table.status),
+    startAtIdx: index('challenges_start_at_idx').on(table.startAt),
+    endAtIdx: index('challenges_end_at_idx').on(table.endAt),
+    createdIdx: index('challenges_created_idx').on(table.createdAt),
+  })
+);
+
+// Challenge Entries - videos submitted to challenges
+export const challengeEntries = pgTable(
+  'challenge_entries',
+  {
+    id: text('id').primaryKey(),
+    challengeId: text('challenge_id')
+      .notNull()
+      .references(() => challenges.id, { onDelete: 'cascade' }),
+    videoUri: text('video_uri')
+      .notNull()
+      .references(() => videos.uri, { onDelete: 'cascade' }),
+    userDid: text('user_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    // Cached engagement metrics for leaderboard
+    viewCount: integer('view_count').default(0).notNull(),
+    likeCount: integer('like_count').default(0).notNull(),
+    commentCount: integer('comment_count').default(0).notNull(),
+    shareCount: integer('share_count').default(0).notNull(),
+    engagementScore: real('engagement_score').default(0).notNull(), // Weighted score
+    rank: integer('rank'),
+    isFeatured: boolean('is_featured').default(false).notNull(), // Admin-featured
+    isWinner: boolean('is_winner').default(false).notNull(),
+    winnerPosition: integer('winner_position'), // 1, 2, 3 for winners
+    submittedAt: timestamp('submitted_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    challengeIdx: index('challenge_entries_challenge_idx').on(table.challengeId),
+    videoIdx: uniqueIndex('challenge_entries_video_idx').on(table.videoUri), // One entry per video
+    userIdx: index('challenge_entries_user_idx').on(table.userDid),
+    scoreIdx: index('challenge_entries_score_idx').on(table.challengeId, table.engagementScore),
+    rankIdx: index('challenge_entries_rank_idx').on(table.challengeId, table.rank),
+    featuredIdx: index('challenge_entries_featured_idx').on(table.challengeId, table.isFeatured),
+    winnerIdx: index('challenge_entries_winner_idx').on(table.challengeId, table.isWinner),
+  })
+);
+
+// Challenge Participation - tracks user participation for profiles
+export const challengeParticipation = pgTable(
+  'challenge_participation',
+  {
+    id: text('id').primaryKey(),
+    challengeId: text('challenge_id')
+      .notNull()
+      .references(() => challenges.id, { onDelete: 'cascade' }),
+    userDid: text('user_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    entryCount: integer('entry_count').default(1).notNull(),
+    bestRank: integer('best_rank'),
+    isWinner: boolean('is_winner').default(false).notNull(),
+    joinedAt: timestamp('joined_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    challengeIdx: index('challenge_participation_challenge_idx').on(table.challengeId),
+    userIdx: index('challenge_participation_user_idx').on(table.userDid),
+    uniqueParticipation: uniqueIndex('challenge_participation_unique_idx').on(
+      table.challengeId,
+      table.userDid
+    ),
+    winnerIdx: index('challenge_participation_winner_idx').on(table.userDid, table.isWinner),
+  })
+);
+
+// Video Challenges type exports
+export type Challenge = typeof challenges.$inferSelect;
+export type NewChallenge = typeof challenges.$inferInsert;
+export type ChallengeEntry = typeof challengeEntries.$inferSelect;
+export type NewChallengeEntry = typeof challengeEntries.$inferInsert;
+export type ChallengeParticipation = typeof challengeParticipation.$inferSelect;
+export type NewChallengeParticipation = typeof challengeParticipation.$inferInsert;
 

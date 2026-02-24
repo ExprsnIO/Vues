@@ -11,8 +11,12 @@ import {
   uploadJobs,
   users,
   sounds,
+  soundUsageHistory,
+  challenges,
+  challengeEntries,
+  challengeParticipation,
 } from '../../db/schema.js';
-import { eq, and, lte, desc, or, isNull } from 'drizzle-orm';
+import { eq, and, lte, desc, or, isNull, sql, inArray } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import { CronJob } from 'cron';
 
@@ -289,6 +293,31 @@ export class PublishingService {
         createdAt: new Date(),
       });
 
+      // Track sound usage for trending calculation
+      if (soundUri) {
+        // Increment the sound's use count
+        await db
+          .update(sounds)
+          .set({
+            useCount: sql`${sounds.useCount} + 1`,
+          })
+          .where(eq(sounds.id, soundUri));
+
+        // Record usage in history for velocity calculation
+        await db.insert(soundUsageHistory).values({
+          id: nanoid(),
+          soundId: soundUri,
+          videoUri: videoUri,
+          userDid: userDid,
+        });
+      }
+
+      // Auto-enter video into matching active challenges
+      const tags = (publishing.tags || []).map((t: string) => t.toLowerCase().replace(/^#/, ''));
+      if (tags.length > 0) {
+        await this.checkAndEnterChallenges(videoUri, userDid, tags);
+      }
+
       // Update publishing record
       await db
         .update(scheduledPublishing)
@@ -558,6 +587,96 @@ export class PublishingService {
     }
 
     return summary;
+  }
+
+  /**
+   * Check if video tags match any active challenges and auto-enter
+   */
+  private async checkAndEnterChallenges(
+    videoUri: string,
+    userDid: string,
+    tags: string[]
+  ): Promise<void> {
+    try {
+      // Find active challenges matching video tags
+      const activeChallenges = await db
+        .select()
+        .from(challenges)
+        .where(
+          and(
+            eq(challenges.status, 'active'),
+            inArray(
+              sql`LOWER(${challenges.hashtag})`,
+              tags.map((t) => t.toLowerCase())
+            )
+          )
+        );
+
+      for (const challenge of activeChallenges) {
+        // Check if video already entered
+        const existing = await db.query.challengeEntries.findFirst({
+          where: eq(challengeEntries.videoUri, videoUri),
+        });
+
+        if (!existing) {
+          // Create entry
+          await db.insert(challengeEntries).values({
+            id: nanoid(),
+            challengeId: challenge.id,
+            videoUri,
+            userDid,
+          });
+
+          // Update challenge entry count
+          await db
+            .update(challenges)
+            .set({
+              entryCount: sql`${challenges.entryCount} + 1`,
+              updatedAt: new Date(),
+            })
+            .where(eq(challenges.id, challenge.id));
+
+          // Create or update participation record
+          const existingParticipation = await db.query.challengeParticipation.findFirst({
+            where: and(
+              eq(challengeParticipation.challengeId, challenge.id),
+              eq(challengeParticipation.userDid, userDid)
+            ),
+          });
+
+          if (existingParticipation) {
+            await db
+              .update(challengeParticipation)
+              .set({
+                entryCount: sql`${challengeParticipation.entryCount} + 1`,
+              })
+              .where(eq(challengeParticipation.id, existingParticipation.id));
+          } else {
+            await db.insert(challengeParticipation).values({
+              id: nanoid(),
+              challengeId: challenge.id,
+              userDid,
+            });
+
+            // Update challenge participant count
+            await db
+              .update(challenges)
+              .set({
+                participantCount: sql`${challenges.participantCount} + 1`,
+                updatedAt: new Date(),
+              })
+              .where(eq(challenges.id, challenge.id));
+          }
+
+          console.log(
+            `[PublishingService] Video ${videoUri} auto-entered into challenge ${challenge.name}`
+          );
+        }
+      }
+    } catch (error) {
+      console.error('[PublishingService] Error checking challenges:', error);
+      // Don't throw - challenge entry failure shouldn't block publishing
+    }
   }
 }
 

@@ -2711,6 +2711,577 @@ class ApiClient {
       body: JSON.stringify({ clusterId }),
     });
   }
+
+  // =============================================================================
+  // Sound Trends API
+  // =============================================================================
+
+  async getTrendingSounds(options: {
+    limit?: number;
+    cursor?: string;
+  } = {}): Promise<TrendingSoundsResponse> {
+    const params = new URLSearchParams();
+    if (options.limit) params.set('limit', String(options.limit));
+    if (options.cursor) params.set('cursor', options.cursor);
+    return this.fetch(`/xrpc/io.exprsn.sound.getTrending?${params}`);
+  }
+
+  async getSound(soundId: string): Promise<SoundDetailResponse> {
+    const params = new URLSearchParams({ soundId });
+    return this.fetch(`/xrpc/io.exprsn.sound.getSound?${params}`);
+  }
+
+  async getVideosUsingSound(
+    soundId: string,
+    options: { limit?: number; cursor?: string; sort?: 'popular' | 'recent' } = {}
+  ): Promise<SoundVideosResponse> {
+    const params = new URLSearchParams({ soundId });
+    if (options.limit) params.set('limit', String(options.limit));
+    if (options.cursor) params.set('cursor', options.cursor);
+    if (options.sort) params.set('sort', options.sort);
+    return this.fetch(`/xrpc/io.exprsn.sound.getVideosUsing?${params}`);
+  }
+
+  async searchSounds(
+    query: string,
+    options: { limit?: number; cursor?: string } = {}
+  ): Promise<SoundSearchResponse> {
+    const params = new URLSearchParams({ q: query });
+    if (options.limit) params.set('limit', String(options.limit));
+    if (options.cursor) params.set('cursor', options.cursor);
+    return this.fetch(`/xrpc/io.exprsn.sound.search?${params}`);
+  }
+
+  async getSuggestedSounds(limit?: number): Promise<{ sounds: SuggestedSoundView[] }> {
+    const params = new URLSearchParams();
+    if (limit) params.set('limit', String(limit));
+    return this.fetch(`/xrpc/io.exprsn.sound.getSuggested?${params}`);
+  }
+
+  // Challenge methods
+  async getChallenge(params: { id?: string; hashtag?: string }): Promise<ChallengeDetailResponse> {
+    const urlParams = new URLSearchParams();
+    if (params.id) urlParams.set('id', params.id);
+    if (params.hashtag) urlParams.set('hashtag', params.hashtag);
+    return this.fetch(`/xrpc/io.exprsn.challenge.getChallenge?${urlParams}`);
+  }
+
+  async getActiveChallenges(options?: { limit?: number; cursor?: string }): Promise<ChallengesResponse> {
+    const params = new URLSearchParams();
+    if (options?.limit) params.set('limit', String(options.limit));
+    if (options?.cursor) params.set('cursor', options.cursor);
+    return this.fetch(`/xrpc/io.exprsn.challenge.getActive?${params}`);
+  }
+
+  async getUpcomingChallenges(options?: { limit?: number; cursor?: string }): Promise<ChallengesResponse> {
+    const params = new URLSearchParams();
+    if (options?.limit) params.set('limit', String(options.limit));
+    if (options?.cursor) params.set('cursor', options.cursor);
+    return this.fetch(`/xrpc/io.exprsn.challenge.getUpcoming?${params}`);
+  }
+
+  async getEndedChallenges(options?: { limit?: number; cursor?: string }): Promise<ChallengesResponse> {
+    const params = new URLSearchParams();
+    if (options?.limit) params.set('limit', String(options.limit));
+    if (options?.cursor) params.set('cursor', options.cursor);
+    return this.fetch(`/xrpc/io.exprsn.challenge.getEnded?${params}`);
+  }
+
+  async getChallengeLeaderboard(
+    challengeId: string,
+    options?: { limit?: number; cursor?: string }
+  ): Promise<ChallengeLeaderboardResponse> {
+    const params = new URLSearchParams({ challengeId });
+    if (options?.limit) params.set('limit', String(options.limit));
+    if (options?.cursor) params.set('cursor', options.cursor);
+    return this.fetch(`/xrpc/io.exprsn.challenge.getLeaderboard?${params}`);
+  }
+
+  async getChallengeEntries(
+    challengeId: string,
+    options?: { sort?: 'recent' | 'top'; limit?: number; cursor?: string }
+  ): Promise<ChallengeEntriesResponse> {
+    const params = new URLSearchParams({ challengeId });
+    if (options?.sort) params.set('sort', options.sort);
+    if (options?.limit) params.set('limit', String(options.limit));
+    if (options?.cursor) params.set('cursor', options.cursor);
+    return this.fetch(`/xrpc/io.exprsn.challenge.getEntries?${params}`);
+  }
+
+  async getChallengeFeatured(challengeId: string): Promise<ChallengeFeaturedResponse> {
+    return this.fetch(`/xrpc/io.exprsn.challenge.getFeatured?challengeId=${challengeId}`);
+  }
+
+  async getUserChallengeParticipation(
+    userDid: string,
+    options?: { limit?: number; cursor?: string }
+  ): Promise<UserChallengeParticipationResponse> {
+    const params = new URLSearchParams({ userDid });
+    if (options?.limit) params.set('limit', String(options.limit));
+    if (options?.cursor) params.set('cursor', options.cursor);
+    return this.fetch(`/xrpc/io.exprsn.challenge.getUserParticipation?${params}`);
+  }
+
+  async searchChallenges(
+    query: string,
+    options?: { status?: string; limit?: number; cursor?: string }
+  ): Promise<ChallengesResponse> {
+    const params = new URLSearchParams({ q: query });
+    if (options?.status) params.set('status', options.status);
+    if (options?.limit) params.set('limit', String(options.limit));
+    if (options?.cursor) params.set('cursor', options.cursor);
+    return this.fetch(`/xrpc/io.exprsn.challenge.search?${params}`);
+  }
+
+  // Admin challenge methods
+  async adminCreateChallenge(data: AdminCreateChallengeInput): Promise<{ challenge: ChallengeView }> {
+    return this.fetch('/xrpc/io.exprsn.admin.challenge.create', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async adminUpdateChallenge(data: AdminUpdateChallengeInput): Promise<{ challenge: ChallengeView }> {
+    return this.fetch('/xrpc/io.exprsn.admin.challenge.update', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async adminDeleteChallenge(id: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.challenge.delete', {
+      method: 'POST',
+      body: JSON.stringify({ id }),
+    });
+  }
+
+  async adminSetChallengeFeatured(
+    challengeId: string,
+    entryIds: string[],
+    featured: boolean
+  ): Promise<{ updated: number }> {
+    return this.fetch('/xrpc/io.exprsn.admin.challenge.setFeatured', {
+      method: 'POST',
+      body: JSON.stringify({ challengeId, entryIds, featured }),
+    });
+  }
+
+  async adminSetChallengeWinners(
+    challengeId: string,
+    entryIds: string[]
+  ): Promise<{ updated: number }> {
+    return this.fetch('/xrpc/io.exprsn.admin.challenge.setWinners', {
+      method: 'POST',
+      body: JSON.stringify({ challengeId, entryIds }),
+    });
+  }
+
+  async adminGetChallengeStats(challengeId: string): Promise<ChallengeStatsResponse> {
+    return this.fetch(`/xrpc/io.exprsn.admin.challenge.getStats?challengeId=${challengeId}`);
+  }
+
+  async adminListChallenges(options?: {
+    status?: string;
+    limit?: number;
+    cursor?: string;
+  }): Promise<AdminChallengesResponse> {
+    const params = new URLSearchParams();
+    if (options?.status) params.set('status', options.status);
+    if (options?.limit) params.set('limit', String(options.limit));
+    if (options?.cursor) params.set('cursor', options.cursor);
+    return this.fetch(`/xrpc/io.exprsn.admin.challenge.list?${params}`);
+  }
+
+  // Watch Party methods
+  async createWatchParty(options: CreateWatchPartyInput): Promise<{ party: WatchPartyView }> {
+    return this.fetch('/xrpc/io.exprsn.party.create', {
+      method: 'POST',
+      body: JSON.stringify(options),
+    });
+  }
+
+  async getWatchParty(params: { id?: string; inviteCode?: string }): Promise<WatchPartyStateResponse> {
+    const urlParams = new URLSearchParams();
+    if (params.id) urlParams.set('id', params.id);
+    if (params.inviteCode) urlParams.set('inviteCode', params.inviteCode);
+    return this.fetch(`/xrpc/io.exprsn.party.get?${urlParams}`);
+  }
+
+  async joinWatchParty(inviteCode: string): Promise<WatchPartyStateResponse & { joined: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.party.join', {
+      method: 'POST',
+      body: JSON.stringify({ inviteCode }),
+    });
+  }
+
+  async leaveWatchParty(partyId: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.party.leave', {
+      method: 'POST',
+      body: JSON.stringify({ partyId }),
+    });
+  }
+
+  async endWatchParty(partyId: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.party.end', {
+      method: 'POST',
+      body: JSON.stringify({ partyId }),
+    });
+  }
+
+  async addToWatchPartyQueue(partyId: string, videoUri: string): Promise<{ queueItem: WatchPartyQueueItem }> {
+    return this.fetch('/xrpc/io.exprsn.party.addToQueue', {
+      method: 'POST',
+      body: JSON.stringify({ partyId, videoUri }),
+    });
+  }
+
+  async removeFromWatchPartyQueue(partyId: string, queueItemId: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.party.removeFromQueue', {
+      method: 'POST',
+      body: JSON.stringify({ partyId, queueItemId }),
+    });
+  }
+
+  async getWatchPartyQueue(partyId: string): Promise<{ queue: WatchPartyQueueItem[] }> {
+    return this.fetch(`/xrpc/io.exprsn.party.getQueue?partyId=${partyId}`);
+  }
+
+  async getWatchPartyMessages(partyId: string, limit?: number): Promise<{ messages: WatchPartyMessage[] }> {
+    const params = new URLSearchParams({ partyId });
+    if (limit) params.set('limit', String(limit));
+    return this.fetch(`/xrpc/io.exprsn.party.getMessages?${params}`);
+  }
+
+  async getWatchPartyParticipants(partyId: string): Promise<{ participants: WatchPartyParticipant[] }> {
+    return this.fetch(`/xrpc/io.exprsn.party.getParticipants?partyId=${partyId}`);
+  }
+
+  async promoteToWatchPartyCohost(partyId: string, targetUserDid: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.party.promoteToCohost', {
+      method: 'POST',
+      body: JSON.stringify({ partyId, targetUserDid }),
+    });
+  }
+
+  async getUserWatchParties(): Promise<{ parties: WatchPartyView[] }> {
+    return this.fetch('/xrpc/io.exprsn.party.getUserParties');
+  }
+}
+
+// Sound types
+export interface TrendingSoundView {
+  id: string;
+  title: string;
+  artist?: string;
+  duration?: number;
+  audioUrl?: string;
+  coverUrl?: string;
+  useCount: number;
+  recentUseCount: number;
+  velocity: number;
+  rank: number;
+  score: number;
+  trendingDirection: 'up' | 'stable' | 'down';
+  sampleVideos: Array<{ uri: string; thumbnailUrl?: string }>;
+}
+
+export interface TrendingSoundsResponse {
+  sounds: TrendingSoundView[];
+  cursor?: string;
+}
+
+export interface SoundView {
+  id: string;
+  title: string;
+  artist?: string;
+  duration?: number;
+  audioUrl?: string;
+  coverUrl?: string;
+  useCount: number;
+  recentUseCount: number;
+  createdAt: string;
+  trending?: {
+    rank: number;
+    velocity: number;
+    score: number;
+  } | null;
+}
+
+export interface SoundDetailResponse {
+  sound: SoundView;
+  originalVideo?: {
+    uri: string;
+    thumbnailUrl?: string;
+    author?: {
+      did: string;
+      handle: string;
+      displayName?: string;
+      avatar?: string;
+    } | null;
+  } | null;
+  sampleVideos: Array<{
+    uri: string;
+    thumbnailUrl?: string;
+    viewCount: number;
+    likeCount: number;
+  }>;
+}
+
+export interface SoundVideosResponse {
+  sound: {
+    id: string;
+    title: string;
+    artist?: string;
+    useCount: number;
+  };
+  videos: Array<VideoView & { author: ProfileView | null }>;
+  cursor?: string;
+}
+
+export interface SoundSearchResponse {
+  sounds: Array<{
+    id: string;
+    title: string;
+    artist?: string;
+    duration?: number;
+    audioUrl?: string;
+    coverUrl?: string;
+    useCount: number;
+    createdAt: string;
+  }>;
+  cursor?: string;
+}
+
+export interface SuggestedSoundView {
+  id: string;
+  title: string;
+  artist?: string;
+  duration?: number;
+  audioUrl?: string;
+  coverUrl?: string;
+  useCount: number;
+  sampleVideo?: { uri: string; thumbnailUrl?: string } | null;
+}
+
+// Challenge types
+export interface ChallengeView {
+  id: string;
+  name: string;
+  description?: string;
+  hashtag: string;
+  rules?: string;
+  prizes?: string;
+  coverImage?: string;
+  status: 'draft' | 'upcoming' | 'active' | 'voting' | 'ended';
+  entryCount: number;
+  participantCount: number;
+  totalViews: number;
+  totalEngagement: number;
+  startAt: string;
+  endAt: string;
+  votingEndAt?: string;
+  createdBy: string;
+  createdAt: string;
+}
+
+export interface ChallengeEntryView {
+  id: string;
+  challengeId: string;
+  videoUri: string;
+  userDid: string;
+  rank?: number;
+  engagementScore: number;
+  viewCount: number;
+  likeCount: number;
+  commentCount: number;
+  shareCount: number;
+  isFeatured: boolean;
+  isWinner: boolean;
+  createdAt: string;
+  video?: VideoView;
+  author?: {
+    did: string;
+    handle: string;
+    displayName?: string;
+    avatar?: string;
+    verified?: boolean;
+  };
+}
+
+export interface ChallengesResponse {
+  challenges: ChallengeView[];
+  cursor?: string;
+}
+
+export interface ChallengeDetailResponse {
+  challenge: ChallengeView;
+  topEntries: ChallengeEntryView[];
+  featuredEntries: ChallengeEntryView[];
+  userParticipation?: {
+    entryCount: number;
+    bestRank?: number;
+  } | null;
+}
+
+export interface ChallengeLeaderboardResponse {
+  challenge: { id: string; name: string; hashtag: string };
+  entries: ChallengeEntryView[];
+  cursor?: string;
+}
+
+export interface ChallengeEntriesResponse {
+  challenge: { id: string; name: string; hashtag: string };
+  entries: ChallengeEntryView[];
+  cursor?: string;
+}
+
+export interface ChallengeFeaturedResponse {
+  challenge: { id: string; name: string; hashtag: string };
+  featured: ChallengeEntryView[];
+  winners: ChallengeEntryView[];
+}
+
+export interface UserChallengeParticipationResponse {
+  participation: Array<{
+    challenge: ChallengeView;
+    entryCount: number;
+    bestRank?: number;
+    entries: ChallengeEntryView[];
+  }>;
+  cursor?: string;
+}
+
+export interface AdminCreateChallengeInput {
+  name: string;
+  description?: string;
+  hashtag: string;
+  rules?: string;
+  prizes?: string;
+  coverImage?: string;
+  startAt: string;
+  endAt: string;
+  votingEndAt?: string;
+}
+
+export interface AdminUpdateChallengeInput {
+  id: string;
+  name?: string;
+  description?: string;
+  rules?: string;
+  prizes?: string;
+  coverImage?: string;
+  status?: string;
+  startAt?: string;
+  endAt?: string;
+  votingEndAt?: string;
+}
+
+export interface ChallengeStatsResponse {
+  challenge: ChallengeView;
+  stats: {
+    totalEntries: number;
+    totalParticipants: number;
+    entriesLast24h: number;
+    participantsLast24h: number;
+    avgEngagementScore: number;
+    topEngagementScore: number;
+  };
+  topParticipants: Array<{
+    userDid: string;
+    handle?: string;
+    displayName?: string;
+    avatar?: string;
+    entryCount: number;
+    bestRank?: number;
+    totalEngagement: number;
+  }>;
+}
+
+export interface AdminChallengesResponse {
+  challenges: ChallengeView[];
+  cursor?: string;
+}
+
+// Watch Party types
+export interface WatchPartyView {
+  id: string;
+  hostDid: string;
+  name: string;
+  inviteCode: string;
+  status: 'active' | 'ended';
+  maxParticipants: number;
+  currentVideoUri: string | null;
+  currentPosition: number;
+  isPlaying: boolean;
+  chatEnabled: boolean;
+  createdAt: string;
+}
+
+export interface WatchPartyParticipant {
+  id: string;
+  partyId: string;
+  userDid: string;
+  role: 'host' | 'cohost' | 'viewer';
+  isPresent: boolean;
+  joinedAt: string;
+  user?: {
+    handle: string;
+    displayName?: string;
+    avatar?: string;
+  };
+}
+
+export interface WatchPartyQueueItem {
+  id: string;
+  partyId: string;
+  videoUri: string;
+  addedBy: string;
+  position: number;
+  addedAt: string;
+  video?: {
+    thumbnail?: string;
+    duration?: number;
+    caption?: string;
+    author?: {
+      handle: string;
+      displayName?: string;
+    };
+  };
+}
+
+export interface WatchPartyMessage {
+  id: string;
+  partyId: string;
+  senderDid: string;
+  text: string;
+  messageType: 'text' | 'emoji' | 'system' | 'reaction';
+  createdAt: string;
+  sender?: {
+    handle: string;
+    displayName?: string;
+    avatar?: string;
+  };
+}
+
+export interface WatchPartyStateResponse {
+  party: WatchPartyView;
+  participants: WatchPartyParticipant[];
+  queue: WatchPartyQueueItem[];
+  recentMessages: WatchPartyMessage[];
+}
+
+export interface CreateWatchPartyInput {
+  name: string;
+  maxParticipants?: number;
+  chatEnabled?: boolean;
+  initialVideoUri?: string;
+}
+
+export interface WatchPartyPlaybackState {
+  videoUri: string | null;
+  position: number;
+  isPlaying: boolean;
+  updatedAt: number;
 }
 
 // Social links type

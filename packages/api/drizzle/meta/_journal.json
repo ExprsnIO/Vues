@@ -120,6 +120,20 @@
       "when": 1771858371669,
       "tag": "0016_harsh_nekra",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1771880070753,
+      "tag": "0017_aromatic_talisman",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1771932995005,
+      "tag": "0018_opposite_bulldozer",
+      "breakpoints": true
     }
   ]
 }

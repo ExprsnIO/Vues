@@ -1,5 +1,7 @@
 import { JetstreamConsumer } from './subscription/jetstream.js';
 import { TrendingCalculator } from './algorithms/trending.js';
+import { TrendingSoundsCalculator } from './algorithms/trendingSounds.js';
+import { ChallengeLeaderboardCalculator } from './algorithms/challengeLeaderboard.js';
 import { COLLECTIONS } from '@exprsn/shared';
 
 async function main() {
@@ -21,11 +23,23 @@ async function main() {
   trendingCalculator.start();
   console.log('Trending calculator started');
 
+  // Start trending sounds calculator cron job
+  const trendingSoundsCalculator = new TrendingSoundsCalculator();
+  trendingSoundsCalculator.start();
+  console.log('Trending sounds calculator started');
+
+  // Start challenge leaderboard calculator cron job
+  const challengeLeaderboardCalculator = new ChallengeLeaderboardCalculator();
+  challengeLeaderboardCalculator.start();
+  console.log('Challenge leaderboard calculator started');
+
   // Handle shutdown
   process.on('SIGTERM', async () => {
     console.log('Shutting down...');
     consumer.stop();
     trendingCalculator.stop();
+    trendingSoundsCalculator.stop();
+    challengeLeaderboardCalculator.stop();
     process.exit(0);
   });
 
@@ -33,6 +47,8 @@ async function main() {
     console.log('Shutting down...');
     consumer.stop();
     trendingCalculator.stop();
+    trendingSoundsCalculator.stop();
+    challengeLeaderboardCalculator.stop();
     process.exit(0);
   });
 }

@@ -34,6 +34,7 @@ import { initializeChatWebSocket } from './websocket/chat.js';
 import { initializeEditorCollab } from './websocket/editorCollab.js';
 import { initializeRenderProgressWebSocket } from './websocket/renderProgress.js';
 import { initializeAdminWebSocket } from './websocket/admin.js';
+import { initializeWatchPartyWebSocket } from './websocket/watchParty.js';
 import { createWellKnownRouterFromEnv } from './routes/well-known.js';
 import { identityRouter } from './routes/identity.js';
 import { registryRouter, initializeServiceRegistry } from './routes/registry.js';
@@ -50,6 +51,9 @@ import { presetsRouter } from './routes/presets.js';
 import { clusterAdminRouter } from './routes/cluster-admin.js';
 import { analyticsRoutes } from './routes/analytics.js';
 import { studioRouter } from './routes/studio.js';
+import soundsRouter from './routes/sounds.js';
+import challengesRouter from './routes/challenges.js';
+import { watchPartyRouter } from './routes/watchParty.js';
 import { initializeIdentityService } from './services/identity/index.js';
 import { cronService } from './services/cron/index.js';
 import { oauthAgent } from './services/oauth/OAuthAgent.js';
@@ -194,6 +198,9 @@ app.route('/xrpc', liveRoutes);
 app.route('/xrpc', paymentRoutes);
 app.route('/xrpc', caRoutes);
 app.route('/xrpc', audioRouter);
+app.route('/xrpc', soundsRouter);
+app.route('/xrpc', challengesRouter);
+app.route('/xrpc', watchPartyRouter);
 app.route('/xrpc', studioRouter);
 app.route('/xrpc', configRoutes);
 // Identity, registry, federation, sync, and PLC routes
@@ -400,6 +407,7 @@ async function main() {
   initializeEditorCollab(io);
   initializeRenderProgressWebSocket(io);
   initializeAdminWebSocket(io);
+  initializeWatchPartyWebSocket(io);
 
   // Initialize relay firehose WebSocket if enabled
   if (relayEnabled && relayService) {
@@ -412,7 +420,7 @@ async function main() {
   }
 
   console.log(`Server running at http://${host}:${port}`);
-  console.log('WebSocket namespaces: /chat, /editor-collab, /render-progress, /admin' + (relayEnabled ? ', /xrpc/com.atproto.sync.subscribeRepos' : ''));
+  console.log('WebSocket namespaces: /chat, /editor-collab, /render-progress, /admin, /watch-party' + (relayEnabled ? ', /xrpc/com.atproto.sync.subscribeRepos' : ''));
   console.log('Well-known endpoints: /.well-known/atproto-did, /.well-known/did.json, /.well-known/exprsn-services');
 }
 
