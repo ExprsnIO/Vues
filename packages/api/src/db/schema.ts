@@ -81,6 +81,8 @@ export const videos = pgTable(
     wowCount: integer('wow_count').default(0).notNull(),
     sadCount: integer('sad_count').default(0).notNull(),
     angryCount: integer('angry_count').default(0).notNull(),
+    // Organization publishing - when video is published on behalf of an org
+    publishedAsOrgId: text('published_as_org_id'),
     indexedAt: timestamp('indexed_at').defaultNow().notNull(),
     createdAt: timestamp('created_at').notNull(),
   },
@@ -89,6 +91,7 @@ export const videos = pgTable(
     createdIdx: index('videos_created_idx').on(table.createdAt),
     soundIdx: index('videos_sound_idx').on(table.soundUri),
     visibilityIdx: index('videos_visibility_idx').on(table.visibility),
+    publishedAsOrgIdx: index('videos_published_as_org_idx').on(table.publishedAsOrgId),
   })
 );
 
@@ -1276,12 +1279,30 @@ export const organizations = pgTable(
       .notNull()
       .references(() => users.did, { onDelete: 'cascade' }),
     name: text('name').notNull(),
-    type: text('type').notNull(), // 'team' | 'enterprise' | 'nonprofit' | 'business'
+    handle: text('handle').unique(), // URL-safe handle for profile pages
+    displayName: text('display_name'), // Public display name
+    type: text('type').notNull(), // 'team' | 'company' | 'brand' | 'network' | 'channel' | 'enterprise' | 'nonprofit' | 'business'
     description: text('description'),
+    bio: text('bio'), // Short bio for profile
     website: text('website'),
     avatar: text('avatar'),
+    bannerImage: text('banner_image'), // Profile banner
+    location: text('location'),
+    category: text('category'), // 'Music' | 'Gaming' | 'Education' | etc.
+    socialLinks: jsonb('social_links').$type<{
+      twitter?: string;
+      instagram?: string;
+      youtube?: string;
+      tiktok?: string;
+      discord?: string;
+    }>(),
+    isPublic: boolean('is_public').default(true).notNull(), // Whether profile is publicly visible
     verified: boolean('verified').default(false).notNull(),
     memberCount: integer('member_count').default(1).notNull(),
+    followerCount: integer('follower_count').default(0).notNull(),
+    videoCount: integer('video_count').default(0).notNull(),
+    // Content moderation settings
+    requireContentApproval: boolean('require_content_approval').default(false).notNull(),
     // Rate limit settings (null = use system defaults)
     rateLimitPerMinute: integer('rate_limit_per_minute'),
     burstLimit: integer('burst_limit'),
@@ -1290,6 +1311,14 @@ export const organizations = pgTable(
     apiAccessEnabled: boolean('api_access_enabled').default(true).notNull(),
     allowedScopes: jsonb('allowed_scopes').$type<string[]>(),
     webhooksEnabled: boolean('webhooks_enabled').default(false).notNull(),
+    // Custom fields for type-specific data
+    customFields: jsonb('custom_fields').$type<Record<string, unknown>>(),
+    // Verification workflow
+    verificationStatus: text('verification_status').default('none').notNull(), // 'none' | 'pending' | 'verified' | 'rejected'
+    verificationSubmittedAt: timestamp('verification_submitted_at'),
+    verificationCompletedAt: timestamp('verification_completed_at'),
+    verificationNotes: text('verification_notes'),
+    verificationDocuments: jsonb('verification_documents').$type<Record<string, { url: string; type: string; uploadedAt: string }>>(),
     createdAt: timestamp('created_at').defaultNow().notNull(),
     updatedAt: timestamp('updated_at').defaultNow().notNull(),
   },
@@ -1297,6 +1326,33 @@ export const organizations = pgTable(
     ownerIdx: index('organizations_owner_idx').on(table.ownerDid),
     typeIdx: index('organizations_type_idx').on(table.type),
     nameIdx: index('organizations_name_idx').on(table.name),
+    handleIdx: uniqueIndex('organizations_handle_idx').on(table.handle),
+    publicIdx: index('organizations_public_idx').on(table.isPublic),
+    verificationStatusIdx: index('organizations_verification_status_idx').on(table.verificationStatus),
+  })
+);
+
+// Organization roles - role definitions per organization
+export const organizationRoles = pgTable(
+  'organization_roles',
+  {
+    id: text('id').primaryKey(),
+    organizationId: text('organization_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(), // 'owner' | 'admin' | 'editor' | 'viewer' | 'member' | custom
+    displayName: text('display_name').notNull(),
+    isSystem: boolean('is_system').default(false).notNull(), // true for built-in roles
+    permissions: jsonb('permissions').$type<string[]>().default([]),
+    priority: integer('priority').default(0).notNull(), // Higher = more important for display
+    color: text('color'), // Badge color (hex)
+    description: text('description'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    orgIdx: index('org_roles_org_idx').on(table.organizationId),
+    uniqueRole: uniqueIndex('org_roles_unique_idx').on(table.organizationId, table.name),
   })
 );
 
@@ -1311,7 +1367,10 @@ export const organizationMembers = pgTable(
     userDid: text('user_did')
       .notNull()
       .references(() => users.did, { onDelete: 'cascade' }),
-    role: text('role').notNull(), // 'owner' | 'admin' | 'member'
+    role: text('role').notNull(), // Legacy: 'owner' | 'admin' | 'member'
+    roleId: text('role_id').references(() => organizationRoles.id, { onDelete: 'set null' }), // New role system
+    title: text('title'), // Custom title like "Lead Editor", "Community Manager"
+    canPublishOnBehalf: boolean('can_publish_on_behalf').default(false).notNull(), // Can post as organization
     permissions: jsonb('permissions').$type<string[]>().default([]), // ['bulk_import', 'manage_members', 'edit_settings']
     invitedBy: text('invited_by'),
     displayOrder: integer('display_order').default(0).notNull(),
@@ -1325,6 +1384,7 @@ export const organizationMembers = pgTable(
     orgIdx: index('org_members_org_idx').on(table.organizationId),
     userIdx: index('org_members_user_idx').on(table.userDid),
     roleIdx: index('org_members_role_idx').on(table.role),
+    roleIdIdx: index('org_members_role_id_idx').on(table.roleId),
     statusIdx: index('org_members_status_idx').on(table.status),
     displayOrderIdx: index('org_members_display_order_idx').on(table.organizationId, table.displayOrder),
     uniqueMember: uniqueIndex('org_members_unique_idx').on(table.organizationId, table.userDid),
@@ -1450,6 +1510,129 @@ export const bulkImportJobs = pgTable(
     createdByIdx: index('bulk_import_jobs_created_by_idx').on(table.createdBy),
     statusIdx: index('bulk_import_jobs_status_idx').on(table.status),
     createdIdx: index('bulk_import_jobs_created_idx').on(table.createdAt),
+  })
+);
+
+// Organization follows - for public organization profiles
+export const organizationFollows = pgTable(
+  'organization_follows',
+  {
+    id: text('id').primaryKey(),
+    organizationId: text('organization_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    followerDid: text('follower_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    orgIdx: index('org_follows_org_idx').on(table.organizationId),
+    followerIdx: index('org_follows_follower_idx').on(table.followerDid),
+    uniqueFollow: uniqueIndex('org_follows_unique_idx').on(table.organizationId, table.followerDid),
+  })
+);
+
+// Organization invites - pending membership invitations
+export const organizationInvites = pgTable(
+  'organization_invites',
+  {
+    id: text('id').primaryKey(),
+    organizationId: text('organization_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    email: text('email'), // Invite by email (either email or invitedDid required)
+    invitedDid: text('invited_did').references(() => users.did, { onDelete: 'cascade' }), // Invite by DID
+    roleId: text('role_id').references(() => organizationRoles.id, { onDelete: 'set null' }),
+    roleName: text('role_name'), // Fallback if role deleted
+    invitedBy: text('invited_by')
+      .notNull()
+      .references(() => users.did),
+    token: text('token').notNull(), // Unique invite token
+    message: text('message'), // Optional invite message
+    status: text('status').default('pending').notNull(), // 'pending' | 'accepted' | 'expired' | 'revoked'
+    expiresAt: timestamp('expires_at').notNull(),
+    acceptedAt: timestamp('accepted_at'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    orgIdx: index('org_invites_org_idx').on(table.organizationId),
+    emailIdx: index('org_invites_email_idx').on(table.email),
+    invitedDidIdx: index('org_invites_invited_did_idx').on(table.invitedDid),
+    tokenIdx: uniqueIndex('org_invites_token_idx').on(table.token),
+    statusIdx: index('org_invites_status_idx').on(table.status),
+  })
+);
+
+// Organization billing - subscription and payment info
+export const organizationBilling = pgTable(
+  'organization_billing',
+  {
+    id: text('id').primaryKey(),
+    organizationId: text('organization_id')
+      .unique()
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    subscriptionTier: text('subscription_tier').default('free').notNull(), // 'free' | 'starter' | 'pro' | 'enterprise'
+    stripeCustomerId: text('stripe_customer_id'),
+    stripeSubscriptionId: text('stripe_subscription_id'),
+    billingEmail: text('billing_email'),
+    billingName: text('billing_name'),
+    billingAddress: jsonb('billing_address').$type<{
+      line1?: string;
+      line2?: string;
+      city?: string;
+      state?: string;
+      postalCode?: string;
+      country?: string;
+    }>(),
+    paymentMethodLast4: text('payment_method_last4'),
+    paymentMethodBrand: text('payment_method_brand'), // 'visa' | 'mastercard' | etc
+    currentPeriodStart: timestamp('current_period_start'),
+    currentPeriodEnd: timestamp('current_period_end'),
+    status: text('status').default('active').notNull(), // 'active' | 'past_due' | 'canceled' | 'trialing'
+    cancelAtPeriodEnd: boolean('cancel_at_period_end').default(false).notNull(),
+    trialEndsAt: timestamp('trial_ends_at'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    stripeCustomerIdx: index('org_billing_stripe_customer_idx').on(table.stripeCustomerId),
+    tierIdx: index('org_billing_tier_idx').on(table.subscriptionTier),
+    statusIdx: index('org_billing_status_idx').on(table.status),
+  })
+);
+
+// Organization content queue - content moderation before publishing
+export const organizationContentQueue = pgTable(
+  'organization_content_queue',
+  {
+    id: text('id').primaryKey(),
+    organizationId: text('organization_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    videoUri: text('video_uri')
+      .notNull()
+      .references(() => videos.uri, { onDelete: 'cascade' }),
+    submittedBy: text('submitted_by')
+      .notNull()
+      .references(() => users.did),
+    submittedCaption: text('submitted_caption'), // Original caption from submission
+    status: text('status').default('pending').notNull(), // 'pending' | 'approved' | 'rejected' | 'revision_requested'
+    reviewedBy: text('reviewed_by').references(() => users.did),
+    reviewedAt: timestamp('reviewed_at'),
+    reviewNotes: text('review_notes'), // Notes from reviewer
+    revisionNotes: text('revision_notes'), // Notes for submitter if revision requested
+    priority: integer('priority').default(0).notNull(), // Higher = review first
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    orgIdx: index('org_content_queue_org_idx').on(table.organizationId),
+    statusIdx: index('org_content_queue_status_idx').on(table.status),
+    submittedByIdx: index('org_content_queue_submitted_by_idx').on(table.submittedBy),
+    priorityIdx: index('org_content_queue_priority_idx').on(table.priority),
+    createdIdx: index('org_content_queue_created_idx').on(table.createdAt),
   })
 );
 
@@ -3736,4 +3919,125 @@ export type ChallengeEntry = typeof challengeEntries.$inferSelect;
 export type NewChallengeEntry = typeof challengeEntries.$inferInsert;
 export type ChallengeParticipation = typeof challengeParticipation.$inferSelect;
 export type NewChallengeParticipation = typeof challengeParticipation.$inferInsert;
+
+// ============================================
+// Organization Type Configuration System
+// ============================================
+
+// Handle validation rules type
+export interface HandleValidationRules {
+  minLength: number;
+  maxLength: number;
+  allowedChars: string;
+  reservedPrefixes?: string[];
+}
+
+// Content policies type
+export interface OrgContentPolicies {
+  requireApproval: boolean;
+  approvalWorkflow?: string;
+  autoModerationLevel?: 'none' | 'low' | 'medium' | 'high';
+  allowedContentTypes?: string[];
+  maxVideoDuration?: number;
+}
+
+// Custom field schema type
+export interface OrgCustomFieldSchema {
+  key: string;
+  label: string;
+  type: 'text' | 'number' | 'boolean' | 'select' | 'multiselect' | 'date';
+  required: boolean;
+  options?: string[];
+  validation?: { min?: number; max?: number; pattern?: string };
+}
+
+// Default role configuration type
+export interface OrgDefaultRole {
+  name: string;
+  displayName: string;
+  description?: string;
+  permissions: string[];
+  isDefault?: boolean;
+  color: string;
+  priority: number;
+}
+
+// Subscription overrides type
+export interface OrgSubscriptionOverrides {
+  free?: { memberLimit: number; features: string[] };
+  starter?: { memberLimit: number; features: string[] };
+  pro?: { memberLimit: number; features: string[] };
+  enterprise?: { memberLimit: number; features: string[] };
+}
+
+// Organization type configurations - type-specific settings
+export const organizationTypeConfigs = pgTable(
+  'organization_type_configs',
+  {
+    id: text('id').primaryKey(), // Same as OrganizationType value
+    displayName: text('display_name').notNull(),
+    description: text('description'),
+    icon: text('icon'), // Icon identifier for UI
+
+    // PLC Settings
+    handleSuffix: text('handle_suffix').notNull(), // e.g., 'label.exprsn', 'brand.exprsn'
+    verificationRequired: boolean('verification_required').default(false).notNull(),
+    verificationWorkflow: text('verification_workflow'), // 'standard' | 'enterprise' | 'creative'
+    customDidServices: jsonb('custom_did_services').$type<Record<string, { type: string; endpoint: string }>>(),
+    handleValidationRules: jsonb('handle_validation_rules').$type<HandleValidationRules>(),
+
+    // Default Roles
+    defaultRoles: jsonb('default_roles').$type<OrgDefaultRole[]>(),
+
+    // Feature Flags
+    enabledFeatures: jsonb('enabled_features').$type<string[]>().default([]),
+    disabledFeatures: jsonb('disabled_features').$type<string[]>().default([]),
+
+    // Subscription Limits
+    subscriptionOverrides: jsonb('subscription_overrides').$type<OrgSubscriptionOverrides>(),
+
+    // Content Policies
+    contentPolicies: jsonb('content_policies').$type<OrgContentPolicies>(),
+
+    // Custom Fields Schema
+    customFieldsSchema: jsonb('custom_fields_schema').$type<OrgCustomFieldSchema[]>(),
+
+    isActive: boolean('is_active').default(true).notNull(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    activeIdx: index('org_type_configs_active_idx').on(table.isActive),
+  })
+);
+
+// Organization custom data - flexible storage for type-specific entities
+export const organizationCustomData = pgTable(
+  'organization_custom_data',
+  {
+    id: text('id').primaryKey(),
+    organizationId: text('organization_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    dataType: text('data_type').notNull(), // 'artist', 'catalog', 'campaign', 'department', etc.
+    data: jsonb('data').notNull(),
+    parentId: text('parent_id'), // For hierarchical data (departments under enterprise)
+    status: text('status').default('active').notNull(), // 'active' | 'archived' | 'deleted'
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    orgIdx: index('org_custom_data_org_idx').on(table.organizationId),
+    typeIdx: index('org_custom_data_type_idx').on(table.dataType),
+    parentIdx: index('org_custom_data_parent_idx').on(table.parentId),
+    statusIdx: index('org_custom_data_status_idx').on(table.status),
+    orgTypeIdx: index('org_custom_data_org_type_idx').on(table.organizationId, table.dataType),
+  })
+);
+
+// Organization type config type exports
+export type OrganizationTypeConfig = typeof organizationTypeConfigs.$inferSelect;
+export type NewOrganizationTypeConfig = typeof organizationTypeConfigs.$inferInsert;
+export type OrganizationCustomData = typeof organizationCustomData.$inferSelect;
+export type NewOrganizationCustomData = typeof organizationCustomData.$inferInsert;
 

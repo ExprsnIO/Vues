@@ -5,14 +5,27 @@ import { db } from '../db/index.js';
 import {
   organizations,
   organizationMembers,
+  organizationRoles,
+  organizationFollows,
+  organizationInvites,
+  organizationBilling,
+  organizationContentQueue,
   bulkImportJobs,
   users,
+  videos,
   organizationTags,
   organizationMemberTags,
   organizationBlockedWords,
   organizationActivity,
   actorRepos,
 } from '../db/schema.js';
+import {
+  ORG_PERMISSIONS,
+  SYSTEM_ROLES,
+  SYSTEM_ROLE_PERMISSIONS,
+  type SystemRoleName,
+  type OrgPermission,
+} from '@exprsn/shared';
 import { eq, and, desc, asc, sql, gte, count } from 'drizzle-orm';
 import {
   createImportJob,
@@ -1853,6 +1866,1139 @@ organizationRoutes.post('/io.exprsn.org.delete', authMiddleware, async (c) => {
   await db.delete(organizations).where(eq(organizations.id, body.organizationId));
 
   return c.json({ success: true });
+});
+
+// ============================================
+// Public Organization Profiles
+// ============================================
+
+// Get public profile by handle
+organizationRoutes.get('/io.exprsn.org.getProfile', optionalAuthMiddleware, async (c) => {
+  const userDid = c.get('did');
+  const handle = c.req.query('handle');
+
+  if (!handle) {
+    throw new HTTPException(400, { message: 'Organization handle required' });
+  }
+
+  const result = await db
+    .select()
+    .from(organizations)
+    .where(and(eq(organizations.handle, handle), eq(organizations.isPublic, true)))
+    .limit(1);
+
+  const org = result[0];
+  if (!org) {
+    throw new HTTPException(404, { message: 'Organization not found' });
+  }
+
+  // Check if user is following or a member
+  let isFollowing = false;
+  let isMember = false;
+
+  if (userDid) {
+    const [followResult, memberResult] = await Promise.all([
+      db
+        .select()
+        .from(organizationFollows)
+        .where(
+          and(
+            eq(organizationFollows.organizationId, org.id),
+            eq(organizationFollows.followerDid, userDid)
+          )
+        )
+        .limit(1),
+      db
+        .select()
+        .from(organizationMembers)
+        .where(
+          and(
+            eq(organizationMembers.organizationId, org.id),
+            eq(organizationMembers.userDid, userDid)
+          )
+        )
+        .limit(1),
+    ]);
+    isFollowing = followResult.length > 0;
+    isMember = memberResult.length > 0;
+  }
+
+  return c.json({
+    id: org.id,
+    handle: org.handle,
+    displayName: org.displayName || org.name,
+    name: org.name,
+    type: org.type,
+    avatar: org.avatar,
+    bannerImage: org.bannerImage,
+    bio: org.bio,
+    website: org.website,
+    location: org.location,
+    category: org.category,
+    socialLinks: org.socialLinks,
+    verified: org.verified,
+    followerCount: org.followerCount,
+    videoCount: org.videoCount,
+    memberCount: org.memberCount,
+    isFollowing,
+    isMember,
+    createdAt: org.createdAt.toISOString(),
+  });
+});
+
+// Follow organization
+organizationRoutes.post('/io.exprsn.org.follow', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const body = await c.req.json<{ organizationId: string }>();
+
+  if (!body.organizationId) {
+    throw new HTTPException(400, { message: 'Organization ID required' });
+  }
+
+  // Check org exists and is public
+  const orgResult = await db
+    .select()
+    .from(organizations)
+    .where(and(eq(organizations.id, body.organizationId), eq(organizations.isPublic, true)))
+    .limit(1);
+
+  if (!orgResult[0]) {
+    throw new HTTPException(404, { message: 'Organization not found' });
+  }
+
+  // Check if already following
+  const existingFollow = await db
+    .select()
+    .from(organizationFollows)
+    .where(
+      and(
+        eq(organizationFollows.organizationId, body.organizationId),
+        eq(organizationFollows.followerDid, userDid)
+      )
+    )
+    .limit(1);
+
+  if (existingFollow[0]) {
+    return c.json({ success: true, message: 'Already following' });
+  }
+
+  // Create follow
+  await db.insert(organizationFollows).values({
+    id: nanoid(),
+    organizationId: body.organizationId,
+    followerDid: userDid,
+  });
+
+  // Increment follower count
+  await db
+    .update(organizations)
+    .set({ followerCount: sql`${organizations.followerCount} + 1` })
+    .where(eq(organizations.id, body.organizationId));
+
+  return c.json({ success: true });
+});
+
+// Unfollow organization
+organizationRoutes.post('/io.exprsn.org.unfollow', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const body = await c.req.json<{ organizationId: string }>();
+
+  if (!body.organizationId) {
+    throw new HTTPException(400, { message: 'Organization ID required' });
+  }
+
+  // Delete follow
+  const result = await db
+    .delete(organizationFollows)
+    .where(
+      and(
+        eq(organizationFollows.organizationId, body.organizationId),
+        eq(organizationFollows.followerDid, userDid)
+      )
+    );
+
+  // Decrement follower count if unfollowed
+  await db
+    .update(organizations)
+    .set({ followerCount: sql`GREATEST(${organizations.followerCount} - 1, 0)` })
+    .where(eq(organizations.id, body.organizationId));
+
+  return c.json({ success: true });
+});
+
+// Get organization's videos
+organizationRoutes.get('/io.exprsn.org.getVideos', optionalAuthMiddleware, async (c) => {
+  const orgId = c.req.query('organizationId');
+  const limit = Math.min(parseInt(c.req.query('limit') || '20'), 50);
+  const cursor = c.req.query('cursor');
+
+  if (!orgId) {
+    throw new HTTPException(400, { message: 'Organization ID required' });
+  }
+
+  // Check org exists and is public
+  const orgResult = await db
+    .select()
+    .from(organizations)
+    .where(and(eq(organizations.id, orgId), eq(organizations.isPublic, true)))
+    .limit(1);
+
+  if (!orgResult[0]) {
+    throw new HTTPException(404, { message: 'Organization not found' });
+  }
+
+  let query = db
+    .select({
+      video: videos,
+      author: {
+        did: users.did,
+        handle: users.handle,
+        displayName: users.displayName,
+        avatar: users.avatar,
+      },
+    })
+    .from(videos)
+    .innerJoin(users, eq(users.did, videos.authorDid))
+    .where(eq(videos.publishedAsOrgId, orgId))
+    .orderBy(desc(videos.createdAt))
+    .limit(limit + 1);
+
+  if (cursor) {
+    // @ts-expect-error - Drizzle query chaining
+    query = query.where(
+      and(eq(videos.publishedAsOrgId, orgId), sql`${videos.createdAt} < ${new Date(cursor)}`)
+    );
+  }
+
+  const results = await query;
+  const hasMore = results.length > limit;
+  const videoList = hasMore ? results.slice(0, -1) : results;
+
+  return c.json({
+    videos: videoList.map(({ video, author }) => ({
+      uri: video.uri,
+      thumbnailUrl: video.thumbnailUrl,
+      caption: video.caption,
+      duration: video.duration,
+      viewCount: video.viewCount,
+      likeCount: video.likeCount,
+      commentCount: video.commentCount,
+      author,
+      createdAt: video.createdAt.toISOString(),
+    })),
+    cursor: hasMore ? videoList[videoList.length - 1]?.video.createdAt.toISOString() : undefined,
+  });
+});
+
+// ============================================
+// Role Management
+// ============================================
+
+// Initialize system roles for an organization
+async function initializeSystemRoles(organizationId: string) {
+  const systemRoleNames: SystemRoleName[] = ['owner', 'admin', 'editor', 'viewer', 'member'];
+  const now = new Date();
+
+  for (const roleName of systemRoleNames) {
+    const roleConfig = SYSTEM_ROLES[roleName];
+    const permissions = SYSTEM_ROLE_PERMISSIONS[roleName];
+
+    await db
+      .insert(organizationRoles)
+      .values({
+        id: nanoid(),
+        organizationId,
+        name: roleName,
+        displayName: roleConfig.displayName,
+        description: roleConfig.description,
+        isSystem: true,
+        permissions: permissions as string[],
+        priority: roleConfig.priority,
+        color: roleConfig.color,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .onConflictDoNothing();
+  }
+}
+
+// List organization roles
+organizationRoutes.get('/io.exprsn.org.roles.list', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  const orgId = c.req.query('organizationId');
+
+  if (!orgId) {
+    throw new HTTPException(400, { message: 'Organization ID required' });
+  }
+
+  // Check user is a member
+  const access = await checkOrgPermission(userDid, orgId);
+  if (!access) {
+    throw new HTTPException(403, { message: 'Not a member of this organization' });
+  }
+
+  // Initialize system roles if needed
+  await initializeSystemRoles(orgId);
+
+  const roles = await db
+    .select()
+    .from(organizationRoles)
+    .where(eq(organizationRoles.organizationId, orgId))
+    .orderBy(desc(organizationRoles.priority), asc(organizationRoles.name));
+
+  return c.json({
+    roles: roles.map((role) => ({
+      id: role.id,
+      name: role.name,
+      displayName: role.displayName,
+      description: role.description,
+      isSystem: role.isSystem,
+      permissions: role.permissions,
+      priority: role.priority,
+      color: role.color,
+      createdAt: role.createdAt.toISOString(),
+    })),
+  });
+});
+
+// Create custom role
+organizationRoutes.post('/io.exprsn.org.roles.create', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const body = await c.req.json<{
+    organizationId: string;
+    name: string;
+    displayName: string;
+    description?: string;
+    permissions: string[];
+    color?: string;
+  }>();
+
+  if (!body.organizationId || !body.name || !body.displayName) {
+    throw new HTTPException(400, { message: 'Organization ID, name, and display name required' });
+  }
+
+  // Check permission to manage roles
+  const access = await checkOrgPermission(userDid, body.organizationId);
+  if (!access || (access.member.role !== 'owner' && !access.member.permissions?.includes(ORG_PERMISSIONS.MANAGE_ROLES))) {
+    throw new HTTPException(403, { message: 'Permission denied' });
+  }
+
+  // Validate name
+  const nameRegex = /^[a-z0-9_-]+$/;
+  if (!nameRegex.test(body.name) || body.name.length < 2 || body.name.length > 30) {
+    throw new HTTPException(400, { message: 'Role name must be 2-30 lowercase alphanumeric characters, underscores, or hyphens' });
+  }
+
+  // Check name doesn't conflict with system roles
+  const systemNames = ['owner', 'admin', 'editor', 'viewer', 'member'];
+  if (systemNames.includes(body.name)) {
+    throw new HTTPException(400, { message: 'Cannot use system role name' });
+  }
+
+  const roleId = nanoid();
+  const now = new Date();
+
+  await db.insert(organizationRoles).values({
+    id: roleId,
+    organizationId: body.organizationId,
+    name: body.name,
+    displayName: body.displayName,
+    description: body.description,
+    isSystem: false,
+    permissions: body.permissions || [],
+    priority: 50, // Custom roles have priority 50
+    color: body.color,
+    createdAt: now,
+    updatedAt: now,
+  });
+
+  // Log activity
+  await db.insert(organizationActivity).values({
+    id: nanoid(),
+    organizationId: body.organizationId,
+    actorDid: userDid,
+    action: 'role_created',
+    targetType: 'role',
+    targetId: roleId,
+    details: { name: body.name, displayName: body.displayName },
+  });
+
+  return c.json({ id: roleId, success: true });
+});
+
+// Update role
+organizationRoutes.post('/io.exprsn.org.roles.update', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const body = await c.req.json<{
+    roleId: string;
+    displayName?: string;
+    description?: string;
+    permissions?: string[];
+    color?: string;
+  }>();
+
+  if (!body.roleId) {
+    throw new HTTPException(400, { message: 'Role ID required' });
+  }
+
+  // Get role
+  const roleResult = await db
+    .select()
+    .from(organizationRoles)
+    .where(eq(organizationRoles.id, body.roleId))
+    .limit(1);
+
+  const role = roleResult[0];
+  if (!role) {
+    throw new HTTPException(404, { message: 'Role not found' });
+  }
+
+  // Cannot update system roles
+  if (role.isSystem) {
+    throw new HTTPException(400, { message: 'Cannot modify system roles' });
+  }
+
+  // Check permission
+  const access = await checkOrgPermission(userDid, role.organizationId);
+  if (!access || (access.member.role !== 'owner' && !access.member.permissions?.includes(ORG_PERMISSIONS.MANAGE_ROLES))) {
+    throw new HTTPException(403, { message: 'Permission denied' });
+  }
+
+  const updates: Partial<typeof organizationRoles.$inferInsert> = {
+    updatedAt: new Date(),
+  };
+
+  if (body.displayName !== undefined) updates.displayName = body.displayName;
+  if (body.description !== undefined) updates.description = body.description;
+  if (body.permissions !== undefined) updates.permissions = body.permissions;
+  if (body.color !== undefined) updates.color = body.color;
+
+  await db.update(organizationRoles).set(updates).where(eq(organizationRoles.id, body.roleId));
+
+  // Log activity
+  await db.insert(organizationActivity).values({
+    id: nanoid(),
+    organizationId: role.organizationId,
+    actorDid: userDid,
+    action: 'role_updated',
+    targetType: 'role',
+    targetId: body.roleId,
+  });
+
+  return c.json({ success: true });
+});
+
+// Delete custom role
+organizationRoutes.post('/io.exprsn.org.roles.delete', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const body = await c.req.json<{
+    roleId: string;
+    reassignToRoleId?: string;
+  }>();
+
+  if (!body.roleId) {
+    throw new HTTPException(400, { message: 'Role ID required' });
+  }
+
+  // Get role
+  const roleResult = await db
+    .select()
+    .from(organizationRoles)
+    .where(eq(organizationRoles.id, body.roleId))
+    .limit(1);
+
+  const role = roleResult[0];
+  if (!role) {
+    throw new HTTPException(404, { message: 'Role not found' });
+  }
+
+  // Cannot delete system roles
+  if (role.isSystem) {
+    throw new HTTPException(400, { message: 'Cannot delete system roles' });
+  }
+
+  // Check permission
+  const access = await checkOrgPermission(userDid, role.organizationId);
+  if (!access || (access.member.role !== 'owner' && !access.member.permissions?.includes(ORG_PERMISSIONS.MANAGE_ROLES))) {
+    throw new HTTPException(403, { message: 'Permission denied' });
+  }
+
+  // Reassign members to another role if specified
+  if (body.reassignToRoleId) {
+    await db
+      .update(organizationMembers)
+      .set({ roleId: body.reassignToRoleId })
+      .where(eq(organizationMembers.roleId, body.roleId));
+  }
+
+  // Delete role
+  await db.delete(organizationRoles).where(eq(organizationRoles.id, body.roleId));
+
+  // Log activity
+  await db.insert(organizationActivity).values({
+    id: nanoid(),
+    organizationId: role.organizationId,
+    actorDid: userDid,
+    action: 'role_deleted',
+    targetType: 'role',
+    targetId: body.roleId,
+    details: { name: role.name },
+  });
+
+  return c.json({ success: true });
+});
+
+// ============================================
+// Invite Management
+// ============================================
+
+// Create invite
+organizationRoutes.post('/io.exprsn.org.invites.create', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const body = await c.req.json<{
+    organizationId: string;
+    email?: string;
+    did?: string;
+    roleId?: string;
+    roleName?: string;
+    message?: string;
+  }>();
+
+  if (!body.organizationId) {
+    throw new HTTPException(400, { message: 'Organization ID required' });
+  }
+
+  if (!body.email && !body.did) {
+    throw new HTTPException(400, { message: 'Email or user DID required' });
+  }
+
+  // Check permission
+  const access = await checkOrgPermission(userDid, body.organizationId);
+  if (!access || (access.member.role !== 'owner' && access.member.role !== 'admin' && !access.member.permissions?.includes(ORG_PERMISSIONS.INVITE_MEMBERS))) {
+    throw new HTTPException(403, { message: 'Permission denied' });
+  }
+
+  // If inviting by DID, check user exists and not already a member
+  if (body.did) {
+    const existingMember = await db
+      .select()
+      .from(organizationMembers)
+      .where(
+        and(
+          eq(organizationMembers.organizationId, body.organizationId),
+          eq(organizationMembers.userDid, body.did)
+        )
+      )
+      .limit(1);
+
+    if (existingMember[0]) {
+      throw new HTTPException(400, { message: 'User is already a member' });
+    }
+  }
+
+  const inviteId = nanoid();
+  const token = nanoid(32);
+  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
+
+  await db.insert(organizationInvites).values({
+    id: inviteId,
+    organizationId: body.organizationId,
+    email: body.email,
+    invitedDid: body.did,
+    roleId: body.roleId,
+    roleName: body.roleName || 'member',
+    invitedBy: userDid,
+    token,
+    message: body.message,
+    status: 'pending',
+    expiresAt,
+  });
+
+  // Log activity
+  await db.insert(organizationActivity).values({
+    id: nanoid(),
+    organizationId: body.organizationId,
+    actorDid: userDid,
+    action: 'invite_sent',
+    targetType: 'invite',
+    targetId: inviteId,
+    details: { email: body.email, did: body.did },
+  });
+
+  return c.json({ id: inviteId, token, expiresAt: expiresAt.toISOString() });
+});
+
+// List pending invites
+organizationRoutes.get('/io.exprsn.org.invites.list', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  const orgId = c.req.query('organizationId');
+
+  if (!orgId) {
+    throw new HTTPException(400, { message: 'Organization ID required' });
+  }
+
+  // Check permission
+  const access = await checkOrgPermission(userDid, orgId);
+  if (!access || (access.member.role !== 'owner' && access.member.role !== 'admin' && !access.member.permissions?.includes(ORG_PERMISSIONS.INVITE_MEMBERS))) {
+    throw new HTTPException(403, { message: 'Permission denied' });
+  }
+
+  const invites = await db
+    .select({
+      invite: organizationInvites,
+      invitedUser: {
+        did: users.did,
+        handle: users.handle,
+        displayName: users.displayName,
+        avatar: users.avatar,
+      },
+      invitedByUser: {
+        did: sql<string>`inviter.did`,
+        handle: sql<string>`inviter.handle`,
+        displayName: sql<string>`inviter.display_name`,
+      },
+    })
+    .from(organizationInvites)
+    .leftJoin(users, eq(users.did, organizationInvites.invitedDid))
+    .leftJoin(sql`users as inviter`, sql`inviter.did = ${organizationInvites.invitedBy}`)
+    .where(and(eq(organizationInvites.organizationId, orgId), eq(organizationInvites.status, 'pending')))
+    .orderBy(desc(organizationInvites.createdAt));
+
+  return c.json({
+    invites: invites.map(({ invite, invitedUser, invitedByUser }) => ({
+      id: invite.id,
+      email: invite.email,
+      invitedUser: invite.invitedDid ? invitedUser : null,
+      roleName: invite.roleName,
+      invitedBy: invitedByUser,
+      message: invite.message,
+      status: invite.status,
+      expiresAt: invite.expiresAt.toISOString(),
+      createdAt: invite.createdAt.toISOString(),
+    })),
+  });
+});
+
+// Revoke invite
+organizationRoutes.post('/io.exprsn.org.invites.revoke', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const body = await c.req.json<{ inviteId: string }>();
+
+  if (!body.inviteId) {
+    throw new HTTPException(400, { message: 'Invite ID required' });
+  }
+
+  // Get invite
+  const inviteResult = await db
+    .select()
+    .from(organizationInvites)
+    .where(eq(organizationInvites.id, body.inviteId))
+    .limit(1);
+
+  const invite = inviteResult[0];
+  if (!invite) {
+    throw new HTTPException(404, { message: 'Invite not found' });
+  }
+
+  // Check permission
+  const access = await checkOrgPermission(userDid, invite.organizationId);
+  if (!access || (access.member.role !== 'owner' && access.member.role !== 'admin' && !access.member.permissions?.includes(ORG_PERMISSIONS.INVITE_MEMBERS))) {
+    throw new HTTPException(403, { message: 'Permission denied' });
+  }
+
+  // Update status
+  await db
+    .update(organizationInvites)
+    .set({ status: 'revoked' })
+    .where(eq(organizationInvites.id, body.inviteId));
+
+  // Log activity
+  await db.insert(organizationActivity).values({
+    id: nanoid(),
+    organizationId: invite.organizationId,
+    actorDid: userDid,
+    action: 'invite_revoked',
+    targetType: 'invite',
+    targetId: body.inviteId,
+  });
+
+  return c.json({ success: true });
+});
+
+// Accept invite
+organizationRoutes.post('/io.exprsn.org.invites.accept', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const body = await c.req.json<{ token: string }>();
+
+  if (!body.token) {
+    throw new HTTPException(400, { message: 'Invite token required' });
+  }
+
+  // Get invite
+  const inviteResult = await db
+    .select()
+    .from(organizationInvites)
+    .where(eq(organizationInvites.token, body.token))
+    .limit(1);
+
+  const invite = inviteResult[0];
+  if (!invite) {
+    throw new HTTPException(404, { message: 'Invite not found' });
+  }
+
+  if (invite.status !== 'pending') {
+    throw new HTTPException(400, { message: 'Invite is no longer valid' });
+  }
+
+  if (invite.expiresAt < new Date()) {
+    await db
+      .update(organizationInvites)
+      .set({ status: 'expired' })
+      .where(eq(organizationInvites.id, invite.id));
+    throw new HTTPException(400, { message: 'Invite has expired' });
+  }
+
+  // Check if already a member
+  const existingMember = await db
+    .select()
+    .from(organizationMembers)
+    .where(
+      and(
+        eq(organizationMembers.organizationId, invite.organizationId),
+        eq(organizationMembers.userDid, userDid)
+      )
+    )
+    .limit(1);
+
+  if (existingMember[0]) {
+    throw new HTTPException(400, { message: 'Already a member of this organization' });
+  }
+
+  const now = new Date();
+
+  // Add member
+  await db.insert(organizationMembers).values({
+    id: nanoid(),
+    organizationId: invite.organizationId,
+    userDid,
+    role: invite.roleName || 'member',
+    roleId: invite.roleId,
+    invitedBy: invite.invitedBy,
+    joinedAt: now,
+  });
+
+  // Update invite status
+  await db
+    .update(organizationInvites)
+    .set({ status: 'accepted', acceptedAt: now })
+    .where(eq(organizationInvites.id, invite.id));
+
+  // Increment member count
+  await db
+    .update(organizations)
+    .set({ memberCount: sql`${organizations.memberCount} + 1` })
+    .where(eq(organizations.id, invite.organizationId));
+
+  // Log activity
+  await db.insert(organizationActivity).values({
+    id: nanoid(),
+    organizationId: invite.organizationId,
+    actorDid: userDid,
+    action: 'invite_accepted',
+    targetType: 'invite',
+    targetId: invite.id,
+  });
+
+  return c.json({ success: true, organizationId: invite.organizationId });
+});
+
+// ============================================
+// Content Moderation Queue
+// ============================================
+
+// Submit video for organization publishing
+organizationRoutes.post('/io.exprsn.org.content.submit', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const body = await c.req.json<{
+    organizationId: string;
+    videoUri: string;
+    caption?: string;
+  }>();
+
+  if (!body.organizationId || !body.videoUri) {
+    throw new HTTPException(400, { message: 'Organization ID and video URI required' });
+  }
+
+  // Check user is a member with publish permission
+  const access = await checkOrgPermission(userDid, body.organizationId);
+  if (!access || (access.member.role !== 'owner' && access.member.role !== 'admin' && !access.member.permissions?.includes(ORG_PERMISSIONS.PUBLISH_CONTENT) && !access.member.canPublishOnBehalf)) {
+    throw new HTTPException(403, { message: 'Permission denied' });
+  }
+
+  // Check video exists and belongs to user
+  const videoResult = await db
+    .select()
+    .from(videos)
+    .where(and(eq(videos.uri, body.videoUri), eq(videos.authorDid, userDid)))
+    .limit(1);
+
+  if (!videoResult[0]) {
+    throw new HTTPException(404, { message: 'Video not found' });
+  }
+
+  // If org requires content approval, add to queue
+  if (access.org.requireContentApproval && access.member.role !== 'owner' && access.member.role !== 'admin') {
+    const queueId = nanoid();
+    await db.insert(organizationContentQueue).values({
+      id: queueId,
+      organizationId: body.organizationId,
+      videoUri: body.videoUri,
+      submittedBy: userDid,
+      submittedCaption: body.caption,
+      status: 'pending',
+    });
+
+    // Log activity
+    await db.insert(organizationActivity).values({
+      id: nanoid(),
+      organizationId: body.organizationId,
+      actorDid: userDid,
+      action: 'content_submitted',
+      targetType: 'video',
+      targetId: body.videoUri,
+    });
+
+    return c.json({ queued: true, queueId });
+  }
+
+  // Otherwise, publish directly
+  await db
+    .update(videos)
+    .set({ publishedAsOrgId: body.organizationId })
+    .where(eq(videos.uri, body.videoUri));
+
+  // Increment org video count
+  await db
+    .update(organizations)
+    .set({ videoCount: sql`${organizations.videoCount} + 1` })
+    .where(eq(organizations.id, body.organizationId));
+
+  return c.json({ published: true });
+});
+
+// Get content queue
+organizationRoutes.get('/io.exprsn.org.content.queue', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  const orgId = c.req.query('organizationId');
+  const status = c.req.query('status') || 'pending';
+  const limit = Math.min(parseInt(c.req.query('limit') || '20'), 50);
+
+  if (!orgId) {
+    throw new HTTPException(400, { message: 'Organization ID required' });
+  }
+
+  // Check permission to review content
+  const access = await checkOrgPermission(userDid, orgId);
+  if (!access || (access.member.role !== 'owner' && access.member.role !== 'admin' && !access.member.permissions?.includes(ORG_PERMISSIONS.REVIEW_CONTENT))) {
+    throw new HTTPException(403, { message: 'Permission denied' });
+  }
+
+  const queueItems = await db
+    .select({
+      queue: organizationContentQueue,
+      video: {
+        uri: videos.uri,
+        thumbnailUrl: videos.thumbnailUrl,
+        caption: videos.caption,
+        duration: videos.duration,
+      },
+      submitter: {
+        did: users.did,
+        handle: users.handle,
+        displayName: users.displayName,
+        avatar: users.avatar,
+      },
+    })
+    .from(organizationContentQueue)
+    .innerJoin(videos, eq(videos.uri, organizationContentQueue.videoUri))
+    .innerJoin(users, eq(users.did, organizationContentQueue.submittedBy))
+    .where(
+      and(
+        eq(organizationContentQueue.organizationId, orgId),
+        eq(organizationContentQueue.status, status)
+      )
+    )
+    .orderBy(desc(organizationContentQueue.priority), asc(organizationContentQueue.createdAt))
+    .limit(limit);
+
+  return c.json({
+    items: queueItems.map(({ queue, video, submitter }) => ({
+      id: queue.id,
+      video,
+      submittedBy: submitter,
+      submittedCaption: queue.submittedCaption,
+      status: queue.status,
+      priority: queue.priority,
+      createdAt: queue.createdAt.toISOString(),
+    })),
+  });
+});
+
+// Review content item
+organizationRoutes.post('/io.exprsn.org.content.review', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const body = await c.req.json<{
+    queueId: string;
+    action: 'approve' | 'reject' | 'request_revision';
+    notes?: string;
+  }>();
+
+  if (!body.queueId || !body.action) {
+    throw new HTTPException(400, { message: 'Queue ID and action required' });
+  }
+
+  // Get queue item
+  const queueResult = await db
+    .select()
+    .from(organizationContentQueue)
+    .where(eq(organizationContentQueue.id, body.queueId))
+    .limit(1);
+
+  const queueItem = queueResult[0];
+  if (!queueItem) {
+    throw new HTTPException(404, { message: 'Queue item not found' });
+  }
+
+  // Check permission
+  const access = await checkOrgPermission(userDid, queueItem.organizationId);
+  if (!access || (access.member.role !== 'owner' && access.member.role !== 'admin' && !access.member.permissions?.includes(ORG_PERMISSIONS.REVIEW_CONTENT))) {
+    throw new HTTPException(403, { message: 'Permission denied' });
+  }
+
+  const now = new Date();
+  let newStatus: 'approved' | 'rejected' | 'revision_requested';
+  let activityAction: 'content_approved' | 'content_rejected';
+
+  switch (body.action) {
+    case 'approve':
+      newStatus = 'approved';
+      activityAction = 'content_approved';
+
+      // Publish the video
+      await db
+        .update(videos)
+        .set({ publishedAsOrgId: queueItem.organizationId })
+        .where(eq(videos.uri, queueItem.videoUri));
+
+      // Increment video count
+      await db
+        .update(organizations)
+        .set({ videoCount: sql`${organizations.videoCount} + 1` })
+        .where(eq(organizations.id, queueItem.organizationId));
+      break;
+
+    case 'reject':
+      newStatus = 'rejected';
+      activityAction = 'content_rejected';
+      break;
+
+    case 'request_revision':
+      newStatus = 'revision_requested';
+      activityAction = 'content_rejected'; // Use rejected for activity log
+      break;
+
+    default:
+      throw new HTTPException(400, { message: 'Invalid action' });
+  }
+
+  // Update queue item
+  await db
+    .update(organizationContentQueue)
+    .set({
+      status: newStatus,
+      reviewedBy: userDid,
+      reviewedAt: now,
+      reviewNotes: body.notes,
+      revisionNotes: body.action === 'request_revision' ? body.notes : undefined,
+      updatedAt: now,
+    })
+    .where(eq(organizationContentQueue.id, body.queueId));
+
+  // Log activity
+  await db.insert(organizationActivity).values({
+    id: nanoid(),
+    organizationId: queueItem.organizationId,
+    actorDid: userDid,
+    action: activityAction,
+    targetType: 'video',
+    targetId: queueItem.videoUri,
+    details: { action: body.action, notes: body.notes },
+  });
+
+  return c.json({ success: true, status: newStatus });
+});
+
+// ============================================
+// Analytics
+// ============================================
+
+// Get analytics overview
+organizationRoutes.get('/io.exprsn.org.analytics.overview', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  const orgId = c.req.query('organizationId');
+  const period = c.req.query('period') || '7d';
+
+  if (!orgId) {
+    throw new HTTPException(400, { message: 'Organization ID required' });
+  }
+
+  // Check permission
+  const access = await checkOrgPermission(userDid, orgId);
+  if (!access || (access.member.role !== 'owner' && access.member.role !== 'admin' && !access.member.permissions?.includes(ORG_PERMISSIONS.VIEW_ANALYTICS))) {
+    throw new HTTPException(403, { message: 'Permission denied' });
+  }
+
+  // Calculate date range
+  const days = period === '30d' ? 30 : period === '90d' ? 90 : 7;
+  const startDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+  // Get video stats
+  const videoStats = await db
+    .select({
+      totalViews: sql<number>`COALESCE(SUM(${videos.viewCount}), 0)`,
+      totalLikes: sql<number>`COALESCE(SUM(${videos.likeCount}), 0)`,
+      totalComments: sql<number>`COALESCE(SUM(${videos.commentCount}), 0)`,
+      totalShares: sql<number>`COALESCE(SUM(${videos.shareCount}), 0)`,
+      videoCount: count(),
+    })
+    .from(videos)
+    .where(eq(videos.publishedAsOrgId, orgId));
+
+  // Get top videos
+  const topVideos = await db
+    .select({
+      uri: videos.uri,
+      thumbnailUrl: videos.thumbnailUrl,
+      caption: videos.caption,
+      views: videos.viewCount,
+      likes: videos.likeCount,
+    })
+    .from(videos)
+    .where(eq(videos.publishedAsOrgId, orgId))
+    .orderBy(desc(videos.viewCount))
+    .limit(5);
+
+  // Get org data
+  const orgResult = await db
+    .select()
+    .from(organizations)
+    .where(eq(organizations.id, orgId))
+    .limit(1);
+
+  const org = orgResult[0];
+
+  return c.json({
+    period,
+    totalViews: videoStats[0]?.totalViews || 0,
+    totalLikes: videoStats[0]?.totalLikes || 0,
+    totalComments: videoStats[0]?.totalComments || 0,
+    totalShares: videoStats[0]?.totalShares || 0,
+    followerCount: org?.followerCount || 0,
+    videoCount: videoStats[0]?.videoCount || 0,
+    topVideos,
+    viewsByDay: [], // Would need time-series data collection
+  });
+});
+
+// Get user's organizations with membership info
+organizationRoutes.get('/io.exprsn.org.getUserOrganizations', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const results = await db
+    .select({
+      org: organizations,
+      member: organizationMembers,
+      role: organizationRoles,
+    })
+    .from(organizationMembers)
+    .innerJoin(organizations, eq(organizations.id, organizationMembers.organizationId))
+    .leftJoin(organizationRoles, eq(organizationRoles.id, organizationMembers.roleId))
+    .where(eq(organizationMembers.userDid, userDid))
+    .orderBy(desc(organizationMembers.joinedAt));
+
+  return c.json({
+    organizations: results.map(({ org, member, role }) => ({
+      id: org.id,
+      name: org.name,
+      handle: org.handle,
+      displayName: org.displayName,
+      type: org.type,
+      avatar: org.avatar,
+      verified: org.verified,
+      membership: {
+        id: member.id,
+        role: role
+          ? {
+              id: role.id,
+              name: role.name,
+              displayName: role.displayName,
+              permissions: role.permissions,
+              color: role.color,
+            }
+          : {
+              name: member.role,
+              displayName: member.role.charAt(0).toUpperCase() + member.role.slice(1),
+              permissions: member.permissions,
+            },
+        title: member.title,
+        canPublishOnBehalf: member.canPublishOnBehalf,
+        joinedAt: member.joinedAt.toISOString(),
+      },
+    })),
+  });
 });
 
 export default organizationRoutes;

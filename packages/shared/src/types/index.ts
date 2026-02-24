@@ -135,3 +135,6 @@ export * from './payments.js';
 
 // Certificate authority types
 export * from './certificates.js';
+
+// Organization management types
+export * from './organization.js';

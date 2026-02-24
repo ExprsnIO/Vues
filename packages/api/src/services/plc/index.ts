@@ -7,6 +7,7 @@ import {
   plcHandleReservations,
   plcAuditLog,
   systemConfig,
+  organizationTypeConfigs,
 } from '../../db/schema.js';
 import {
   verifyOperationSignedByRotationKey,
@@ -14,6 +15,8 @@ import {
   validateOperation,
   calculateOperationCid,
 } from './crypto.js';
+import type { OrganizationType } from '@exprsn/shared';
+import { ORG_TYPE_HANDLE_SUFFIXES } from '@exprsn/shared';
 
 /**
  * PLC Operation types
@@ -167,9 +170,50 @@ export class PlcService {
   }
 
   /**
-   * Validate handle format for Exprsn
+   * Get handle suffix for organization type from config or defaults
    */
-  static async validateHandle(handle: string): Promise<{ valid: boolean; error?: string; type?: 'user' | 'org' }> {
+  static async getOrgTypeHandleSuffix(orgType: OrganizationType): Promise<string> {
+    // Check database for custom configuration
+    const typeConfig = await db
+      .select()
+      .from(organizationTypeConfigs)
+      .where(eq(organizationTypeConfigs.id, orgType))
+      .limit(1);
+
+    if (typeConfig[0]?.handleSuffix) {
+      return typeConfig[0].handleSuffix;
+    }
+
+    // Fall back to defaults from shared types
+    return ORG_TYPE_HANDLE_SUFFIXES[orgType] || 'org.exprsn';
+  }
+
+  /**
+   * Get all valid organization handle suffixes
+   */
+  static async getAllOrgHandleSuffixes(): Promise<string[]> {
+    // Get custom suffixes from database
+    const configs = await db
+      .select({ handleSuffix: organizationTypeConfigs.handleSuffix })
+      .from(organizationTypeConfigs)
+      .where(eq(organizationTypeConfigs.isActive, true));
+
+    const customSuffixes = configs.map(c => c.handleSuffix).filter(Boolean);
+    const defaultSuffixes = Object.values(ORG_TYPE_HANDLE_SUFFIXES);
+
+    // Return unique suffixes
+    return [...new Set([...customSuffixes, ...defaultSuffixes])];
+  }
+
+  /**
+   * Validate handle format for Exprsn
+   * @param handle - The handle to validate
+   * @param orgType - Optional organization type for type-specific validation
+   */
+  static async validateHandle(
+    handle: string,
+    orgType?: OrganizationType
+  ): Promise<{ valid: boolean; error?: string; type?: 'user' | 'org'; orgType?: OrganizationType }> {
     const config = await getPlcConfig();
 
     // Normalize handle
@@ -177,14 +221,46 @@ export class PlcService {
 
     // Check user handle format: username.exprsn
     const userRegex = new RegExp(`^[a-z0-9][a-z0-9-]{0,28}[a-z0-9]\\.${config.handleSuffix}$`);
-    // Check org handle format: username.org.exprsn
-    const orgRegex = new RegExp(`^[a-z0-9][a-z0-9-]{0,28}[a-z0-9]\\.${config.orgHandleSuffix}$`);
 
     if (userRegex.test(normalizedHandle)) {
       return { valid: true, type: 'user' };
     }
 
-    if (orgRegex.test(normalizedHandle)) {
+    // If specific org type provided, validate against that type's suffix
+    if (orgType) {
+      const suffix = await this.getOrgTypeHandleSuffix(orgType);
+      const escapedSuffix = suffix.replace(/\./g, '\\.');
+      const orgTypeRegex = new RegExp(`^[a-z0-9][a-z0-9-]{0,28}[a-z0-9]\\.${escapedSuffix}$`);
+
+      if (orgTypeRegex.test(normalizedHandle)) {
+        return { valid: true, type: 'org', orgType };
+      }
+
+      return {
+        valid: false,
+        error: `Handle must be in format @username.${suffix} for ${orgType} organizations`,
+      };
+    }
+
+    // Check against all valid org handle suffixes
+    const allSuffixes = await this.getAllOrgHandleSuffixes();
+    for (const suffix of allSuffixes) {
+      const escapedSuffix = suffix.replace(/\./g, '\\.');
+      const orgRegex = new RegExp(`^[a-z0-9][a-z0-9-]{0,28}[a-z0-9]\\.${escapedSuffix}$`);
+
+      if (orgRegex.test(normalizedHandle)) {
+        // Determine org type from suffix
+        const detectedType = Object.entries(ORG_TYPE_HANDLE_SUFFIXES).find(
+          ([, s]) => s === suffix
+        )?.[0] as OrganizationType | undefined;
+
+        return { valid: true, type: 'org', orgType: detectedType };
+      }
+    }
+
+    // Legacy fallback: Check generic org.exprsn format
+    const genericOrgRegex = new RegExp(`^[a-z0-9][a-z0-9-]{0,28}[a-z0-9]\\.${config.orgHandleSuffix}$`);
+    if (genericOrgRegex.test(normalizedHandle)) {
       return { valid: true, type: 'org' };
     }
 
@@ -197,9 +273,11 @@ export class PlcService {
       }
     }
 
+    // Build error message with example suffixes
+    const exampleSuffixes = allSuffixes.slice(0, 3).join(', @username.');
     return {
       valid: false,
-      error: `Handle must be in format @username.${config.handleSuffix} or @username.${config.orgHandleSuffix}`,
+      error: `Handle must be in format @username.${config.handleSuffix} or @username.${exampleSuffixes}`,
     };
   }
 
@@ -325,6 +403,128 @@ export class PlcService {
       handle: normalizedHandle,
       operationCid: cid,
     };
+  }
+
+  /**
+   * Create a new DID for an organization with type-specific services
+   */
+  static async createOrgDid(
+    input: CreateDidInput & { orgType: OrganizationType; organizationId?: string },
+    ipAddress?: string,
+    userAgent?: string
+  ): Promise<{
+    did: string;
+    handle: string;
+    operationCid: string;
+  }> {
+    // Validate handle with org type
+    const handleValidation = await this.validateHandle(input.handle, input.orgType);
+    if (!handleValidation.valid) {
+      throw new Error(handleValidation.error);
+    }
+
+    // Check handle availability
+    const available = await this.isHandleAvailable(input.handle);
+    if (!available) {
+      throw new Error('Handle is already taken');
+    }
+
+    // Get type-specific configuration
+    const typeConfig = await db
+      .select()
+      .from(organizationTypeConfigs)
+      .where(eq(organizationTypeConfigs.id, input.orgType))
+      .limit(1);
+
+    const normalizedHandle = input.handle.toLowerCase().replace(/^@/, '');
+    const did = this.generateDid();
+
+    // Build services - merge default PDS with type-specific services
+    const services: Record<string, { type: string; endpoint: string }> = {
+      atproto_pds: {
+        type: 'AtprotoPersonalDataServer',
+        endpoint: input.pdsEndpoint,
+      },
+    };
+
+    // Add type-specific services if configured
+    if (typeConfig[0]?.customDidServices) {
+      Object.assign(services, typeConfig[0].customDidServices);
+    }
+
+    // Create the operation
+    const operation: PlcOperationData = {
+      type: 'create',
+      rotationKeys: input.rotationKeys,
+      verificationMethods: {
+        atproto: input.signingKey,
+      },
+      alsoKnownAs: [`at://${normalizedHandle}`],
+      services: services as PlcOperationData['services'],
+      prev: null,
+      sig: '', // Would be signed in real implementation
+    };
+
+    const cid = this.generateOperationCid(operation);
+
+    // Store operation
+    await db.insert(plcOperations).values({
+      did,
+      cid,
+      operation,
+      nullified: false,
+    });
+
+    // Store identity state
+    await db.insert(plcIdentities).values({
+      did,
+      handle: normalizedHandle,
+      pdsEndpoint: input.pdsEndpoint,
+      signingKey: input.signingKey,
+      rotationKeys: input.rotationKeys,
+      alsoKnownAs: [`at://${normalizedHandle}`],
+      services,
+      lastOperationCid: cid,
+    });
+
+    // Audit log with org type information
+    await db.insert(plcAuditLog).values({
+      did,
+      action: 'create',
+      operationCid: cid,
+      newState: {
+        handle: normalizedHandle,
+        pdsEndpoint: input.pdsEndpoint,
+        signingKey: input.signingKey,
+        rotationKeys: input.rotationKeys,
+        orgType: input.orgType,
+        organizationId: input.organizationId,
+      },
+      ipAddress,
+      userAgent,
+    });
+
+    return {
+      did,
+      handle: normalizedHandle,
+      operationCid: cid,
+    };
+  }
+
+  /**
+   * Generate handle for organization based on type
+   */
+  static async generateOrgHandle(baseName: string, orgType: OrganizationType): Promise<string> {
+    const suffix = await this.getOrgTypeHandleSuffix(orgType);
+    // Sanitize base name: lowercase, remove special chars, replace spaces with hyphens
+    const sanitized = baseName
+      .toLowerCase()
+      .replace(/[^a-z0-9\s-]/g, '')
+      .replace(/\s+/g, '-')
+      .replace(/-+/g, '-')
+      .slice(0, 30);
+
+    return `${sanitized}.${suffix}`;
   }
 
   /**
