@@ -450,6 +450,294 @@ class ApiClient {
     return this.fetch(`/xrpc/io.exprsn.admin.users.getAccountInfo?${params}`);
   }
 
+  // Bulk User Actions
+  async bulkSanctionUsers(data: {
+    userDids: string[];
+    sanctionType: 'warning' | 'mute' | 'suspend' | 'ban';
+    reason: string;
+    expiresAt?: string;
+  }): Promise<BulkActionResult> {
+    return this.fetch('/xrpc/io.exprsn.admin.users.bulkSanction', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async bulkResetPasswords(data: {
+    userDids: string[];
+  }): Promise<BulkPasswordResetResult> {
+    return this.fetch('/xrpc/io.exprsn.admin.users.bulkResetPassword', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async bulkDeleteUsers(data: {
+    userDids: string[];
+    reason: string;
+    hardDelete?: boolean;
+  }): Promise<BulkActionResult> {
+    return this.fetch('/xrpc/io.exprsn.admin.users.bulkDelete', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async bulkForceLogout(data: {
+    userDids: string[];
+  }): Promise<BulkForceLogoutResult> {
+    return this.fetch('/xrpc/io.exprsn.admin.users.bulkForceLogout', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async bulkActionPreview(data: {
+    userDids: string[];
+    action: 'sanction' | 'resetPassword' | 'delete' | 'forceLogout';
+    sanctionType?: 'warning' | 'mute' | 'suspend' | 'ban';
+  }): Promise<BulkActionPreview> {
+    return this.fetch('/xrpc/io.exprsn.admin.users.bulkActionPreview', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  // Organization Admin
+  async getAdminOrganizations(options: {
+    q?: string;
+    type?: string;
+    verified?: string;
+    apiAccess?: string;
+    sort?: string;
+    limit?: number;
+    cursor?: string;
+  } = {}): Promise<AdminOrganizationsResponse> {
+    const params = new URLSearchParams();
+    if (options.q) params.set('q', options.q);
+    if (options.type) params.set('type', options.type);
+    if (options.verified) params.set('verified', options.verified);
+    if (options.apiAccess) params.set('apiAccess', options.apiAccess);
+    if (options.sort) params.set('sort', options.sort);
+    if (options.limit) params.set('limit', String(options.limit));
+    if (options.cursor) params.set('cursor', options.cursor);
+    return this.fetch(`/xrpc/io.exprsn.admin.orgs.list?${params}`);
+  }
+
+  async getAdminOrganization(id: string): Promise<AdminOrganizationDetail> {
+    const params = new URLSearchParams({ id });
+    return this.fetch(`/xrpc/io.exprsn.admin.orgs.get?${params}`);
+  }
+
+  async updateAdminOrganization(data: {
+    id: string;
+    verified?: boolean;
+    apiAccessEnabled?: boolean;
+    rateLimitPerMinute?: number | null;
+    burstLimit?: number | null;
+    dailyRequestLimit?: number | null;
+    allowedScopes?: string[] | null;
+    webhooksEnabled?: boolean;
+  }): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.orgs.update', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async bulkVerifyOrganizations(data: {
+    orgIds: string[];
+    verified: boolean;
+  }): Promise<BulkOrgActionResult> {
+    return this.fetch('/xrpc/io.exprsn.admin.orgs.bulkVerify', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async bulkUpdateOrgApiAccess(data: {
+    orgIds: string[];
+    apiAccessEnabled: boolean;
+  }): Promise<BulkOrgActionResult> {
+    return this.fetch('/xrpc/io.exprsn.admin.orgs.bulkUpdateApiAccess', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async bulkUpdateOrgMembers(data: {
+    orgId: string;
+    members: Array<{
+      did: string;
+      action: 'add' | 'remove' | 'suspend' | 'activate';
+      role?: 'admin' | 'member';
+    }>;
+  }): Promise<BulkOrgMemberResult> {
+    return this.fetch('/xrpc/io.exprsn.admin.orgs.bulkUpdateMembers', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async deleteAdminOrganization(data: {
+    id: string;
+    reason: string;
+  }): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.orgs.delete', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async bulkDeleteOrganizations(data: {
+    orgIds: string[];
+    reason: string;
+  }): Promise<BulkOrgActionResult> {
+    return this.fetch('/xrpc/io.exprsn.admin.orgs.bulkDelete', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  // =============================================================================
+  // Admin Export API
+  // =============================================================================
+
+  private async fetchBlob(path: string): Promise<Blob> {
+    const headers: HeadersInit = {};
+    if (this.sessionToken) {
+      headers['Authorization'] = `Bearer ${this.sessionToken}`;
+    }
+    if (this.devAdminMode) {
+      headers['X-Dev-Admin'] = 'true';
+    }
+
+    const response = await fetch(`${this.baseUrl}${path}`, { headers });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.message || `Export failed: ${response.status}`);
+    }
+
+    return response.blob();
+  }
+
+  async exportUsers(options: {
+    format: 'csv' | 'xlsx' | 'sqlite';
+    status?: string;
+    role?: string;
+    startDate?: string;
+    endDate?: string;
+  }): Promise<Blob> {
+    const params = new URLSearchParams({ format: options.format });
+    if (options.status) params.set('status', options.status);
+    if (options.role) params.set('role', options.role);
+    if (options.startDate) params.set('startDate', options.startDate);
+    if (options.endDate) params.set('endDate', options.endDate);
+    return this.fetchBlob(`/xrpc/io.exprsn.admin.export.users?${params}`);
+  }
+
+  async exportReports(options: {
+    format: 'csv' | 'xlsx' | 'sqlite';
+    status?: string;
+    contentType?: string;
+    reason?: string;
+    startDate?: string;
+    endDate?: string;
+  }): Promise<Blob> {
+    const params = new URLSearchParams({ format: options.format });
+    if (options.status) params.set('status', options.status);
+    if (options.contentType) params.set('contentType', options.contentType);
+    if (options.reason) params.set('reason', options.reason);
+    if (options.startDate) params.set('startDate', options.startDate);
+    if (options.endDate) params.set('endDate', options.endDate);
+    return this.fetchBlob(`/xrpc/io.exprsn.admin.export.reports?${params}`);
+  }
+
+  async exportAuditLogs(options: {
+    format: 'csv' | 'xlsx' | 'sqlite';
+    action?: string;
+    actorDid?: string;
+    startDate?: string;
+    endDate?: string;
+  }): Promise<Blob> {
+    const params = new URLSearchParams({ format: options.format });
+    if (options.action) params.set('action', options.action);
+    if (options.actorDid) params.set('actorDid', options.actorDid);
+    if (options.startDate) params.set('startDate', options.startDate);
+    if (options.endDate) params.set('endDate', options.endDate);
+    return this.fetchBlob(`/xrpc/io.exprsn.admin.export.auditLogs?${params}`);
+  }
+
+  async exportAnalytics(options: {
+    format: 'csv' | 'xlsx' | 'sqlite';
+    metric?: string;
+    startDate?: string;
+    endDate?: string;
+  }): Promise<Blob> {
+    const params = new URLSearchParams({ format: options.format });
+    if (options.metric) params.set('metric', options.metric);
+    if (options.startDate) params.set('startDate', options.startDate);
+    if (options.endDate) params.set('endDate', options.endDate);
+    return this.fetchBlob(`/xrpc/io.exprsn.admin.export.analytics?${params}`);
+  }
+
+  async exportPayments(options: {
+    format: 'csv' | 'xlsx' | 'sqlite';
+    status?: string;
+    type?: string;
+    startDate?: string;
+    endDate?: string;
+  }): Promise<Blob> {
+    const params = new URLSearchParams({ format: options.format });
+    if (options.status) params.set('status', options.status);
+    if (options.type) params.set('type', options.type);
+    if (options.startDate) params.set('startDate', options.startDate);
+    if (options.endDate) params.set('endDate', options.endDate);
+    return this.fetchBlob(`/xrpc/io.exprsn.admin.export.payments?${params}`);
+  }
+
+  async exportRenderJobs(options: {
+    format: 'csv' | 'xlsx' | 'sqlite';
+    status?: string;
+    startDate?: string;
+    endDate?: string;
+  }): Promise<Blob> {
+    const params = new URLSearchParams({ format: options.format });
+    if (options.status) params.set('status', options.status);
+    if (options.startDate) params.set('startDate', options.startDate);
+    if (options.endDate) params.set('endDate', options.endDate);
+    return this.fetchBlob(`/xrpc/io.exprsn.admin.export.renderJobs?${params}`);
+  }
+
+  async exportOrganizations(options: {
+    format: 'csv' | 'xlsx' | 'sqlite';
+    type?: string;
+    verified?: boolean;
+    apiAccess?: boolean;
+  }): Promise<Blob> {
+    const params = new URLSearchParams({ format: options.format });
+    if (options.type) params.set('type', options.type);
+    if (options.verified !== undefined) params.set('verified', String(options.verified));
+    if (options.apiAccess !== undefined) params.set('apiAccess', String(options.apiAccess));
+    return this.fetchBlob(`/xrpc/io.exprsn.admin.export.organizations?${params}`);
+  }
+
+  async exportSanctions(options: {
+    format: 'csv' | 'xlsx' | 'sqlite';
+    type?: string;
+    status?: string;
+    startDate?: string;
+    endDate?: string;
+  }): Promise<Blob> {
+    const params = new URLSearchParams({ format: options.format });
+    if (options.type) params.set('type', options.type);
+    if (options.status) params.set('status', options.status);
+    if (options.startDate) params.set('startDate', options.startDate);
+    if (options.endDate) params.set('endDate', options.endDate);
+    return this.fetchBlob(`/xrpc/io.exprsn.admin.export.sanctions?${params}`);
+  }
+
   // Studio Project Management
   async listStudioProjects(options: {
     limit?: number;
@@ -808,6 +1096,50 @@ class ApiClient {
     if (options.limit) params.set('limit', String(options.limit));
     if (options.offset) params.set('offset', String(options.offset));
     return this.fetch(`/xrpc/io.exprsn.admin.audit.list?${params}`);
+  }
+
+  // System diagnostics
+  async getSystemDiagnostics(): Promise<SystemDiagnostics> {
+    return this.fetch('/xrpc/io.exprsn.admin.system.diagnostics');
+  }
+
+  // Admin activity feed
+  async getAdminActivityFeed(options: {
+    limit?: number;
+    offset?: number;
+    adminDid?: string;
+    action?: string;
+  } = {}): Promise<AdminActivityFeed> {
+    const params = new URLSearchParams();
+    if (options.limit) params.set('limit', String(options.limit));
+    if (options.offset) params.set('offset', String(options.offset));
+    if (options.adminDid) params.set('adminDid', options.adminDid);
+    if (options.action) params.set('action', options.action);
+    return this.fetch(`/xrpc/io.exprsn.admin.activity.feed?${params}`);
+  }
+
+  // Quick stats (lightweight polling endpoint)
+  async getQuickStats(): Promise<QuickStats> {
+    return this.fetch('/xrpc/io.exprsn.admin.quickStats');
+  }
+
+  // Bulk verify users
+  async bulkVerifyUsers(data: {
+    userDids: string[];
+    verified: boolean;
+    reason?: string;
+  }): Promise<BulkActionResult> {
+    return this.fetch('/xrpc/io.exprsn.admin.users.bulkVerify', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  // Search users with fuzzy matching
+  async searchAdminUsers(query: string, limit?: number): Promise<{ users: AdminUserSearchResult[] }> {
+    const params = new URLSearchParams({ q: query });
+    if (limit) params.set('limit', String(limit));
+    return this.fetch(`/xrpc/io.exprsn.admin.users.search?${params}`);
   }
 
   // System config
@@ -3237,6 +3569,245 @@ export interface LiveChatMessage {
     avatar?: string;
   };
   isModerator: boolean;
+  createdAt: string;
+}
+
+// Bulk Action Types
+export interface BulkActionResult {
+  success: boolean;
+  summary: {
+    total: number;
+    succeeded: number;
+    failed: number;
+    deleteType?: 'hard' | 'soft';
+  };
+  results: Array<{
+    did: string;
+    success: boolean;
+    sanctionId?: string;
+    error?: string;
+  }>;
+}
+
+export interface BulkPasswordResetResult {
+  success: boolean;
+  summary: {
+    total: number;
+    succeeded: number;
+    failed: number;
+  };
+  results: Array<{
+    did: string;
+    success: boolean;
+    temporaryPassword?: string;
+    error?: string;
+  }>;
+}
+
+export interface BulkForceLogoutResult {
+  success: boolean;
+  summary: {
+    total: number;
+    succeeded: number;
+    failed: number;
+    totalSessionsInvalidated: number;
+  };
+  results: Array<{
+    did: string;
+    success: boolean;
+    sessionsInvalidated: number;
+    error?: string;
+  }>;
+}
+
+export interface BulkActionPreview {
+  preview: {
+    action: 'sanction' | 'resetPassword' | 'delete' | 'forceLogout';
+    sanctionType?: 'warning' | 'mute' | 'suspend' | 'ban';
+    affectedCount: number;
+    notFoundCount: number;
+    users: Array<{
+      did: string;
+      handle: string;
+      displayName?: string;
+      avatar?: string;
+      followerCount?: number;
+      videoCount?: number;
+      verified?: boolean;
+      currentSanction: string | null;
+    }>;
+    notFoundDids: string[];
+  };
+  warnings: string[];
+  canProceed: boolean;
+}
+
+// Organization Admin Types
+export interface AdminOrganization {
+  id: string;
+  name: string;
+  type: string;
+  description?: string;
+  avatar?: string;
+  verified: boolean;
+  memberCount: number;
+  apiAccessEnabled: boolean;
+  owner: {
+    did: string;
+    handle: string;
+    displayName?: string;
+    avatar?: string;
+  } | null;
+  createdAt: string;
+}
+
+export interface AdminOrganizationsResponse {
+  organizations: AdminOrganization[];
+  cursor?: string;
+}
+
+export interface AdminOrganizationDetail {
+  organization: {
+    id: string;
+    name: string;
+    type: string;
+    description?: string;
+    website?: string;
+    avatar?: string;
+    verified: boolean;
+    memberCount: number;
+    rateLimitPerMinute?: number | null;
+    burstLimit?: number | null;
+    dailyRequestLimit?: number | null;
+    apiAccessEnabled: boolean;
+    allowedScopes?: string[] | null;
+    webhooksEnabled: boolean;
+    createdAt: string;
+    updatedAt: string;
+  };
+  owner: {
+    did: string;
+    handle: string;
+    displayName?: string;
+    avatar?: string;
+  } | null;
+  stats: {
+    totalMembers: number;
+    activeMembers: number;
+    suspendedMembers: number;
+  };
+  recentActivity: Array<{
+    id: string;
+    action: string;
+    details?: Record<string, unknown>;
+    actor: {
+      did: string;
+      handle: string;
+    } | null;
+    createdAt: string;
+  }>;
+}
+
+export interface BulkOrgActionResult {
+  success: boolean;
+  summary: {
+    total: number;
+    succeeded: number;
+    failed: number;
+    action?: string;
+  };
+  results: Array<{
+    id: string;
+    success: boolean;
+    error?: string;
+  }>;
+}
+
+export interface BulkOrgMemberResult {
+  success: boolean;
+  summary: {
+    total: number;
+    succeeded: number;
+    failed: number;
+  };
+  results: Array<{
+    did: string;
+    action: string;
+    success: boolean;
+    error?: string;
+  }>;
+}
+
+// System diagnostics types
+export interface SystemDiagnostics {
+  status: 'healthy' | 'degraded' | 'down';
+  timestamp: string;
+  latency: number;
+  services: {
+    database: { status: 'healthy' | 'degraded' | 'down'; latency: number };
+    redis: { status: 'healthy' | 'degraded' | 'down' | 'not_configured'; latency: number };
+    api: { status: 'healthy'; uptime: number };
+  };
+  stats: {
+    totalUsers: number;
+    totalVideos: number;
+    pendingReports: number;
+    activeSessions: number;
+  };
+  environment: {
+    nodeVersion: string;
+    platform: string;
+    memory: {
+      used: number;
+      total: number;
+    };
+  };
+}
+
+// Admin activity feed types
+export interface AdminActivityItem {
+  id: string;
+  action: string;
+  targetType?: string;
+  targetId?: string;
+  details?: Record<string, unknown>;
+  createdAt: string;
+  admin: {
+    did: string;
+    role: string;
+    handle?: string;
+    displayName?: string;
+    avatar?: string;
+  };
+}
+
+export interface AdminActivityFeed {
+  activities: Array<{
+    date: string;
+    items: AdminActivityItem[];
+  }>;
+  pagination: {
+    limit: number;
+    offset: number;
+    hasMore: boolean;
+  };
+}
+
+// Quick stats type
+export interface QuickStats {
+  pendingReports: number;
+  newUsersToday: number;
+  activeUsersNow: number;
+  timestamp: string;
+}
+
+// Admin user search result
+export interface AdminUserSearchResult {
+  did: string;
+  handle: string;
+  displayName?: string;
+  avatar?: string;
+  verified: boolean;
   createdAt: string;
 }
 

@@ -163,8 +163,49 @@ liveAdminRouter.get(
     // Get viewer history if stream is live or ended
     let viewerHistory: { time: string; count: number }[] = [];
     if (stream.status === 'live' || stream.status === 'ended') {
-      // For now, return empty - would need viewer tracking implementation
-      viewerHistory = [];
+      // Fetch viewer data grouped by minute intervals
+      const viewers = await db
+        .select({
+          joinedAt: streamViewers.joinedAt,
+          leftAt: streamViewers.leftAt,
+        })
+        .from(streamViewers)
+        .where(eq(streamViewers.streamId, id));
+
+      if (viewers.length > 0) {
+        // Calculate viewer counts at each minute interval
+        const startTime = stream.startedAt || stream.createdAt;
+        const endTime = stream.endedAt || new Date();
+        const intervalMs = 60000; // 1 minute intervals
+
+        const viewerCounts = new Map<string, number>();
+
+        // Initialize time slots
+        let currentTime = new Date(startTime);
+        while (currentTime <= endTime) {
+          const timeKey = currentTime.toISOString();
+          viewerCounts.set(timeKey, 0);
+          currentTime = new Date(currentTime.getTime() + intervalMs);
+        }
+
+        // Count viewers for each time slot
+        for (const viewer of viewers) {
+          const joinTime = viewer.joinedAt;
+          const leaveTime = viewer.leftAt || endTime;
+
+          for (const [timeKey] of viewerCounts) {
+            const slotTime = new Date(timeKey);
+            if (joinTime <= slotTime && slotTime <= leaveTime) {
+              viewerCounts.set(timeKey, (viewerCounts.get(timeKey) || 0) + 1);
+            }
+          }
+        }
+
+        // Convert to array, limit to last 60 data points for performance
+        viewerHistory = Array.from(viewerCounts.entries())
+          .map(([time, count]) => ({ time, count }))
+          .slice(-60);
+      }
     }
 
     return c.json({

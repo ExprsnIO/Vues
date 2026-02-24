@@ -14,6 +14,7 @@ import {
 } from '../db/index.js';
 import { eq, desc, and, sql } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
+import { notifyNewReport } from '../websocket/admin.js';
 
 export const socialRouter = new Hono();
 
@@ -553,6 +554,20 @@ socialRouter.post('/io.exprsn.video.report', authMiddleware, async (c) => {
     reason,
     description: description || null,
     status: 'pending',
+  });
+
+  // Get reporter handle for notification
+  const reporter = await db.query.users.findFirst({
+    where: eq(users.did, userDid),
+    columns: { handle: true },
+  });
+
+  // Notify admins of new report
+  notifyNewReport({
+    id: reportId,
+    contentType: contentType || 'video',
+    reason,
+    reporterHandle: reporter?.handle,
   });
 
   return c.json({ reportId, success: true });

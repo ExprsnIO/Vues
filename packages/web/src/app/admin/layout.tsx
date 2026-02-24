@@ -4,8 +4,9 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { useQuery } from '@tanstack/react-query';
 import { useAuth } from '@/lib/auth-context';
-import { api } from '@/lib/api';
+import { api, QuickStats } from '@/lib/api';
 
 interface AdminSession {
   admin: {
@@ -28,6 +29,15 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   const [adminSession, setAdminSession] = useState<AdminSession | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Poll quick stats every 30 seconds
+  const { data: quickStats } = useQuery<QuickStats>({
+    queryKey: ['admin', 'quickStats'],
+    queryFn: () => api.getQuickStats(),
+    refetchInterval: 30000,
+    enabled: !!adminSession,
+    staleTime: 15000,
+  });
 
   useEffect(() => {
     async function checkAdminAccess() {
@@ -89,21 +99,22 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
 
   const navItems = [
     { href: '/admin', label: 'Dashboard', icon: DashboardIcon },
-    { href: '/admin/users', label: 'Users', icon: UsersIcon },
-    { href: '/admin/reports', label: 'Reports', icon: ReportsIcon, badge: true },
+    { href: '/admin/users', label: 'Users', icon: UsersIcon, badge: quickStats?.newUsersToday },
+    { href: '/admin/reports', label: 'Reports', icon: ReportsIcon, badge: quickStats?.pendingReports, badgeColor: 'bg-red-500' },
     { href: '/admin/moderation', label: 'Moderation', icon: ModerationIcon },
     { href: '/admin/content', label: 'Content', icon: ContentIcon },
     { href: '/admin/featured', label: 'Featured', icon: FeaturedIcon },
     { href: '/admin/announcements', label: 'Announcements', icon: AnnouncementsIcon },
     { href: '/admin/analytics', label: 'Analytics', icon: AnalyticsIcon },
     { href: '/admin/payments', label: 'Payments', icon: PaymentsIcon },
-    { href: '/admin/live', label: 'Live Streams', icon: LiveIcon },
+    { href: '/admin/live', label: 'Live Streams', icon: LiveIcon, badge: quickStats?.activeLiveStreams, badgeColor: 'bg-green-500' },
     { href: '/admin/render', label: 'Render Pipeline', icon: RenderIcon },
     { href: '/admin/infrastructure', label: 'Infrastructure', icon: InfrastructureIcon },
     { href: '/admin/plc', label: 'PLC Directory', icon: IdentityIcon },
     { href: '/admin/certificates', label: 'Certificates', icon: CertificatesIcon },
     { href: '/admin/team', label: 'Admin Team', icon: TeamIcon },
     { href: '/admin/audit', label: 'Audit Log', icon: AuditIcon },
+    { href: '/admin/activity', label: 'Activity', icon: ActivityIcon },
     { href: '/admin/settings', label: 'Settings', icon: SettingsIcon },
   ];
 
@@ -140,12 +151,35 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
                   }`}
                 >
                   <item.icon className="w-5 h-5" />
-                  <span>{item.label}</span>
+                  <span className="flex-1">{item.label}</span>
+                  {item.badge !== undefined && item.badge > 0 && (
+                    <span className={`px-1.5 py-0.5 text-xs font-medium rounded-full text-white min-w-[20px] text-center ${
+                      item.badgeColor || 'bg-accent'
+                    }`}>
+                      {item.badge > 99 ? '99+' : item.badge}
+                    </span>
+                  )}
                 </Link>
               </li>
             ))}
           </ul>
         </nav>
+
+        {/* Quick Stats Summary */}
+        {quickStats && (
+          <div className="px-4 py-3 border-t border-border">
+            <div className="grid grid-cols-2 gap-2 text-center">
+              <div className="p-2 rounded-lg bg-surface-hover">
+                <p className="text-lg font-bold text-text-primary">{quickStats.activeUsersNow}</p>
+                <p className="text-xs text-text-muted">Online Now</p>
+              </div>
+              <div className="p-2 rounded-lg bg-surface-hover">
+                <p className="text-lg font-bold text-text-primary">{quickStats.newUsersToday}</p>
+                <p className="text-xs text-text-muted">New Today</p>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Admin info */}
         <div className="p-4 border-t border-border">
@@ -317,6 +351,14 @@ function InfrastructureIcon({ className }: { className?: string }) {
   return (
     <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
       <path strokeLinecap="round" strokeLinejoin="round" d="M5.25 14.25h13.5m-13.5 0a3 3 0 01-3-3m3 3a3 3 0 100 6h13.5a3 3 0 100-6m-16.5-3a3 3 0 013-3h13.5a3 3 0 013 3m-19.5 0a4.5 4.5 0 01.9-2.7L5.737 5.1a3.375 3.375 0 012.7-1.35h7.126c1.062 0 2.062.5 2.7 1.35l2.587 3.45a4.5 4.5 0 01.9 2.7m0 0a3 3 0 01-3 3m0 3h.008v.008h-.008v-.008zm0-6h.008v.008h-.008v-.008zm-3 6h.008v.008h-.008v-.008zm0-6h.008v.008h-.008v-.008z" />
+    </svg>
+  );
+}
+
+function ActivityIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
     </svg>
   );
 }

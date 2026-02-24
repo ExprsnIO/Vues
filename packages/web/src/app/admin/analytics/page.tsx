@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import { formatCount } from '@/lib/utils';
+import { ExportButton } from '@/components/admin/ExportModal';
 
 export default function AdminAnalyticsPage() {
   const { data, isLoading } = useQuery({
@@ -44,7 +45,10 @@ export default function AdminAnalyticsPage() {
 
   return (
     <div className="space-y-8">
-      <h1 className="text-2xl font-bold text-text-primary">Analytics</h1>
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-bold text-text-primary">Analytics</h1>
+        <ExportButton exportType="analytics" />
+      </div>
 
       {/* Overview Stats */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">

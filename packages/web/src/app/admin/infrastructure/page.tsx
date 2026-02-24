@@ -1,7 +1,8 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { api } from '@/lib/api';
+import { useQuery } from '@tanstack/react-query';
+import { api, SystemDiagnostics } from '@/lib/api';
 
 interface Cluster {
   id: string;
@@ -154,7 +155,14 @@ export default function InfrastructurePage() {
     }
   };
 
-  if (loading) {
+  // System diagnostics query
+  const { data: diagnostics, isLoading: diagnosticsLoading } = useQuery({
+    queryKey: ['admin', 'diagnostics'],
+    queryFn: () => api.getSystemDiagnostics(),
+    refetchInterval: 30000, // Refresh every 30 seconds
+  });
+
+  if (loading && diagnosticsLoading) {
     return (
       <div className="flex items-center justify-center h-64">
         <div className="w-8 h-8 border-2 border-primary-500/30 border-t-primary-500 rounded-full animate-spin" />
@@ -162,20 +170,95 @@ export default function InfrastructurePage() {
     );
   }
 
+  const getServiceStatusColor = (status: string) => {
+    switch (status) {
+      case 'healthy':
+        return 'bg-green-500';
+      case 'degraded':
+        return 'bg-yellow-500';
+      case 'down':
+        return 'bg-red-500';
+      default:
+        return 'bg-gray-500';
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <div>
-          <h1 className="text-2xl font-bold text-white">Infrastructure</h1>
-          <p className="text-gray-400 mt-1">Manage render clusters and workers</p>
+          <h1 className="text-2xl font-bold text-text-primary">Infrastructure</h1>
+          <p className="text-text-muted mt-1">System health and render cluster management</p>
         </div>
         <button
           onClick={() => setShowAddModal(true)}
-          className="px-4 py-2 bg-primary-500 hover:bg-primary-600 text-white rounded-lg transition-colors"
+          className="px-4 py-2 bg-accent hover:bg-accent-hover text-text-inverse rounded-lg transition-colors"
         >
           Add Cluster
         </button>
       </div>
+
+      {/* System Diagnostics */}
+      {diagnostics && (
+        <div className="bg-surface border border-border rounded-xl p-6">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-lg font-semibold text-text-primary">System Health</h2>
+            <div className="flex items-center gap-2">
+              <span
+                className={`w-3 h-3 rounded-full ${getServiceStatusColor(diagnostics.status)}`}
+              />
+              <span className="text-sm text-text-muted capitalize">{diagnostics.status}</span>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+            {Object.entries(diagnostics.services).map(([name, service]) => (
+              <div key={name} className="p-4 bg-surface-hover rounded-lg">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-sm font-medium text-text-primary capitalize">{name}</span>
+                  <span
+                    className={`w-2 h-2 rounded-full ${getServiceStatusColor(service.status)}`}
+                  />
+                </div>
+                <div className="text-xs text-text-muted">
+                  {service.status === 'not_configured'
+                    ? 'Not configured'
+                    : `${service.latency || 0}ms latency`}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div className="text-center">
+              <div className="text-2xl font-bold text-text-primary">
+                {diagnostics.stats.totalUsers.toLocaleString()}
+              </div>
+              <div className="text-xs text-text-muted">Total Users</div>
+            </div>
+            <div className="text-center">
+              <div className="text-2xl font-bold text-text-primary">
+                {diagnostics.stats.totalVideos.toLocaleString()}
+              </div>
+              <div className="text-xs text-text-muted">Total Videos</div>
+            </div>
+            <div className="text-center">
+              <div className="text-2xl font-bold text-accent">
+                {diagnostics.stats.activeSessions.toLocaleString()}
+              </div>
+              <div className="text-xs text-text-muted">Active Sessions</div>
+            </div>
+            <div className="text-center">
+              <div className="text-2xl font-bold text-text-primary">
+                {Math.round(diagnostics.environment.memory.used)}MB
+              </div>
+              <div className="text-xs text-text-muted">
+                Memory ({Math.round((diagnostics.environment.memory.used / diagnostics.environment.memory.total) * 100)}%)
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {error && (
         <div className="p-4 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400">

@@ -1,16 +1,19 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import { formatCount } from '@/lib/utils';
+import { BulkActionBar } from '@/components/admin/BulkActionBar';
+import { ExportButton } from '@/components/admin/ExportModal';
 import toast from 'react-hot-toast';
 
 export default function AdminUsersPage() {
   const [search, setSearch] = useState('');
   const [verified, setVerified] = useState<string>('');
   const [sort, setSort] = useState('recent');
+  const [selectedDids, setSelectedDids] = useState<Set<string>>(new Set());
   const queryClient = useQueryClient();
 
   const { data, isLoading } = useQuery({
@@ -37,10 +40,51 @@ export default function AdminUsersPage() {
 
   const users = data?.users || [];
 
+  // Selection handlers
+  const toggleSelection = (did: string) => {
+    setSelectedDids((prev) => {
+      const next = new Set(prev);
+      if (next.has(did)) {
+        next.delete(did);
+      } else {
+        next.add(did);
+      }
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    if (selectedDids.size === users.length) {
+      setSelectedDids(new Set());
+    } else {
+      setSelectedDids(new Set(users.map((u: any) => u.did)));
+    }
+  };
+
+  const clearSelection = () => {
+    setSelectedDids(new Set());
+  };
+
+  const isAllSelected = users.length > 0 && selectedDids.size === users.length;
+  const isSomeSelected = selectedDids.size > 0 && selectedDids.size < users.length;
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold text-text-primary">Users</h1>
+        <div className="flex items-center gap-3">
+          {selectedDids.size > 0 && (
+            <span className="text-sm text-text-muted">
+              {selectedDids.size} selected
+            </span>
+          )}
+          <ExportButton
+            exportType="users"
+            filters={{
+              status: verified ? (verified === 'true' ? 'active' : 'inactive') : undefined,
+            }}
+          />
+        </div>
       </div>
 
       {/* Filters */}
@@ -79,6 +123,17 @@ export default function AdminUsersPage() {
         <table className="w-full">
           <thead className="bg-surface-hover">
             <tr>
+              <th className="px-4 py-3 text-left">
+                <input
+                  type="checkbox"
+                  checked={isAllSelected}
+                  ref={(el) => {
+                    if (el) el.indeterminate = isSomeSelected;
+                  }}
+                  onChange={toggleSelectAll}
+                  className="w-4 h-4 rounded border-border text-accent focus:ring-accent"
+                />
+              </th>
               <th className="px-6 py-3 text-left text-xs font-medium text-text-muted uppercase tracking-wider">
                 User
               </th>
@@ -102,19 +157,32 @@ export default function AdminUsersPage() {
           <tbody className="divide-y divide-border">
             {isLoading ? (
               <tr>
-                <td colSpan={6} className="px-6 py-8 text-center text-text-muted">
+                <td colSpan={7} className="px-6 py-8 text-center text-text-muted">
                   Loading...
                 </td>
               </tr>
             ) : users.length === 0 ? (
               <tr>
-                <td colSpan={6} className="px-6 py-8 text-center text-text-muted">
+                <td colSpan={7} className="px-6 py-8 text-center text-text-muted">
                   No users found
                 </td>
               </tr>
             ) : (
               users.map((user: any) => (
-                <tr key={user.did} className="hover:bg-surface-hover">
+                <tr
+                  key={user.did}
+                  className={`hover:bg-surface-hover ${
+                    selectedDids.has(user.did) ? 'bg-accent/5' : ''
+                  }`}
+                >
+                  <td className="px-4 py-4">
+                    <input
+                      type="checkbox"
+                      checked={selectedDids.has(user.did)}
+                      onChange={() => toggleSelection(user.did)}
+                      className="w-4 h-4 rounded border-border text-accent focus:ring-accent"
+                    />
+                  </td>
                   <td className="px-6 py-4">
                     <div className="flex items-center gap-3">
                       <div className="w-10 h-10 rounded-full bg-surface-hover overflow-hidden">
@@ -181,6 +249,13 @@ export default function AdminUsersPage() {
           </tbody>
         </table>
       </div>
+
+      {/* Bulk Action Bar */}
+      <BulkActionBar
+        selectedDids={Array.from(selectedDids)}
+        onClearSelection={clearSelection}
+        onActionComplete={clearSelection}
+      />
     </div>
   );
 }

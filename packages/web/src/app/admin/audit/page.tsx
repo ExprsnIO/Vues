@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '@/lib/api';
+import { ExportButton } from '@/components/admin/ExportModal';
 
 type AuditAction =
   | 'user.update'
@@ -70,6 +71,13 @@ export default function AdminAuditPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold text-text-primary">Audit Log</h1>
+        <ExportButton
+          exportType="auditLogs"
+          filters={{
+            action: actionFilter || undefined,
+            actorDid: adminFilter || undefined,
+          }}
+        />
       </div>
 
       {/* Filters */}

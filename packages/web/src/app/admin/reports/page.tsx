@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api';
+import { ExportButton } from '@/components/admin/ExportModal';
 import toast from 'react-hot-toast';
 
 export default function AdminReportsPage() {
@@ -64,9 +65,19 @@ export default function AdminReportsPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold text-text-primary">Reports</h1>
-        <div className="flex items-center gap-2 text-sm text-text-muted">
-          <span className="w-2 h-2 rounded-full bg-accent animate-pulse" />
-          {reports.length} pending
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2 text-sm text-text-muted">
+            <span className="w-2 h-2 rounded-full bg-accent animate-pulse" />
+            {reports.length} pending
+          </div>
+          <ExportButton
+            exportType="reports"
+            filters={{
+              status: status || undefined,
+              contentType: contentType || undefined,
+              reason: reason || undefined,
+            }}
+          />
         </div>
       </div>
 

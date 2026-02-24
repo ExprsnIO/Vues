@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api';
 import { formatCount } from '@/lib/utils';
+import { ExportButton } from '@/components/admin/ExportModal';
 
 type TransactionStatus = 'all' | 'completed' | 'pending' | 'failed' | 'refunded';
 type PaymentProvider = 'all' | 'stripe' | 'paypal' | 'authorizenet';
@@ -190,9 +191,13 @@ export default function PaymentsAdmin() {
     <div className="space-y-8">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold text-text-primary">Payment Management</h1>
-        <button className="px-4 py-2 bg-accent hover:bg-accent-hover text-text-inverse rounded-lg transition-colors">
-          Export Report
-        </button>
+        <ExportButton
+          exportType="payments"
+          filters={{
+            status: statusFilter !== 'all' ? statusFilter : undefined,
+            type: providerFilter !== 'all' ? providerFilter : undefined,
+          }}
+        />
       </div>
 
       {/* Stats Grid */}

@@ -33,6 +33,7 @@ import { createPdsApp, getPdsConfig, OnCommitCallback } from './pds/index.js';
 import { initializeChatWebSocket } from './websocket/chat.js';
 import { initializeEditorCollab } from './websocket/editorCollab.js';
 import { initializeRenderProgressWebSocket } from './websocket/renderProgress.js';
+import { initializeAdminWebSocket } from './websocket/admin.js';
 import { createWellKnownRouterFromEnv } from './routes/well-known.js';
 import { identityRouter } from './routes/identity.js';
 import { registryRouter, initializeServiceRegistry } from './routes/registry.js';
@@ -176,6 +177,7 @@ app.get('/videos/:filename', async (c) => {
 });
 
 // Mount routers
+
 // Auth routes first (no middleware)
 app.route('/xrpc', authRouter);
 app.route('/xrpc', xrpcRouter);
@@ -207,12 +209,12 @@ app.route('/xrpc', liveAdminRouter);
 app.route('/xrpc', moderationAdminRouter);
 app.route('/xrpc', adminSettingsRouter); // Admin settings for auth/CA/moderation
 app.route('/xrpc', renderAdminRouter); // Render pipeline admin
-app.route('/', presetsRouter); // Render presets (xrpc prefix in router)
-app.route('/', clusterAdminRouter); // Cluster admin (xrpc prefix in router)
+// NOTE: presetsRouter and clusterAdminRouter are mounted in main() after setup wizard
+// because clusterAdminRouter.use('*', adminAuthMiddleware) would intercept /first-run
 app.route('/xrpc', analyticsRoutes); // Creator analytics
 // PLC routes - standard directory at /plc, XRPC routes already have /xrpc prefix
 app.route('/plc', plcRouter); // Standard PLC directory endpoints (did:plc resolution)
-app.route('/', plcRouter); // Mount at root so /xrpc/io.exprsn.plc.* routes work
+// NOTE: plcRouter at '/' is mounted in main() after setup wizard to avoid /:did catching /first-run
 app.route('/oauth', oauthRouter);
 
 // PDS will be mounted after relay is initialized in main()
@@ -281,6 +283,23 @@ function createRelayBridge(): OnCommitCallback {
 async function main() {
   const port = parseInt(process.env.PORT || '3000', 10);
   const host = process.env.HOST || '0.0.0.0';
+
+  // Mount setup wizard first (before any catch-all routes)
+  // This must happen before PDS and other '/' mounted routes
+  try {
+    // @ts-expect-error - optional dependency
+    const { setupRouter } = await import('@exprsn/setup');
+    app.route('/first-run', setupRouter);
+    console.log('Setup wizard mounted at /first-run');
+  } catch {
+    // @exprsn/setup not installed - skip
+  }
+
+  // Mount routers that have global middleware AFTER setup wizard
+  // This prevents adminAuthMiddleware from catching /first-run
+  app.route('/', presetsRouter);
+  app.route('/', clusterAdminRouter);
+  app.route('/', plcRouter);
 
   // Initialize OAuth client
   const appUrl = process.env.APP_URL || `http://localhost:${port}`;
@@ -380,6 +399,7 @@ async function main() {
   initializeChatWebSocket(io);
   initializeEditorCollab(io);
   initializeRenderProgressWebSocket(io);
+  initializeAdminWebSocket(io);
 
   // Initialize relay firehose WebSocket if enabled
   if (relayEnabled && relayService) {
@@ -392,7 +412,7 @@ async function main() {
   }
 
   console.log(`Server running at http://${host}:${port}`);
-  console.log('WebSocket namespaces: /chat, /editor-collab' + (relayEnabled ? ', /xrpc/com.atproto.sync.subscribeRepos' : ''));
+  console.log('WebSocket namespaces: /chat, /editor-collab, /render-progress, /admin' + (relayEnabled ? ', /xrpc/com.atproto.sync.subscribeRepos' : ''));
   console.log('Well-known endpoints: /.well-known/atproto-did, /.well-known/did.json, /.well-known/exprsn-services');
 }
 

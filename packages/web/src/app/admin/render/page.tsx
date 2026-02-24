@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { formatCount } from '@/lib/utils';
 import { api } from '@/lib/api';
+import { ExportButton } from '@/components/admin/ExportModal';
 
 type TabType = 'jobs' | 'workers' | 'quotas' | 'batches';
 type JobStatus = 'all' | 'pending' | 'rendering' | 'completed' | 'failed' | 'paused';
@@ -365,6 +366,12 @@ export default function RenderPipelineAdmin() {
               {stats?.rendering || 0} jobs rendering
             </span>
           </div>
+          <ExportButton
+            exportType="renderJobs"
+            filters={{
+              status: statusFilter !== 'all' ? statusFilter : undefined,
+            }}
+          />
         </div>
       </div>
 

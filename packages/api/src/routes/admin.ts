@@ -14,6 +14,10 @@ import {
   systemConfig,
   adminAuditLog,
   analyticsSnapshots,
+  organizations,
+  organizationMembers,
+  organizationActivity,
+  sessions,
   type AdminUser,
 } from '../db/schema.js';
 import {
@@ -23,6 +27,18 @@ import {
   ADMIN_PERMISSIONS,
   getAdminPermissions,
 } from '../auth/middleware.js';
+import {
+  exportUsers,
+  exportReports,
+  exportAuditLogs,
+  exportAnalytics,
+  exportPayments,
+  exportRenderJobs,
+  exportOrganizations,
+  exportSanctions,
+  type ExportFormat,
+} from '../services/export/index.js';
+import { broadcastAdminActivity, notifyAdmins } from '../websocket/admin.js';
 
 export const adminRouter = new Hono();
 
@@ -385,6 +401,1200 @@ adminRouter.get(
       .limit(limit);
 
     return c.json({ sanctions });
+  }
+);
+
+// ============================================
+// Bulk User Actions
+// ============================================
+
+// Bulk sanction users
+adminRouter.post(
+  '/io.exprsn.admin.users.bulkSanction',
+  requirePermission(ADMIN_PERMISSIONS.USERS_SANCTION),
+  async (c) => {
+    const body = await c.req.json<{
+      userDids: string[];
+      sanctionType: 'warning' | 'mute' | 'suspend' | 'ban';
+      reason: string;
+      expiresAt?: string;
+    }>();
+    const adminUser = c.get('adminUser');
+    const permissions = c.get('adminPermissions');
+
+    if (!body.userDids || !Array.isArray(body.userDids) || body.userDids.length === 0) {
+      return c.json({ error: 'InvalidRequest', message: 'userDids array is required' }, 400);
+    }
+
+    if (!body.sanctionType || !body.reason) {
+      return c.json({ error: 'InvalidRequest', message: 'sanctionType and reason are required' }, 400);
+    }
+
+    // Limit bulk operations to 100 users at a time
+    if (body.userDids.length > 100) {
+      return c.json({ error: 'InvalidRequest', message: 'Maximum 100 users per bulk operation' }, 400);
+    }
+
+    // Ban requires special permission
+    if (body.sanctionType === 'ban' && !permissions.includes(ADMIN_PERMISSIONS.USERS_BAN)) {
+      return c.json({ error: 'Forbidden', message: 'Ban permission required' }, 403);
+    }
+
+    const results: { did: string; success: boolean; sanctionId?: string; error?: string }[] = [];
+    const expiresAt = body.expiresAt ? new Date(body.expiresAt) : null;
+
+    // Verify all users exist first
+    const existingUsers = await db
+      .select({ did: users.did })
+      .from(users)
+      .where(inArray(users.did, body.userDids));
+
+    const existingDids = new Set(existingUsers.map((u) => u.did));
+
+    // Process each user
+    for (const userDid of body.userDids) {
+      if (!existingDids.has(userDid)) {
+        results.push({ did: userDid, success: false, error: 'User not found' });
+        continue;
+      }
+
+      try {
+        const sanctionId = nanoid();
+        await db.insert(userSanctions).values({
+          id: sanctionId,
+          userDid,
+          adminId: adminUser.id,
+          sanctionType: body.sanctionType,
+          reason: body.reason,
+          expiresAt,
+          createdAt: new Date(),
+        });
+
+        // Audit log for each user
+        await db.insert(adminAuditLog).values({
+          id: nanoid(),
+          adminId: adminUser.id,
+          action: `user.bulkSanction.${body.sanctionType}`,
+          targetType: 'user',
+          targetId: userDid,
+          details: { sanctionId, reason: body.reason, bulkOperation: true },
+          createdAt: new Date(),
+        });
+
+        results.push({ did: userDid, success: true, sanctionId });
+      } catch (err) {
+        results.push({ did: userDid, success: false, error: 'Failed to apply sanction' });
+      }
+    }
+
+    const successCount = results.filter((r) => r.success).length;
+    const failureCount = results.filter((r) => !r.success).length;
+
+    // Broadcast activity to admins
+    if (successCount > 0) {
+      const user = await db.query.users.findFirst({
+        where: eq(users.did, adminUser.userDid),
+        columns: { handle: true },
+      });
+
+      broadcastAdminActivity({
+        adminDid: adminUser.userDid,
+        adminHandle: user?.handle || 'unknown',
+        action: `bulk_sanction_${body.sanctionType}`,
+        targetType: 'users',
+        targetId: `${successCount} users`,
+      });
+
+      notifyAdmins({
+        type: 'sanction',
+        title: 'Bulk Sanction Applied',
+        message: `${user?.handle || 'Admin'} applied ${body.sanctionType} to ${successCount} user(s)`,
+        severity: body.sanctionType === 'ban' ? 'error' : 'warning',
+        data: { successCount, sanctionType: body.sanctionType },
+      });
+    }
+
+    return c.json({
+      success: failureCount === 0,
+      summary: {
+        total: body.userDids.length,
+        succeeded: successCount,
+        failed: failureCount,
+      },
+      results,
+    });
+  }
+);
+
+// Bulk password reset
+adminRouter.post(
+  '/io.exprsn.admin.users.bulkResetPassword',
+  requirePermission(ADMIN_PERMISSIONS.USERS_EDIT),
+  async (c) => {
+    const body = await c.req.json<{
+      userDids: string[];
+    }>();
+    const adminUser = c.get('adminUser');
+
+    if (!body.userDids || !Array.isArray(body.userDids) || body.userDids.length === 0) {
+      return c.json({ error: 'InvalidRequest', message: 'userDids array is required' }, 400);
+    }
+
+    // Limit bulk operations to 100 users at a time
+    if (body.userDids.length > 100) {
+      return c.json({ error: 'InvalidRequest', message: 'Maximum 100 users per bulk operation' }, 400);
+    }
+
+    const results: { did: string; success: boolean; temporaryPassword?: string; error?: string }[] = [];
+
+    // Get existing users from actorRepos
+    const existingUsers = await db
+      .select({ did: actorRepos.did, handle: actorRepos.handle })
+      .from(actorRepos)
+      .where(inArray(actorRepos.did, body.userDids));
+
+    const existingMap = new Map(existingUsers.map((u) => [u.did, u]));
+
+    // Process each user
+    for (const userDid of body.userDids) {
+      const user = existingMap.get(userDid);
+      if (!user) {
+        results.push({ did: userDid, success: false, error: 'User account not found' });
+        continue;
+      }
+
+      try {
+        // Generate a random temporary password
+        const tempPassword = `temp_${nanoid(12)}`;
+        const passwordHash = await bcrypt.hash(tempPassword, 10);
+
+        // Update the password
+        await db
+          .update(actorRepos)
+          .set({ passwordHash, updatedAt: new Date() })
+          .where(eq(actorRepos.did, userDid));
+
+        // Invalidate all existing sessions
+        await db.delete(sessions).where(eq(sessions.did, userDid));
+
+        // Audit log
+        await db.insert(adminAuditLog).values({
+          id: nanoid(),
+          adminId: adminUser.id,
+          action: 'user.bulkResetPassword',
+          targetType: 'user',
+          targetId: userDid,
+          details: { handle: user.handle, bulkOperation: true },
+          createdAt: new Date(),
+        });
+
+        results.push({ did: userDid, success: true, temporaryPassword: tempPassword });
+      } catch (err) {
+        results.push({ did: userDid, success: false, error: 'Failed to reset password' });
+      }
+    }
+
+    const successCount = results.filter((r) => r.success).length;
+    const failureCount = results.filter((r) => !r.success).length;
+
+    return c.json({
+      success: failureCount === 0,
+      summary: {
+        total: body.userDids.length,
+        succeeded: successCount,
+        failed: failureCount,
+      },
+      results,
+    });
+  }
+);
+
+// Bulk delete users
+adminRouter.post(
+  '/io.exprsn.admin.users.bulkDelete',
+  requirePermission(ADMIN_PERMISSIONS.USERS_BAN),
+  async (c) => {
+    const body = await c.req.json<{
+      userDids: string[];
+      reason: string;
+      hardDelete?: boolean; // If true, permanently delete; otherwise soft delete (ban + deactivate)
+    }>();
+    const adminUser = c.get('adminUser');
+
+    if (!body.userDids || !Array.isArray(body.userDids) || body.userDids.length === 0) {
+      return c.json({ error: 'InvalidRequest', message: 'userDids array is required' }, 400);
+    }
+
+    if (!body.reason) {
+      return c.json({ error: 'InvalidRequest', message: 'reason is required' }, 400);
+    }
+
+    // Limit bulk operations to 50 users for deletion (more destructive)
+    if (body.userDids.length > 50) {
+      return c.json({ error: 'InvalidRequest', message: 'Maximum 50 users per bulk delete operation' }, 400);
+    }
+
+    const results: { did: string; success: boolean; error?: string }[] = [];
+
+    // Verify all users exist first
+    const existingUsers = await db
+      .select({ did: users.did, handle: users.handle })
+      .from(users)
+      .where(inArray(users.did, body.userDids));
+
+    const existingMap = new Map(existingUsers.map((u) => [u.did, u]));
+
+    // Process each user
+    for (const userDid of body.userDids) {
+      const user = existingMap.get(userDid);
+      if (!user) {
+        results.push({ did: userDid, success: false, error: 'User not found' });
+        continue;
+      }
+
+      try {
+        if (body.hardDelete) {
+          // Hard delete - remove user and related data
+          // Delete sessions first
+          await db.delete(sessions).where(eq(sessions.did, userDid));
+
+          // Delete sanctions
+          await db.delete(userSanctions).where(eq(userSanctions.userDid, userDid));
+
+          // Mark videos as removed
+          await db
+            .update(videos)
+            .set({ visibility: 'removed' })
+            .where(eq(videos.authorDid, userDid));
+
+          // Delete actor repo
+          await db.delete(actorRepos).where(eq(actorRepos.did, userDid));
+
+          // Delete user record
+          await db.delete(users).where(eq(users.did, userDid));
+        } else {
+          // Soft delete - ban the user and deactivate account
+          const sanctionId = nanoid();
+          await db.insert(userSanctions).values({
+            id: sanctionId,
+            userDid,
+            adminId: adminUser.id,
+            sanctionType: 'ban',
+            reason: `Account deleted: ${body.reason}`,
+            expiresAt: null, // Permanent
+            createdAt: new Date(),
+          });
+
+          // Invalidate all sessions
+          await db.delete(sessions).where(eq(sessions.did, userDid));
+
+          // Update actor repo status if it exists
+          await db
+            .update(actorRepos)
+            .set({ status: 'deactivated', updatedAt: new Date() })
+            .where(eq(actorRepos.did, userDid));
+        }
+
+        // Audit log
+        await db.insert(adminAuditLog).values({
+          id: nanoid(),
+          adminId: adminUser.id,
+          action: body.hardDelete ? 'user.bulkHardDelete' : 'user.bulkSoftDelete',
+          targetType: 'user',
+          targetId: userDid,
+          details: { handle: user.handle, reason: body.reason, bulkOperation: true },
+          createdAt: new Date(),
+        });
+
+        results.push({ did: userDid, success: true });
+      } catch (err) {
+        results.push({ did: userDid, success: false, error: 'Failed to delete user' });
+      }
+    }
+
+    const successCount = results.filter((r) => r.success).length;
+    const failureCount = results.filter((r) => !r.success).length;
+
+    return c.json({
+      success: failureCount === 0,
+      summary: {
+        total: body.userDids.length,
+        succeeded: successCount,
+        failed: failureCount,
+        deleteType: body.hardDelete ? 'hard' : 'soft',
+      },
+      results,
+    });
+  }
+);
+
+// Bulk force logout
+adminRouter.post(
+  '/io.exprsn.admin.users.bulkForceLogout',
+  requirePermission(ADMIN_PERMISSIONS.USERS_EDIT),
+  async (c) => {
+    const body = await c.req.json<{
+      userDids: string[];
+    }>();
+    const adminUser = c.get('adminUser');
+
+    if (!body.userDids || !Array.isArray(body.userDids) || body.userDids.length === 0) {
+      return c.json({ error: 'InvalidRequest', message: 'userDids array is required' }, 400);
+    }
+
+    // Limit bulk operations to 100 users at a time
+    if (body.userDids.length > 100) {
+      return c.json({ error: 'InvalidRequest', message: 'Maximum 100 users per bulk operation' }, 400);
+    }
+
+    const results: { did: string; success: boolean; sessionsInvalidated: number; error?: string }[] = [];
+
+    for (const userDid of body.userDids) {
+      try {
+        // Count existing sessions
+        const [sessionCount] = await db
+          .select({ count: count() })
+          .from(sessions)
+          .where(eq(sessions.did, userDid));
+
+        // Delete all sessions for the user
+        await db.delete(sessions).where(eq(sessions.did, userDid));
+
+        // Audit log
+        await db.insert(adminAuditLog).values({
+          id: nanoid(),
+          adminId: adminUser.id,
+          action: 'user.bulkForceLogout',
+          targetType: 'user',
+          targetId: userDid,
+          details: { sessionsInvalidated: sessionCount?.count || 0, bulkOperation: true },
+          createdAt: new Date(),
+        });
+
+        results.push({
+          did: userDid,
+          success: true,
+          sessionsInvalidated: sessionCount?.count || 0,
+        });
+      } catch (err) {
+        results.push({ did: userDid, success: false, sessionsInvalidated: 0, error: 'Failed to invalidate sessions' });
+      }
+    }
+
+    const successCount = results.filter((r) => r.success).length;
+    const totalSessionsInvalidated = results.reduce((sum, r) => sum + r.sessionsInvalidated, 0);
+
+    return c.json({
+      success: true,
+      summary: {
+        total: body.userDids.length,
+        succeeded: successCount,
+        failed: body.userDids.length - successCount,
+        totalSessionsInvalidated,
+      },
+      results,
+    });
+  }
+);
+
+// Preview bulk action (dry run)
+adminRouter.post(
+  '/io.exprsn.admin.users.bulkActionPreview',
+  requirePermission(ADMIN_PERMISSIONS.USERS_VIEW),
+  async (c) => {
+    const body = await c.req.json<{
+      userDids: string[];
+      action: 'sanction' | 'resetPassword' | 'delete' | 'forceLogout';
+      sanctionType?: 'warning' | 'mute' | 'suspend' | 'ban';
+    }>();
+
+    if (!body.userDids || !Array.isArray(body.userDids) || body.userDids.length === 0) {
+      return c.json({ error: 'InvalidRequest', message: 'userDids array is required' }, 400);
+    }
+
+    if (!body.action) {
+      return c.json({ error: 'InvalidRequest', message: 'action is required' }, 400);
+    }
+
+    // Get user details for preview
+    const userDetails = await db
+      .select({
+        did: users.did,
+        handle: users.handle,
+        displayName: users.displayName,
+        avatar: users.avatar,
+        followerCount: users.followerCount,
+        videoCount: users.videoCount,
+        verified: users.verified,
+      })
+      .from(users)
+      .where(inArray(users.did, body.userDids));
+
+    const foundDids = new Set(userDetails.map((u) => u.did));
+    const notFoundDids = body.userDids.filter((did) => !foundDids.has(did));
+
+    // Get current sanction status for each user
+    const activeSanctions = await db
+      .select({
+        userDid: userSanctions.userDid,
+        sanctionType: userSanctions.sanctionType,
+      })
+      .from(userSanctions)
+      .where(
+        and(
+          inArray(userSanctions.userDid, body.userDids),
+          or(isNull(userSanctions.expiresAt), gte(userSanctions.expiresAt, new Date()))
+        )
+      );
+
+    const sanctionMap = new Map<string, string>();
+    for (const s of activeSanctions) {
+      const current = sanctionMap.get(s.userDid);
+      if (!current || severityOrder(s.sanctionType) > severityOrder(current)) {
+        sanctionMap.set(s.userDid, s.sanctionType);
+      }
+    }
+
+    // Build warnings
+    const warnings: string[] = [];
+
+    if (notFoundDids.length > 0) {
+      warnings.push(`${notFoundDids.length} user(s) not found and will be skipped`);
+    }
+
+    if (body.action === 'sanction' && body.sanctionType) {
+      const alreadySanctioned = userDetails.filter((u) => {
+        const currentSanction = sanctionMap.get(u.did);
+        return currentSanction && severityOrder(currentSanction) >= severityOrder(body.sanctionType!);
+      });
+      if (alreadySanctioned.length > 0) {
+        warnings.push(
+          `${alreadySanctioned.length} user(s) already have equal or higher sanctions`
+        );
+      }
+    }
+
+    if (body.action === 'delete') {
+      const verifiedUsers = userDetails.filter((u) => u.verified);
+      if (verifiedUsers.length > 0) {
+        warnings.push(`${verifiedUsers.length} verified user(s) will be deleted`);
+      }
+
+      const totalFollowers = userDetails.reduce((sum, u) => sum + (u.followerCount || 0), 0);
+      if (totalFollowers > 1000) {
+        warnings.push(`Users have combined ${totalFollowers} followers`);
+      }
+    }
+
+    return c.json({
+      preview: {
+        action: body.action,
+        sanctionType: body.sanctionType,
+        affectedCount: userDetails.length,
+        notFoundCount: notFoundDids.length,
+        users: userDetails.map((u) => ({
+          ...u,
+          currentSanction: sanctionMap.get(u.did) || null,
+        })),
+        notFoundDids,
+      },
+      warnings,
+      canProceed: userDetails.length > 0,
+    });
+  }
+);
+
+// ============================================
+// Organization Admin
+// ============================================
+
+// List all organizations
+adminRouter.get(
+  '/io.exprsn.admin.orgs.list',
+  requirePermission(ADMIN_PERMISSIONS.USERS_VIEW),
+  async (c) => {
+    const q = c.req.query('q');
+    const type = c.req.query('type'); // team, enterprise, nonprofit, business
+    const verified = c.req.query('verified'); // true, false
+    const apiAccess = c.req.query('apiAccess'); // enabled, disabled
+    const sort = c.req.query('sort') || 'recent'; // recent, members, name
+    const limit = Math.min(parseInt(c.req.query('limit') || '50'), 100);
+    const cursor = c.req.query('cursor');
+
+    let conditions = [];
+
+    if (q) {
+      conditions.push(
+        or(
+          ilike(organizations.name, `%${q}%`),
+          ilike(organizations.description, `%${q}%`)
+        )
+      );
+    }
+
+    if (type) {
+      conditions.push(eq(organizations.type, type));
+    }
+
+    if (verified === 'true') {
+      conditions.push(eq(organizations.verified, true));
+    } else if (verified === 'false') {
+      conditions.push(eq(organizations.verified, false));
+    }
+
+    if (apiAccess === 'enabled') {
+      conditions.push(eq(organizations.apiAccessEnabled, true));
+    } else if (apiAccess === 'disabled') {
+      conditions.push(eq(organizations.apiAccessEnabled, false));
+    }
+
+    let orderBy;
+    switch (sort) {
+      case 'members':
+        orderBy = desc(organizations.memberCount);
+        break;
+      case 'name':
+        orderBy = asc(organizations.name);
+        break;
+      default:
+        orderBy = desc(organizations.createdAt);
+    }
+
+    const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+
+    const orgs = await db
+      .select({
+        org: organizations,
+        owner: {
+          did: users.did,
+          handle: users.handle,
+          displayName: users.displayName,
+          avatar: users.avatar,
+        },
+      })
+      .from(organizations)
+      .leftJoin(users, eq(users.did, organizations.ownerDid))
+      .where(whereClause)
+      .orderBy(orderBy)
+      .limit(limit + 1);
+
+    const hasMore = orgs.length > limit;
+    const results = hasMore ? orgs.slice(0, -1) : orgs;
+
+    return c.json({
+      organizations: results.map(({ org, owner }) => ({
+        id: org.id,
+        name: org.name,
+        type: org.type,
+        description: org.description,
+        avatar: org.avatar,
+        verified: org.verified,
+        memberCount: org.memberCount,
+        apiAccessEnabled: org.apiAccessEnabled,
+        owner,
+        createdAt: org.createdAt.toISOString(),
+      })),
+      cursor: hasMore ? results[results.length - 1]?.org.createdAt.toISOString() : undefined,
+    });
+  }
+);
+
+// Get organization details
+adminRouter.get(
+  '/io.exprsn.admin.orgs.get',
+  requirePermission(ADMIN_PERMISSIONS.USERS_VIEW),
+  async (c) => {
+    const orgId = c.req.query('id');
+
+    if (!orgId) {
+      return c.json({ error: 'InvalidRequest', message: 'Organization ID required' }, 400);
+    }
+
+    const result = await db
+      .select()
+      .from(organizations)
+      .where(eq(organizations.id, orgId))
+      .limit(1);
+
+    const org = result[0];
+    if (!org) {
+      return c.json({ error: 'NotFound', message: 'Organization not found' }, 404);
+    }
+
+    // Get owner info
+    const ownerResult = await db
+      .select({
+        did: users.did,
+        handle: users.handle,
+        displayName: users.displayName,
+        avatar: users.avatar,
+      })
+      .from(users)
+      .where(eq(users.did, org.ownerDid))
+      .limit(1);
+
+    // Get member stats
+    const memberStats = await db
+      .select({
+        total: count(),
+        active: sql<number>`COUNT(*) FILTER (WHERE status = 'active')`,
+        suspended: sql<number>`COUNT(*) FILTER (WHERE status = 'suspended')`,
+      })
+      .from(organizationMembers)
+      .where(eq(organizationMembers.organizationId, orgId));
+
+    // Get recent activity
+    const recentActivity = await db
+      .select({
+        activity: organizationActivity,
+        actor: {
+          did: users.did,
+          handle: users.handle,
+        },
+      })
+      .from(organizationActivity)
+      .leftJoin(users, eq(users.did, organizationActivity.actorDid))
+      .where(eq(organizationActivity.organizationId, orgId))
+      .orderBy(desc(organizationActivity.createdAt))
+      .limit(10);
+
+    return c.json({
+      organization: {
+        id: org.id,
+        name: org.name,
+        type: org.type,
+        description: org.description,
+        website: org.website,
+        avatar: org.avatar,
+        verified: org.verified,
+        memberCount: org.memberCount,
+        rateLimitPerMinute: org.rateLimitPerMinute,
+        burstLimit: org.burstLimit,
+        dailyRequestLimit: org.dailyRequestLimit,
+        apiAccessEnabled: org.apiAccessEnabled,
+        allowedScopes: org.allowedScopes,
+        webhooksEnabled: org.webhooksEnabled,
+        createdAt: org.createdAt.toISOString(),
+        updatedAt: org.updatedAt.toISOString(),
+      },
+      owner: ownerResult[0] || null,
+      stats: {
+        totalMembers: memberStats[0]?.total || 0,
+        activeMembers: memberStats[0]?.active || 0,
+        suspendedMembers: memberStats[0]?.suspended || 0,
+      },
+      recentActivity: recentActivity.map(({ activity, actor }) => ({
+        id: activity.id,
+        action: activity.action,
+        details: activity.details,
+        actor,
+        createdAt: activity.createdAt.toISOString(),
+      })),
+    });
+  }
+);
+
+// Update organization (admin)
+adminRouter.post(
+  '/io.exprsn.admin.orgs.update',
+  requirePermission(ADMIN_PERMISSIONS.USERS_EDIT),
+  async (c) => {
+    const body = await c.req.json<{
+      id: string;
+      verified?: boolean;
+      apiAccessEnabled?: boolean;
+      rateLimitPerMinute?: number | null;
+      burstLimit?: number | null;
+      dailyRequestLimit?: number | null;
+      allowedScopes?: string[] | null;
+      webhooksEnabled?: boolean;
+    }>();
+    const adminUser = c.get('adminUser');
+
+    if (!body.id) {
+      return c.json({ error: 'InvalidRequest', message: 'Organization ID required' }, 400);
+    }
+
+    const org = await db
+      .select()
+      .from(organizations)
+      .where(eq(organizations.id, body.id))
+      .limit(1);
+
+    if (!org[0]) {
+      return c.json({ error: 'NotFound', message: 'Organization not found' }, 404);
+    }
+
+    const updates: Partial<typeof organizations.$inferInsert> = {
+      updatedAt: new Date(),
+    };
+
+    if (body.verified !== undefined) updates.verified = body.verified;
+    if (body.apiAccessEnabled !== undefined) updates.apiAccessEnabled = body.apiAccessEnabled;
+    if (body.rateLimitPerMinute !== undefined) updates.rateLimitPerMinute = body.rateLimitPerMinute;
+    if (body.burstLimit !== undefined) updates.burstLimit = body.burstLimit;
+    if (body.dailyRequestLimit !== undefined) updates.dailyRequestLimit = body.dailyRequestLimit;
+    if (body.allowedScopes !== undefined) updates.allowedScopes = body.allowedScopes;
+    if (body.webhooksEnabled !== undefined) updates.webhooksEnabled = body.webhooksEnabled;
+
+    await db.update(organizations).set(updates).where(eq(organizations.id, body.id));
+
+    // Audit log
+    await db.insert(adminAuditLog).values({
+      id: nanoid(),
+      adminId: adminUser.id,
+      action: 'organization.update',
+      targetType: 'organization',
+      targetId: body.id,
+      details: { updates: Object.keys(updates).filter((k) => k !== 'updatedAt') },
+      createdAt: new Date(),
+    });
+
+    return c.json({ success: true });
+  }
+);
+
+// Bulk verify organizations
+adminRouter.post(
+  '/io.exprsn.admin.orgs.bulkVerify',
+  requirePermission(ADMIN_PERMISSIONS.USERS_EDIT),
+  async (c) => {
+    const body = await c.req.json<{
+      orgIds: string[];
+      verified: boolean;
+    }>();
+    const adminUser = c.get('adminUser');
+
+    if (!body.orgIds || !Array.isArray(body.orgIds) || body.orgIds.length === 0) {
+      return c.json({ error: 'InvalidRequest', message: 'orgIds array is required' }, 400);
+    }
+
+    if (body.orgIds.length > 100) {
+      return c.json({ error: 'InvalidRequest', message: 'Maximum 100 organizations per bulk operation' }, 400);
+    }
+
+    // Verify orgs exist
+    const existingOrgs = await db
+      .select({ id: organizations.id, name: organizations.name })
+      .from(organizations)
+      .where(inArray(organizations.id, body.orgIds));
+
+    const existingIds = new Set(existingOrgs.map((o) => o.id));
+    const results: { id: string; success: boolean; error?: string }[] = [];
+
+    for (const orgId of body.orgIds) {
+      if (!existingIds.has(orgId)) {
+        results.push({ id: orgId, success: false, error: 'Organization not found' });
+        continue;
+      }
+
+      try {
+        await db
+          .update(organizations)
+          .set({ verified: body.verified, updatedAt: new Date() })
+          .where(eq(organizations.id, orgId));
+
+        // Audit log
+        await db.insert(adminAuditLog).values({
+          id: nanoid(),
+          adminId: adminUser.id,
+          action: body.verified ? 'organization.bulkVerify' : 'organization.bulkUnverify',
+          targetType: 'organization',
+          targetId: orgId,
+          details: { bulkOperation: true },
+          createdAt: new Date(),
+        });
+
+        results.push({ id: orgId, success: true });
+      } catch (err) {
+        results.push({ id: orgId, success: false, error: 'Failed to update' });
+      }
+    }
+
+    const successCount = results.filter((r) => r.success).length;
+
+    return c.json({
+      success: true,
+      summary: {
+        total: body.orgIds.length,
+        succeeded: successCount,
+        failed: body.orgIds.length - successCount,
+        action: body.verified ? 'verified' : 'unverified',
+      },
+      results,
+    });
+  }
+);
+
+// Bulk update organization API access
+adminRouter.post(
+  '/io.exprsn.admin.orgs.bulkUpdateApiAccess',
+  requirePermission(ADMIN_PERMISSIONS.USERS_EDIT),
+  async (c) => {
+    const body = await c.req.json<{
+      orgIds: string[];
+      apiAccessEnabled: boolean;
+    }>();
+    const adminUser = c.get('adminUser');
+
+    if (!body.orgIds || !Array.isArray(body.orgIds) || body.orgIds.length === 0) {
+      return c.json({ error: 'InvalidRequest', message: 'orgIds array is required' }, 400);
+    }
+
+    if (body.orgIds.length > 100) {
+      return c.json({ error: 'InvalidRequest', message: 'Maximum 100 organizations per bulk operation' }, 400);
+    }
+
+    const results: { id: string; success: boolean; error?: string }[] = [];
+
+    for (const orgId of body.orgIds) {
+      try {
+        const result = await db
+          .update(organizations)
+          .set({ apiAccessEnabled: body.apiAccessEnabled, updatedAt: new Date() })
+          .where(eq(organizations.id, orgId));
+
+        await db.insert(adminAuditLog).values({
+          id: nanoid(),
+          adminId: adminUser.id,
+          action: body.apiAccessEnabled ? 'organization.bulkEnableApi' : 'organization.bulkDisableApi',
+          targetType: 'organization',
+          targetId: orgId,
+          details: { bulkOperation: true },
+          createdAt: new Date(),
+        });
+
+        results.push({ id: orgId, success: true });
+      } catch (err) {
+        results.push({ id: orgId, success: false, error: 'Failed to update' });
+      }
+    }
+
+    const successCount = results.filter((r) => r.success).length;
+
+    return c.json({
+      success: true,
+      summary: {
+        total: body.orgIds.length,
+        succeeded: successCount,
+        failed: body.orgIds.length - successCount,
+        action: body.apiAccessEnabled ? 'enabled' : 'disabled',
+      },
+      results,
+    });
+  }
+);
+
+// Bulk update organization members
+adminRouter.post(
+  '/io.exprsn.admin.orgs.bulkUpdateMembers',
+  requirePermission(ADMIN_PERMISSIONS.USERS_EDIT),
+  async (c) => {
+    const body = await c.req.json<{
+      orgId: string;
+      members: Array<{
+        did: string;
+        action: 'add' | 'remove' | 'suspend' | 'activate';
+        role?: 'admin' | 'member';
+      }>;
+    }>();
+    const adminUser = c.get('adminUser');
+
+    if (!body.orgId || !body.members || !Array.isArray(body.members)) {
+      return c.json({ error: 'InvalidRequest', message: 'orgId and members array required' }, 400);
+    }
+
+    if (body.members.length > 100) {
+      return c.json({ error: 'InvalidRequest', message: 'Maximum 100 members per bulk operation' }, 400);
+    }
+
+    // Check org exists
+    const org = await db
+      .select()
+      .from(organizations)
+      .where(eq(organizations.id, body.orgId))
+      .limit(1);
+
+    if (!org[0]) {
+      return c.json({ error: 'NotFound', message: 'Organization not found' }, 404);
+    }
+
+    const results: { did: string; action: string; success: boolean; error?: string }[] = [];
+
+    for (const memberAction of body.members) {
+      try {
+        switch (memberAction.action) {
+          case 'add': {
+            // Check if user exists
+            const user = await db
+              .select()
+              .from(users)
+              .where(eq(users.did, memberAction.did))
+              .limit(1);
+
+            if (!user[0]) {
+              results.push({ did: memberAction.did, action: 'add', success: false, error: 'User not found' });
+              continue;
+            }
+
+            // Check if already a member
+            const existing = await db
+              .select()
+              .from(organizationMembers)
+              .where(
+                and(
+                  eq(organizationMembers.organizationId, body.orgId),
+                  eq(organizationMembers.userDid, memberAction.did)
+                )
+              )
+              .limit(1);
+
+            if (existing[0]) {
+              results.push({ did: memberAction.did, action: 'add', success: false, error: 'Already a member' });
+              continue;
+            }
+
+            const role = memberAction.role || 'member';
+            const permissions = role === 'admin' ? ['bulk_import', 'manage_members', 'edit_settings'] : [];
+
+            await db.insert(organizationMembers).values({
+              id: nanoid(),
+              organizationId: body.orgId,
+              userDid: memberAction.did,
+              role,
+              permissions,
+              invitedBy: adminUser.did,
+              joinedAt: new Date(),
+            });
+
+            await db
+              .update(organizations)
+              .set({ memberCount: sql`${organizations.memberCount} + 1`, updatedAt: new Date() })
+              .where(eq(organizations.id, body.orgId));
+
+            results.push({ did: memberAction.did, action: 'add', success: true });
+            break;
+          }
+
+          case 'remove': {
+            // Can't remove owner
+            if (org[0].ownerDid === memberAction.did) {
+              results.push({ did: memberAction.did, action: 'remove', success: false, error: 'Cannot remove owner' });
+              continue;
+            }
+
+            const deleted = await db
+              .delete(organizationMembers)
+              .where(
+                and(
+                  eq(organizationMembers.organizationId, body.orgId),
+                  eq(organizationMembers.userDid, memberAction.did)
+                )
+              );
+
+            await db
+              .update(organizations)
+              .set({ memberCount: sql`GREATEST(${organizations.memberCount} - 1, 0)`, updatedAt: new Date() })
+              .where(eq(organizations.id, body.orgId));
+
+            results.push({ did: memberAction.did, action: 'remove', success: true });
+            break;
+          }
+
+          case 'suspend': {
+            // Can't suspend owner
+            if (org[0].ownerDid === memberAction.did) {
+              results.push({ did: memberAction.did, action: 'suspend', success: false, error: 'Cannot suspend owner' });
+              continue;
+            }
+
+            await db
+              .update(organizationMembers)
+              .set({
+                status: 'suspended',
+                suspendedAt: new Date(),
+                suspendedBy: adminUser.did,
+                suspendedReason: 'Admin action',
+              })
+              .where(
+                and(
+                  eq(organizationMembers.organizationId, body.orgId),
+                  eq(organizationMembers.userDid, memberAction.did)
+                )
+              );
+
+            results.push({ did: memberAction.did, action: 'suspend', success: true });
+            break;
+          }
+
+          case 'activate': {
+            await db
+              .update(organizationMembers)
+              .set({
+                status: 'active',
+                suspendedAt: null,
+                suspendedBy: null,
+                suspendedReason: null,
+              })
+              .where(
+                and(
+                  eq(organizationMembers.organizationId, body.orgId),
+                  eq(organizationMembers.userDid, memberAction.did)
+                )
+              );
+
+            results.push({ did: memberAction.did, action: 'activate', success: true });
+            break;
+          }
+
+          default:
+            results.push({ did: memberAction.did, action: memberAction.action, success: false, error: 'Invalid action' });
+        }
+      } catch (err) {
+        results.push({ did: memberAction.did, action: memberAction.action, success: false, error: 'Operation failed' });
+      }
+    }
+
+    // Audit log
+    await db.insert(adminAuditLog).values({
+      id: nanoid(),
+      adminId: adminUser.id,
+      action: 'organization.bulkUpdateMembers',
+      targetType: 'organization',
+      targetId: body.orgId,
+      details: {
+        memberCount: body.members.length,
+        actions: body.members.map((m) => m.action),
+      },
+      createdAt: new Date(),
+    });
+
+    const successCount = results.filter((r) => r.success).length;
+
+    return c.json({
+      success: true,
+      summary: {
+        total: body.members.length,
+        succeeded: successCount,
+        failed: body.members.length - successCount,
+      },
+      results,
+    });
+  }
+);
+
+// Delete organization (admin)
+adminRouter.post(
+  '/io.exprsn.admin.orgs.delete',
+  requirePermission(ADMIN_PERMISSIONS.USERS_BAN),
+  async (c) => {
+    const body = await c.req.json<{
+      id: string;
+      reason: string;
+    }>();
+    const adminUser = c.get('adminUser');
+
+    if (!body.id || !body.reason) {
+      return c.json({ error: 'InvalidRequest', message: 'Organization ID and reason required' }, 400);
+    }
+
+    const org = await db
+      .select()
+      .from(organizations)
+      .where(eq(organizations.id, body.id))
+      .limit(1);
+
+    if (!org[0]) {
+      return c.json({ error: 'NotFound', message: 'Organization not found' }, 404);
+    }
+
+    // Audit log before deletion
+    await db.insert(adminAuditLog).values({
+      id: nanoid(),
+      adminId: adminUser.id,
+      action: 'organization.delete',
+      targetType: 'organization',
+      targetId: body.id,
+      details: { name: org[0].name, reason: body.reason },
+      createdAt: new Date(),
+    });
+
+    // Delete organization (cascade will handle members)
+    await db.delete(organizations).where(eq(organizations.id, body.id));
+
+    return c.json({ success: true });
+  }
+);
+
+// Bulk delete organizations
+adminRouter.post(
+  '/io.exprsn.admin.orgs.bulkDelete',
+  requirePermission(ADMIN_PERMISSIONS.USERS_BAN),
+  async (c) => {
+    const body = await c.req.json<{
+      orgIds: string[];
+      reason: string;
+    }>();
+    const adminUser = c.get('adminUser');
+
+    if (!body.orgIds || !Array.isArray(body.orgIds) || body.orgIds.length === 0) {
+      return c.json({ error: 'InvalidRequest', message: 'orgIds array is required' }, 400);
+    }
+
+    if (!body.reason) {
+      return c.json({ error: 'InvalidRequest', message: 'reason is required' }, 400);
+    }
+
+    if (body.orgIds.length > 50) {
+      return c.json({ error: 'InvalidRequest', message: 'Maximum 50 organizations per bulk delete' }, 400);
+    }
+
+    const results: { id: string; success: boolean; error?: string }[] = [];
+
+    for (const orgId of body.orgIds) {
+      try {
+        const org = await db
+          .select({ name: organizations.name })
+          .from(organizations)
+          .where(eq(organizations.id, orgId))
+          .limit(1);
+
+        if (!org[0]) {
+          results.push({ id: orgId, success: false, error: 'Organization not found' });
+          continue;
+        }
+
+        // Audit log
+        await db.insert(adminAuditLog).values({
+          id: nanoid(),
+          adminId: adminUser.id,
+          action: 'organization.bulkDelete',
+          targetType: 'organization',
+          targetId: orgId,
+          details: { name: org[0].name, reason: body.reason, bulkOperation: true },
+          createdAt: new Date(),
+        });
+
+        // Delete organization
+        await db.delete(organizations).where(eq(organizations.id, orgId));
+
+        results.push({ id: orgId, success: true });
+      } catch (err) {
+        results.push({ id: orgId, success: false, error: 'Failed to delete' });
+      }
+    }
+
+    const successCount = results.filter((r) => r.success).length;
+
+    return c.json({
+      success: true,
+      summary: {
+        total: body.orgIds.length,
+        succeeded: successCount,
+        failed: body.orgIds.length - successCount,
+      },
+      results,
+    });
   }
 );
 
@@ -2446,6 +3656,718 @@ adminRouter.get(
         ...actor,
         activeSessions: sessionCount?.count || 0,
       },
+    });
+  }
+);
+
+// ============================================
+// Export Functionality
+// ============================================
+
+// Export users
+adminRouter.get(
+  '/io.exprsn.admin.export.users',
+  requirePermission(ADMIN_PERMISSIONS.USERS_VIEW),
+  async (c) => {
+    const format = (c.req.query('format') || 'csv') as ExportFormat;
+    const q = c.req.query('q');
+    const verified = c.req.query('verified');
+    const dateFrom = c.req.query('dateFrom');
+    const dateTo = c.req.query('dateTo');
+    const adminUser = c.get('adminUser');
+
+    if (!['csv', 'xlsx', 'sqlite'].includes(format)) {
+      return c.json({ error: 'InvalidRequest', message: 'Invalid format. Use csv, xlsx, or sqlite' }, 400);
+    }
+
+    try {
+      const result = await exportUsers({
+        format,
+        filters: { q, verified },
+        dateRange: {
+          from: dateFrom ? new Date(dateFrom) : undefined,
+          to: dateTo ? new Date(dateTo) : undefined,
+        },
+      });
+
+      // Audit log
+      await db.insert(adminAuditLog).values({
+        id: nanoid(),
+        adminId: adminUser.id,
+        action: 'export.users',
+        targetType: 'export',
+        targetId: result.filename,
+        details: { format, rowCount: result.rowCount, filters: { q, verified } },
+        createdAt: new Date(),
+      });
+
+      return new Response(result.buffer, {
+        headers: {
+          'Content-Type': result.mimeType,
+          'Content-Disposition': `attachment; filename="${result.filename}"`,
+          'X-Row-Count': String(result.rowCount),
+        },
+      });
+    } catch (err) {
+      console.error('Export error:', err);
+      return c.json({ error: 'ExportFailed', message: 'Failed to generate export' }, 500);
+    }
+  }
+);
+
+// Export reports
+adminRouter.get(
+  '/io.exprsn.admin.export.reports',
+  requirePermission(ADMIN_PERMISSIONS.REPORTS_VIEW),
+  async (c) => {
+    const format = (c.req.query('format') || 'csv') as ExportFormat;
+    const status = c.req.query('status');
+    const contentType = c.req.query('contentType');
+    const dateFrom = c.req.query('dateFrom');
+    const dateTo = c.req.query('dateTo');
+    const adminUser = c.get('adminUser');
+
+    if (!['csv', 'xlsx', 'sqlite'].includes(format)) {
+      return c.json({ error: 'InvalidRequest', message: 'Invalid format' }, 400);
+    }
+
+    try {
+      const result = await exportReports({
+        format,
+        filters: { status, contentType },
+        dateRange: {
+          from: dateFrom ? new Date(dateFrom) : undefined,
+          to: dateTo ? new Date(dateTo) : undefined,
+        },
+      });
+
+      await db.insert(adminAuditLog).values({
+        id: nanoid(),
+        adminId: adminUser.id,
+        action: 'export.reports',
+        targetType: 'export',
+        targetId: result.filename,
+        details: { format, rowCount: result.rowCount },
+        createdAt: new Date(),
+      });
+
+      return new Response(result.buffer, {
+        headers: {
+          'Content-Type': result.mimeType,
+          'Content-Disposition': `attachment; filename="${result.filename}"`,
+          'X-Row-Count': String(result.rowCount),
+        },
+      });
+    } catch (err) {
+      console.error('Export error:', err);
+      return c.json({ error: 'ExportFailed', message: 'Failed to generate export' }, 500);
+    }
+  }
+);
+
+// Export audit logs
+adminRouter.get(
+  '/io.exprsn.admin.export.auditLogs',
+  requirePermission(ADMIN_PERMISSIONS.ADMINS_MANAGE),
+  async (c) => {
+    const format = (c.req.query('format') || 'csv') as ExportFormat;
+    const adminId = c.req.query('adminId');
+    const action = c.req.query('action');
+    const dateFrom = c.req.query('dateFrom');
+    const dateTo = c.req.query('dateTo');
+    const adminUser = c.get('adminUser');
+
+    if (!['csv', 'xlsx', 'sqlite'].includes(format)) {
+      return c.json({ error: 'InvalidRequest', message: 'Invalid format' }, 400);
+    }
+
+    try {
+      const result = await exportAuditLogs({
+        format,
+        filters: { adminId, action },
+        dateRange: {
+          from: dateFrom ? new Date(dateFrom) : undefined,
+          to: dateTo ? new Date(dateTo) : undefined,
+        },
+      });
+
+      await db.insert(adminAuditLog).values({
+        id: nanoid(),
+        adminId: adminUser.id,
+        action: 'export.auditLogs',
+        targetType: 'export',
+        targetId: result.filename,
+        details: { format, rowCount: result.rowCount },
+        createdAt: new Date(),
+      });
+
+      return new Response(result.buffer, {
+        headers: {
+          'Content-Type': result.mimeType,
+          'Content-Disposition': `attachment; filename="${result.filename}"`,
+          'X-Row-Count': String(result.rowCount),
+        },
+      });
+    } catch (err) {
+      console.error('Export error:', err);
+      return c.json({ error: 'ExportFailed', message: 'Failed to generate export' }, 500);
+    }
+  }
+);
+
+// Export analytics
+adminRouter.get(
+  '/io.exprsn.admin.export.analytics',
+  requirePermission(ADMIN_PERMISSIONS.ANALYTICS_VIEW),
+  async (c) => {
+    const format = (c.req.query('format') || 'csv') as ExportFormat;
+    const period = c.req.query('period');
+    const dateFrom = c.req.query('dateFrom');
+    const dateTo = c.req.query('dateTo');
+    const adminUser = c.get('adminUser');
+
+    if (!['csv', 'xlsx', 'sqlite'].includes(format)) {
+      return c.json({ error: 'InvalidRequest', message: 'Invalid format' }, 400);
+    }
+
+    try {
+      const result = await exportAnalytics({
+        format,
+        filters: { period },
+        dateRange: {
+          from: dateFrom ? new Date(dateFrom) : undefined,
+          to: dateTo ? new Date(dateTo) : undefined,
+        },
+      });
+
+      await db.insert(adminAuditLog).values({
+        id: nanoid(),
+        adminId: adminUser.id,
+        action: 'export.analytics',
+        targetType: 'export',
+        targetId: result.filename,
+        details: { format, rowCount: result.rowCount },
+        createdAt: new Date(),
+      });
+
+      return new Response(result.buffer, {
+        headers: {
+          'Content-Type': result.mimeType,
+          'Content-Disposition': `attachment; filename="${result.filename}"`,
+          'X-Row-Count': String(result.rowCount),
+        },
+      });
+    } catch (err) {
+      console.error('Export error:', err);
+      return c.json({ error: 'ExportFailed', message: 'Failed to generate export' }, 500);
+    }
+  }
+);
+
+// Export payments
+adminRouter.get(
+  '/io.exprsn.admin.export.payments',
+  requirePermission(ADMIN_PERMISSIONS.ANALYTICS_VIEW),
+  async (c) => {
+    const format = (c.req.query('format') || 'csv') as ExportFormat;
+    const status = c.req.query('status');
+    const gateway = c.req.query('gateway');
+    const dateFrom = c.req.query('dateFrom');
+    const dateTo = c.req.query('dateTo');
+    const adminUser = c.get('adminUser');
+
+    if (!['csv', 'xlsx', 'sqlite'].includes(format)) {
+      return c.json({ error: 'InvalidRequest', message: 'Invalid format' }, 400);
+    }
+
+    try {
+      const result = await exportPayments({
+        format,
+        filters: { status, gateway },
+        dateRange: {
+          from: dateFrom ? new Date(dateFrom) : undefined,
+          to: dateTo ? new Date(dateTo) : undefined,
+        },
+      });
+
+      await db.insert(adminAuditLog).values({
+        id: nanoid(),
+        adminId: adminUser.id,
+        action: 'export.payments',
+        targetType: 'export',
+        targetId: result.filename,
+        details: { format, rowCount: result.rowCount },
+        createdAt: new Date(),
+      });
+
+      return new Response(result.buffer, {
+        headers: {
+          'Content-Type': result.mimeType,
+          'Content-Disposition': `attachment; filename="${result.filename}"`,
+          'X-Row-Count': String(result.rowCount),
+        },
+      });
+    } catch (err) {
+      console.error('Export error:', err);
+      return c.json({ error: 'ExportFailed', message: 'Failed to generate export' }, 500);
+    }
+  }
+);
+
+// Export render jobs
+adminRouter.get(
+  '/io.exprsn.admin.export.renderJobs',
+  requirePermission(ADMIN_PERMISSIONS.ANALYTICS_VIEW),
+  async (c) => {
+    const format = (c.req.query('format') || 'csv') as ExportFormat;
+    const status = c.req.query('status');
+    const userId = c.req.query('userId');
+    const dateFrom = c.req.query('dateFrom');
+    const dateTo = c.req.query('dateTo');
+    const adminUser = c.get('adminUser');
+
+    if (!['csv', 'xlsx', 'sqlite'].includes(format)) {
+      return c.json({ error: 'InvalidRequest', message: 'Invalid format' }, 400);
+    }
+
+    try {
+      const result = await exportRenderJobs({
+        format,
+        filters: { status, userId },
+        dateRange: {
+          from: dateFrom ? new Date(dateFrom) : undefined,
+          to: dateTo ? new Date(dateTo) : undefined,
+        },
+      });
+
+      await db.insert(adminAuditLog).values({
+        id: nanoid(),
+        adminId: adminUser.id,
+        action: 'export.renderJobs',
+        targetType: 'export',
+        targetId: result.filename,
+        details: { format, rowCount: result.rowCount },
+        createdAt: new Date(),
+      });
+
+      return new Response(result.buffer, {
+        headers: {
+          'Content-Type': result.mimeType,
+          'Content-Disposition': `attachment; filename="${result.filename}"`,
+          'X-Row-Count': String(result.rowCount),
+        },
+      });
+    } catch (err) {
+      console.error('Export error:', err);
+      return c.json({ error: 'ExportFailed', message: 'Failed to generate export' }, 500);
+    }
+  }
+);
+
+// Export organizations
+adminRouter.get(
+  '/io.exprsn.admin.export.organizations',
+  requirePermission(ADMIN_PERMISSIONS.USERS_VIEW),
+  async (c) => {
+    const format = (c.req.query('format') || 'csv') as ExportFormat;
+    const type = c.req.query('type');
+    const verified = c.req.query('verified');
+    const dateFrom = c.req.query('dateFrom');
+    const dateTo = c.req.query('dateTo');
+    const adminUser = c.get('adminUser');
+
+    if (!['csv', 'xlsx', 'sqlite'].includes(format)) {
+      return c.json({ error: 'InvalidRequest', message: 'Invalid format' }, 400);
+    }
+
+    try {
+      const result = await exportOrganizations({
+        format,
+        filters: { type, verified },
+        dateRange: {
+          from: dateFrom ? new Date(dateFrom) : undefined,
+          to: dateTo ? new Date(dateTo) : undefined,
+        },
+      });
+
+      await db.insert(adminAuditLog).values({
+        id: nanoid(),
+        adminId: adminUser.id,
+        action: 'export.organizations',
+        targetType: 'export',
+        targetId: result.filename,
+        details: { format, rowCount: result.rowCount },
+        createdAt: new Date(),
+      });
+
+      return new Response(result.buffer, {
+        headers: {
+          'Content-Type': result.mimeType,
+          'Content-Disposition': `attachment; filename="${result.filename}"`,
+          'X-Row-Count': String(result.rowCount),
+        },
+      });
+    } catch (err) {
+      console.error('Export error:', err);
+      return c.json({ error: 'ExportFailed', message: 'Failed to generate export' }, 500);
+    }
+  }
+);
+
+// Export sanctions
+adminRouter.get(
+  '/io.exprsn.admin.export.sanctions',
+  requirePermission(ADMIN_PERMISSIONS.USERS_VIEW),
+  async (c) => {
+    const format = (c.req.query('format') || 'csv') as ExportFormat;
+    const sanctionType = c.req.query('sanctionType');
+    const userDid = c.req.query('userDid');
+    const dateFrom = c.req.query('dateFrom');
+    const dateTo = c.req.query('dateTo');
+    const adminUser = c.get('adminUser');
+
+    if (!['csv', 'xlsx', 'sqlite'].includes(format)) {
+      return c.json({ error: 'InvalidRequest', message: 'Invalid format' }, 400);
+    }
+
+    try {
+      const result = await exportSanctions({
+        format,
+        filters: { sanctionType, userDid },
+        dateRange: {
+          from: dateFrom ? new Date(dateFrom) : undefined,
+          to: dateTo ? new Date(dateTo) : undefined,
+        },
+      });
+
+      await db.insert(adminAuditLog).values({
+        id: nanoid(),
+        adminId: adminUser.id,
+        action: 'export.sanctions',
+        targetType: 'export',
+        targetId: result.filename,
+        details: { format, rowCount: result.rowCount },
+        createdAt: new Date(),
+      });
+
+      return new Response(result.buffer, {
+        headers: {
+          'Content-Type': result.mimeType,
+          'Content-Disposition': `attachment; filename="${result.filename}"`,
+          'X-Row-Count': String(result.rowCount),
+        },
+      });
+    } catch (err) {
+      console.error('Export error:', err);
+      return c.json({ error: 'ExportFailed', message: 'Failed to generate export' }, 500);
+    }
+  }
+);
+
+// ============================================
+// Admin Utility Routes
+// ============================================
+
+// System diagnostics - health check and stats
+adminRouter.get(
+  '/io.exprsn.admin.system.diagnostics',
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_VIEW),
+  async (c) => {
+    const startTime = Date.now();
+
+    // Check database connectivity
+    let dbStatus: 'healthy' | 'degraded' | 'down' = 'healthy';
+    let dbLatency = 0;
+    try {
+      const dbStart = Date.now();
+      await db.execute(sql`SELECT 1`);
+      dbLatency = Date.now() - dbStart;
+      if (dbLatency > 100) dbStatus = 'degraded';
+    } catch {
+      dbStatus = 'down';
+    }
+
+    // Check Redis connectivity (if available)
+    let redisStatus: 'healthy' | 'degraded' | 'down' | 'not_configured' = 'not_configured';
+    let redisLatency = 0;
+    if (process.env.REDIS_URL) {
+      try {
+        const { Redis } = await import('ioredis');
+        const redis = new Redis(process.env.REDIS_URL);
+        const redisStart = Date.now();
+        await redis.ping();
+        redisLatency = Date.now() - redisStart;
+        redisStatus = redisLatency > 50 ? 'degraded' : 'healthy';
+        await redis.quit();
+      } catch {
+        redisStatus = 'down';
+      }
+    }
+
+    // Get system stats
+    const [
+      [userCount],
+      [videoCount],
+      [pendingReports],
+      [activeSessions],
+    ] = await Promise.all([
+      db.select({ count: count() }).from(users),
+      db.select({ count: count() }).from(videos),
+      db.select({ count: count() }).from(contentReports).where(eq(contentReports.status, 'pending')),
+      db.select({ count: count() }).from(sessions).where(sql`${sessions.expiresAt} > NOW()`),
+    ]);
+
+    return c.json({
+      status: dbStatus === 'healthy' && (redisStatus === 'healthy' || redisStatus === 'not_configured') ? 'healthy' : 'degraded',
+      timestamp: new Date().toISOString(),
+      latency: Date.now() - startTime,
+      services: {
+        database: { status: dbStatus, latency: dbLatency },
+        redis: { status: redisStatus, latency: redisLatency },
+        api: { status: 'healthy', uptime: process.uptime() },
+      },
+      stats: {
+        totalUsers: userCount?.count || 0,
+        totalVideos: videoCount?.count || 0,
+        pendingReports: pendingReports?.count || 0,
+        activeSessions: activeSessions?.count || 0,
+      },
+      environment: {
+        nodeVersion: process.version,
+        platform: process.platform,
+        memory: {
+          used: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+          total: Math.round(process.memoryUsage().heapTotal / 1024 / 1024),
+        },
+      },
+    });
+  }
+);
+
+// Admin activity feed - recent actions by all admins
+adminRouter.get(
+  '/io.exprsn.admin.activity.feed',
+  requirePermission(ADMIN_PERMISSIONS.ANALYTICS_VIEW),
+  async (c) => {
+    const limit = Math.min(parseInt(c.req.query('limit') || '50'), 100);
+    const offset = parseInt(c.req.query('offset') || '0');
+    const adminDid = c.req.query('adminDid');
+    const actionType = c.req.query('action');
+
+    let query = db
+      .select({
+        id: adminAuditLog.id,
+        action: adminAuditLog.action,
+        targetType: adminAuditLog.targetType,
+        targetId: adminAuditLog.targetId,
+        details: adminAuditLog.details,
+        createdAt: adminAuditLog.createdAt,
+        admin: {
+          id: adminUsers.id,
+          userDid: adminUsers.userDid,
+          role: adminUsers.role,
+        },
+        user: {
+          handle: users.handle,
+          displayName: users.displayName,
+          avatar: users.avatar,
+        },
+      })
+      .from(adminAuditLog)
+      .innerJoin(adminUsers, eq(adminAuditLog.adminId, adminUsers.id))
+      .leftJoin(users, eq(adminUsers.userDid, users.did))
+      .orderBy(desc(adminAuditLog.createdAt))
+      .limit(limit)
+      .offset(offset);
+
+    // Apply filters
+    const conditions = [];
+    if (adminDid) {
+      conditions.push(eq(adminUsers.userDid, adminDid));
+    }
+    if (actionType) {
+      conditions.push(sql`${adminAuditLog.action} LIKE ${actionType + '%'}`);
+    }
+
+    if (conditions.length > 0) {
+      query = query.where(and(...conditions)) as typeof query;
+    }
+
+    const activities = await query;
+
+    // Group by time periods for the UI
+    const grouped = activities.reduce((acc, activity) => {
+      const date = new Date(activity.createdAt).toDateString();
+      if (!acc[date]) acc[date] = [];
+      acc[date].push({
+        id: activity.id,
+        action: activity.action,
+        targetType: activity.targetType,
+        targetId: activity.targetId,
+        details: activity.details,
+        createdAt: activity.createdAt.toISOString(),
+        admin: {
+          did: activity.admin.userDid,
+          role: activity.admin.role,
+          handle: activity.user?.handle,
+          displayName: activity.user?.displayName,
+          avatar: activity.user?.avatar,
+        },
+      });
+      return acc;
+    }, {} as Record<string, any[]>);
+
+    return c.json({
+      activities: Object.entries(grouped).map(([date, items]) => ({ date, items })),
+      pagination: { limit, offset, hasMore: activities.length === limit },
+    });
+  }
+);
+
+// Quick stats - lightweight endpoint for frequent polling
+adminRouter.get(
+  '/io.exprsn.admin.quickStats',
+  requirePermission(ADMIN_PERMISSIONS.ANALYTICS_VIEW),
+  async (c) => {
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+    const [
+      [pendingReports],
+      [newUsersToday],
+      [activeUsersNow],
+    ] = await Promise.all([
+      db.select({ count: count() }).from(contentReports).where(eq(contentReports.status, 'pending')),
+      db.select({ count: count() }).from(users).where(gte(users.createdAt, today)),
+      db.select({ count: count() }).from(sessions).where(
+        and(
+          sql`${sessions.expiresAt} > NOW()`,
+          gte(sessions.createdAt, new Date(now.getTime() - 15 * 60 * 1000)) // Active in last 15 min
+        )
+      ),
+    ]);
+
+    return c.json({
+      pendingReports: pendingReports?.count || 0,
+      newUsersToday: newUsersToday?.count || 0,
+      activeUsersNow: activeUsersNow?.count || 0,
+      timestamp: now.toISOString(),
+    });
+  }
+);
+
+// Bulk verify users (for verified badge management)
+adminRouter.post(
+  '/io.exprsn.admin.users.bulkVerify',
+  requirePermission(ADMIN_PERMISSIONS.USERS_EDIT),
+  async (c) => {
+    const body = await c.req.json<{
+      userDids: string[];
+      verified: boolean;
+      reason?: string;
+    }>();
+    const adminUser = c.get('adminUser');
+
+    if (!body.userDids || !Array.isArray(body.userDids) || body.userDids.length === 0) {
+      return c.json({ error: 'InvalidRequest', message: 'userDids array is required' }, 400);
+    }
+
+    if (body.userDids.length > 100) {
+      return c.json({ error: 'InvalidRequest', message: 'Maximum 100 users per bulk operation' }, 400);
+    }
+
+    const results: { did: string; success: boolean; error?: string }[] = [];
+
+    for (const userDid of body.userDids) {
+      try {
+        await db
+          .update(users)
+          .set({
+            verified: body.verified,
+            verifiedAt: body.verified ? new Date() : null,
+          })
+          .where(eq(users.did, userDid));
+
+        // Audit log
+        await db.insert(adminAuditLog).values({
+          id: nanoid(),
+          adminId: adminUser.id,
+          action: body.verified ? 'user.verify' : 'user.unverify',
+          targetType: 'user',
+          targetId: userDid,
+          details: { reason: body.reason, bulkOperation: true },
+          createdAt: new Date(),
+        });
+
+        results.push({ did: userDid, success: true });
+      } catch (err) {
+        results.push({ did: userDid, success: false, error: 'Failed to update user' });
+      }
+    }
+
+    const successCount = results.filter((r) => r.success).length;
+
+    return c.json({
+      success: results.every((r) => r.success),
+      summary: {
+        total: body.userDids.length,
+        succeeded: successCount,
+        failed: body.userDids.length - successCount,
+      },
+      results,
+    });
+  }
+);
+
+// Search users with fuzzy matching
+adminRouter.get(
+  '/io.exprsn.admin.users.search',
+  requirePermission(ADMIN_PERMISSIONS.USERS_VIEW),
+  async (c) => {
+    const q = c.req.query('q');
+    const limit = Math.min(parseInt(c.req.query('limit') || '20'), 50);
+
+    if (!q || q.length < 2) {
+      return c.json({ error: 'InvalidRequest', message: 'Query must be at least 2 characters' }, 400);
+    }
+
+    const searchPattern = `%${q}%`;
+
+    const results = await db
+      .select({
+        did: users.did,
+        handle: users.handle,
+        displayName: users.displayName,
+        avatar: users.avatar,
+        verified: users.verified,
+        createdAt: users.createdAt,
+      })
+      .from(users)
+      .where(
+        or(
+          ilike(users.handle, searchPattern),
+          ilike(users.displayName, searchPattern),
+          ilike(users.did, searchPattern)
+        )
+      )
+      .orderBy(
+        // Prioritize exact handle matches
+        sql`CASE WHEN ${users.handle} = ${q} THEN 0
+            WHEN ${users.handle} ILIKE ${q + '%'} THEN 1
+            ELSE 2 END`,
+        desc(users.createdAt)
+      )
+      .limit(limit);
+
+    return c.json({
+      users: results.map((u) => ({
+        did: u.did,
+        handle: u.handle,
+        displayName: u.displayName,
+        avatar: u.avatar,
+        verified: u.verified,
+        createdAt: u.createdAt.toISOString(),
+      })),
     });
   }
 );
