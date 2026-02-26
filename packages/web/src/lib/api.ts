@@ -330,10 +330,71 @@ class ApiClient {
     });
   }
 
-  async trackView(videoUri: string): Promise<void> {
+  /**
+   * Track video view with enhanced engagement signals for FYP personalization
+   */
+  async trackView(
+    videoUri: string,
+    options?: {
+      watchDuration?: number;
+      completed?: boolean;
+      loopCount?: number;
+      sessionPosition?: number;
+      engagementActions?: string[];
+      milestone?: '25%' | '50%' | '75%' | '100%';
+      videoDuration?: number;
+    }
+  ): Promise<void> {
     return this.fetch('/xrpc/io.exprsn.video.trackView', {
       method: 'POST',
-      body: JSON.stringify({ videoUri }),
+      body: JSON.stringify({ videoUri, ...options }),
+    });
+  }
+
+  /**
+   * Submit "not interested" feedback for a video, author, tag, or sound
+   */
+  async notInterested(options: {
+    videoUri?: string;
+    authorDid?: string;
+    tag?: string;
+    soundId?: string;
+    feedbackType?: 'not_interested' | 'see_less' | 'hide_author' | 'report';
+    reason?: 'repetitive' | 'not_relevant' | 'offensive' | 'spam' | 'other';
+    hideAuthor?: boolean;
+  }): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.video.notInterested', {
+      method: 'POST',
+      body: JSON.stringify(options),
+    });
+  }
+
+  /**
+   * Remove feedback for a video, author, tag, or sound
+   */
+  async removeFeedback(options: {
+    targetType: 'video' | 'author' | 'tag' | 'sound';
+    targetId: string;
+    feedbackType?: string;
+  }): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.video.removeFeedback', {
+      method: 'POST',
+      body: JSON.stringify(options),
+    });
+  }
+
+  /**
+   * Send a tip to a creator
+   */
+  async tip(options: {
+    recipientDid: string;
+    amount: number; // cents
+    message?: string;
+    videoUri?: string;
+  }): Promise<{ success: boolean; transactionId: string }> {
+    return this.fetch('/xrpc/io.exprsn.payments.tip', {
+      method: 'POST',
+      body: JSON.stringify(options),
     });
   }
 
@@ -2045,11 +2106,6 @@ class ApiClient {
     return this.fetch(`/xrpc/io.exprsn.video.getSounds?${params}`);
   }
 
-  async getSound(soundId: string): Promise<{ sound: SoundView }> {
-    const params = new URLSearchParams({ id: soundId });
-    return this.fetch(`/xrpc/io.exprsn.video.getSound?${params}`);
-  }
-
   async getVideosBySound(
     soundId: string,
     options: { cursor?: string; limit?: number } = {}
@@ -2133,7 +2189,7 @@ class ApiClient {
   }
 
   // Get reactions for messages
-  async getReactions(messageIds: string[]): Promise<{
+  async getMessageReactions(messageIds: string[]): Promise<{
     reactions: Record<string, MessageReaction[]>;
   }> {
     const params = new URLSearchParams({ messageIds: messageIds.join(',') });
@@ -2430,6 +2486,168 @@ class ApiClient {
     });
   }
 
+  // User's Organizations (with membership info)
+  async getUserOrganizations(): Promise<{ organizations: OrganizationWithMembershipView[] }> {
+    return this.fetch('/xrpc/io.exprsn.org.getUserOrganizations');
+  }
+
+  async leaveOrganization(orgId: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.org.members.leave', {
+      method: 'POST',
+      body: JSON.stringify({ organizationId: orgId }),
+    });
+  }
+
+  // Public Organization Profiles
+  async getOrgProfile(handle: string): Promise<{ organization: OrganizationPublicProfileView }> {
+    const params = new URLSearchParams({ handle });
+    return this.fetch(`/xrpc/io.exprsn.org.getProfile?${params}`);
+  }
+
+  async followOrg(organizationId: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.org.follow', {
+      method: 'POST',
+      body: JSON.stringify({ organizationId }),
+    });
+  }
+
+  async unfollowOrg(organizationId: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.org.unfollow', {
+      method: 'POST',
+      body: JSON.stringify({ organizationId }),
+    });
+  }
+
+  async getOrgVideos(
+    organizationId: string,
+    options: { cursor?: string; limit?: number } = {}
+  ): Promise<{ videos: VideoView[]; cursor?: string }> {
+    const { cursor, limit = 20 } = options;
+    const params = new URLSearchParams({ organizationId, limit: String(limit) });
+    if (cursor) params.set('cursor', cursor);
+    return this.fetch(`/xrpc/io.exprsn.org.getVideos?${params}`);
+  }
+
+  // Role Management
+  async getOrgRoles(organizationId: string): Promise<{ roles: OrganizationRoleView[] }> {
+    const params = new URLSearchParams({ organizationId });
+    return this.fetch(`/xrpc/io.exprsn.org.roles.list?${params}`);
+  }
+
+  async createOrgRole(data: {
+    organizationId: string;
+    name: string;
+    displayName: string;
+    description?: string;
+    permissions: string[];
+    color?: string;
+  }): Promise<{ id: string; success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.org.roles.create', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async updateOrgRole(
+    roleId: string,
+    data: {
+      displayName?: string;
+      description?: string;
+      permissions?: string[];
+      color?: string;
+    }
+  ): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.org.roles.update', {
+      method: 'POST',
+      body: JSON.stringify({ roleId, ...data }),
+    });
+  }
+
+  async deleteOrgRole(
+    roleId: string,
+    reassignToRoleId?: string
+  ): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.org.roles.delete', {
+      method: 'POST',
+      body: JSON.stringify({ roleId, reassignToRoleId }),
+    });
+  }
+
+  // Invite Management
+  async createOrgInvite(data: {
+    organizationId: string;
+    email?: string;
+    did?: string;
+    roleId?: string;
+    roleName?: string;
+    message?: string;
+  }): Promise<{ id: string; token: string; expiresAt: string }> {
+    return this.fetch('/xrpc/io.exprsn.org.invites.create', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async getOrgInvites(organizationId: string): Promise<{ invites: OrganizationInviteView[] }> {
+    const params = new URLSearchParams({ organizationId });
+    return this.fetch(`/xrpc/io.exprsn.org.invites.list?${params}`);
+  }
+
+  async revokeOrgInvite(inviteId: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.org.invites.revoke', {
+      method: 'POST',
+      body: JSON.stringify({ inviteId }),
+    });
+  }
+
+  async acceptOrgInvite(token: string): Promise<{ success: boolean; organizationId: string }> {
+    return this.fetch('/xrpc/io.exprsn.org.invites.accept', {
+      method: 'POST',
+      body: JSON.stringify({ token }),
+    });
+  }
+
+  // Content Moderation Queue
+  async submitOrgContent(data: {
+    organizationId: string;
+    videoUri: string;
+    caption?: string;
+  }): Promise<{ queued?: boolean; published?: boolean; queueId?: string }> {
+    return this.fetch('/xrpc/io.exprsn.org.content.submit', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async getOrgContentQueue(
+    organizationId: string,
+    options: { status?: string; limit?: number } = {}
+  ): Promise<{ items: ContentQueueItemView[] }> {
+    const { status = 'pending', limit = 20 } = options;
+    const params = new URLSearchParams({ organizationId, status, limit: String(limit) });
+    return this.fetch(`/xrpc/io.exprsn.org.content.queue?${params}`);
+  }
+
+  async reviewOrgContent(data: {
+    queueId: string;
+    action: 'approve' | 'reject' | 'request_revision';
+    notes?: string;
+  }): Promise<{ success: boolean; status: string }> {
+    return this.fetch('/xrpc/io.exprsn.org.content.review', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  // Organization Analytics
+  async getOrgAnalytics(
+    organizationId: string,
+    period: '7d' | '30d' | '90d' = '7d'
+  ): Promise<OrganizationAnalyticsView> {
+    const params = new URLSearchParams({ organizationId, period });
+    return this.fetch(`/xrpc/io.exprsn.org.analytics.overview?${params}`);
+  }
+
   // Blocked Words Management
   async getOrganizationBlockedWords(
     orgId: string
@@ -2529,13 +2747,97 @@ class ApiClient {
     });
   }
 
-  async deleteOrganization(
-    orgId: string,
-    confirmation: string
-  ): Promise<{ success: boolean }> {
+  async deleteOrganization(data: {
+    organizationId: string;
+    confirmName: string;
+    childAction?: 'orphan' | 'reparent' | 'cascade';
+    newParentId?: string;
+  }): Promise<{ success: boolean; orphanedCount?: number; reparentedCount?: number; deletedCount?: number }> {
     return this.fetch('/xrpc/io.exprsn.org.delete', {
       method: 'POST',
-      body: JSON.stringify({ organizationId: orgId, confirmation }),
+      body: JSON.stringify(data),
+    });
+  }
+
+  // Organization Hierarchy
+  async getOrganizationChildren(
+    orgId: string,
+    options: { recursive?: boolean; cursor?: string; limit?: number } = {}
+  ): Promise<{ organizations: OrganizationView[]; cursor?: string }> {
+    const { recursive = false, cursor, limit = 50 } = options;
+    const params = new URLSearchParams({
+      organizationId: orgId,
+      limit: String(limit),
+      recursive: String(recursive),
+    });
+    if (cursor) params.set('cursor', cursor);
+    return this.fetch(`/xrpc/io.exprsn.org.getChildren?${params}`);
+  }
+
+  async getOrganizationAncestors(orgId: string): Promise<{ ancestors: OrganizationView[] }> {
+    const params = new URLSearchParams({ organizationId: orgId });
+    return this.fetch(`/xrpc/io.exprsn.org.getAncestors?${params}`);
+  }
+
+  async setOrganizationParent(
+    orgId: string,
+    parentId: string | null
+  ): Promise<{ organization: OrganizationView }> {
+    return this.fetch('/xrpc/io.exprsn.org.setParent', {
+      method: 'POST',
+      body: JSON.stringify({ organizationId: orgId, parentOrganizationId: parentId }),
+    });
+  }
+
+  async setOrganizationDomain(
+    orgId: string,
+    domainId: string | null
+  ): Promise<{ organization: OrganizationView }> {
+    return this.fetch('/xrpc/io.exprsn.org.setDomain', {
+      method: 'POST',
+      body: JSON.stringify({ organizationId: orgId, domainId }),
+    });
+  }
+
+  // Admin Organization Management
+  async adminCreateOrganization(data: {
+    name: string;
+    type: 'team' | 'enterprise' | 'nonprofit' | 'business';
+    domainId?: string;
+    parentOrganizationId?: string;
+    ownerDid?: string;
+    website?: string;
+  }): Promise<{ organization: OrganizationView }> {
+    return this.fetch('/xrpc/io.exprsn.admin.org.create', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async adminListOrganizations(options?: {
+    domainId?: string;
+    parentId?: string;
+    type?: 'team' | 'enterprise' | 'nonprofit' | 'business';
+    cursor?: string;
+    limit?: number;
+  }): Promise<{ organizations: OrganizationView[]; cursor?: string }> {
+    const params = new URLSearchParams();
+    if (options?.domainId) params.set('domainId', options.domainId);
+    if (options?.parentId) params.set('parentId', options.parentId);
+    if (options?.type) params.set('type', options.type);
+    if (options?.cursor) params.set('cursor', options.cursor);
+    if (options?.limit) params.set('limit', String(options.limit));
+    return this.fetch(`/xrpc/io.exprsn.admin.org.list?${params}`);
+  }
+
+  async adminDeleteOrganization(data: {
+    organizationId: string;
+    childAction?: 'orphan' | 'reparent' | 'cascade';
+    newParentId?: string;
+  }): Promise<{ success: boolean; orphanedCount?: number; reparentedCount?: number; deletedCount?: number }> {
+    return this.fetch('/xrpc/io.exprsn.admin.org.delete', {
+      method: 'POST',
+      body: JSON.stringify(data),
     });
   }
 
@@ -2825,6 +3127,285 @@ class ApiClient {
     return this.fetch('/xrpc/io.exprsn.admin.cluster.activate', {
       method: 'POST',
       body: JSON.stringify({ clusterId }),
+    });
+  }
+
+  // =============================================
+  // Domain Management API
+  // =============================================
+
+  async adminDomainsList(options?: {
+    q?: string;
+    type?: 'hosted' | 'federated';
+    status?: string;
+    limit?: number;
+    cursor?: string;
+  }): Promise<{
+    domains: Array<{
+      id: string;
+      name: string;
+      domain: string;
+      type: 'hosted' | 'federated';
+      status: string;
+      userCount: number;
+      groupCount: number;
+      certificateCount: number;
+      verifiedAt?: string;
+      createdAt: string;
+    }>;
+    stats: {
+      total: number;
+      active: number;
+      pending: number;
+      hosted: number;
+      federated: number;
+    };
+    cursor?: string;
+  }> {
+    const params = new URLSearchParams();
+    if (options?.q) params.set('q', options.q);
+    if (options?.type) params.set('type', options.type);
+    if (options?.status) params.set('status', options.status);
+    if (options?.limit) params.set('limit', options.limit.toString());
+    if (options?.cursor) params.set('cursor', options.cursor);
+    return this.fetch(`/xrpc/io.exprsn.admin.domains.list?${params.toString()}`);
+  }
+
+  async adminDomainsGet(id: string): Promise<{
+    domain: {
+      id: string;
+      name: string;
+      domain: string;
+      type: 'hosted' | 'federated';
+      status: string;
+      handleSuffix?: string;
+      pdsEndpoint?: string;
+      federationDid?: string;
+      features?: Record<string, boolean>;
+      rateLimits?: Record<string, number>;
+      branding?: Record<string, string>;
+      dnsVerificationToken?: string;
+      dnsVerifiedAt?: string;
+      ownerOrgId?: string;
+      ownerUserDid?: string;
+      userCount: number;
+      groupCount: number;
+      certificateCount: number;
+      verifiedAt?: string;
+      createdAt: string;
+      updatedAt: string;
+      plcConfig?: {
+        enabled: boolean;
+        mode: 'standalone' | 'external' | 'disabled';
+        externalPlcUrl?: string;
+        allowCustomHandles: boolean;
+        requireInviteCode: boolean;
+        defaultPdsEndpoint?: string;
+        handleValidationRules?: {
+          minLength: number;
+          maxLength: number;
+          allowedCharacters: string;
+          reservedHandles: string[];
+        };
+        orgHandleSuffixes?: Record<string, string>;
+      };
+      identityCount?: number;
+    };
+    userStats: Record<string, number>;
+    groupCount: number;
+    intermediateCert?: {
+      id: string;
+      commonName: string;
+      status: string;
+      notBefore: string;
+      notAfter: string;
+    };
+    entityCertCount: number;
+    recentActivity: Array<{
+      id: string;
+      action: string;
+      actorDid?: string;
+      targetType?: string;
+      targetId?: string;
+      metadata?: Record<string, unknown>;
+      createdAt: string;
+    }>;
+  }> {
+    return this.fetch(`/xrpc/io.exprsn.admin.domains.get?id=${id}`);
+  }
+
+  async adminDomainsCreate(data: {
+    name: string;
+    domain: string;
+    type: 'hosted' | 'federated';
+    handleSuffix?: string;
+    pdsEndpoint?: string;
+    features?: Record<string, boolean>;
+    rateLimits?: Record<string, number>;
+    ownerOrgId?: string;
+    ownerUserDid?: string;
+  }): Promise<{
+    domain: {
+      id: string;
+      name: string;
+      domain: string;
+      type: string;
+      status: string;
+      dnsVerificationToken: string;
+    };
+  }> {
+    return this.fetch('/xrpc/io.exprsn.admin.domains.create', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async adminDomainsUpdate(data: {
+    id: string;
+    name?: string;
+    status?: string;
+    features?: Record<string, boolean>;
+    rateLimits?: Record<string, number>;
+    branding?: Record<string, string>;
+    pdsEndpoint?: string;
+    ownerOrgId?: string;
+    ownerUserDid?: string;
+    plcConfig?: {
+      enabled?: boolean;
+      mode?: 'standalone' | 'external' | 'disabled';
+      externalPlcUrl?: string;
+      allowCustomHandles?: boolean;
+      requireInviteCode?: boolean;
+      defaultPdsEndpoint?: string;
+      handleValidationRules?: {
+        minLength: number;
+        maxLength: number;
+        allowedCharacters: string;
+        reservedHandles: string[];
+      };
+      orgHandleSuffixes?: Record<string, string>;
+    };
+  }): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.domains.update', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async adminDomainsDelete(id: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.domains.delete', {
+      method: 'POST',
+      body: JSON.stringify({ id }),
+    });
+  }
+
+  async adminDomainsVerify(id: string): Promise<{ success: boolean; verified: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.domains.verify', {
+      method: 'POST',
+      body: JSON.stringify({ id }),
+    });
+  }
+
+  async adminDomainsUsersList(domainId: string, options?: {
+    role?: string;
+    limit?: number;
+  }): Promise<{
+    users: Array<{
+      id: string;
+      userDid: string;
+      role: string;
+      permissions: string[];
+      handle?: string;
+      isActive: boolean;
+      createdAt: string;
+      user?: {
+        handle: string;
+        displayName?: string;
+        avatar?: string;
+      };
+    }>;
+  }> {
+    const params = new URLSearchParams({ domainId });
+    if (options?.role) params.set('role', options.role);
+    if (options?.limit) params.set('limit', options.limit.toString());
+    return this.fetch(`/xrpc/io.exprsn.admin.domains.users.list?${params.toString()}`);
+  }
+
+  async adminDomainsUsersAdd(data: {
+    domainId: string;
+    userDid: string;
+    role: 'admin' | 'moderator' | 'member';
+    permissions?: string[];
+  }): Promise<{ success: boolean; id: string }> {
+    return this.fetch('/xrpc/io.exprsn.admin.domains.users.add', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async adminDomainsUsersRemove(domainId: string, userDid: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.domains.users.remove', {
+      method: 'POST',
+      body: JSON.stringify({ domainId, userDid }),
+    });
+  }
+
+  async adminDomainsUsersUpdateRole(data: {
+    domainId: string;
+    userDid: string;
+    role: 'admin' | 'moderator' | 'member';
+    permissions?: string[];
+  }): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.domains.users.updateRole', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async adminDomainsGroupsList(domainId: string): Promise<{
+    groups: Array<{
+      id: string;
+      name: string;
+      description?: string;
+      permissions: string[];
+      memberCount: number;
+      isDefault: boolean;
+      createdAt: string;
+    }>;
+  }> {
+    return this.fetch(`/xrpc/io.exprsn.admin.domains.groups.list?domainId=${domainId}`);
+  }
+
+  async adminDomainsGroupsCreate(data: {
+    domainId: string;
+    name: string;
+    description?: string;
+    permissions?: string[];
+    isDefault?: boolean;
+  }): Promise<{ success: boolean; id: string }> {
+    return this.fetch('/xrpc/io.exprsn.admin.domains.groups.create', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async adminDomainsGroupsUpdate(data: {
+    groupId: string;
+    name?: string;
+    description?: string;
+    permissions?: string[];
+    isDefault?: boolean;
+  }): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.domains.groups.update', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async adminDomainsGroupsDelete(groupId: string, domainId: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.domains.groups.delete', {
+      method: 'POST',
+      body: JSON.stringify({ groupId, domainId }),
     });
   }
 
@@ -3484,6 +4065,7 @@ export interface AdminDashboard {
     totalUsers: number;
     totalVideos: number;
     pendingReports: number;
+    activeUsers?: number;
     newUsersToday?: number;
     newVideosToday?: number;
     totalViews?: number;
@@ -3493,6 +4075,8 @@ export interface AdminDashboard {
     totalComments?: number;
     actionedReports?: number;
     dismissedReports?: number;
+    activeRenderJobs?: number;
+    queuedRenderJobs?: number;
   };
   recentActivity: {
     users: Array<{
@@ -4107,6 +4691,12 @@ export interface OrganizationView {
     role: 'owner' | 'admin' | 'member';
     permissions: string[];
   };
+  // Hierarchy fields
+  parentOrganizationId?: string;
+  domainId?: string;
+  hierarchyPath?: string;
+  hierarchyLevel?: number;
+  childCount?: number;
 }
 
 export interface OrganizationMemberView {
@@ -4159,6 +4749,132 @@ export interface OrganizationBlockedWordView {
   severity: 'low' | 'medium' | 'high';
   enabled: boolean;
   createdAt: string;
+}
+
+// Organization with membership info
+export interface OrganizationWithMembershipView {
+  id: string;
+  name: string;
+  handle?: string;
+  displayName?: string;
+  type: string;
+  avatar?: string;
+  verified: boolean;
+  membership: {
+    id: string;
+    role: OrganizationRoleView | { name: string; displayName: string; permissions: string[] };
+    title?: string;
+    canPublishOnBehalf: boolean;
+    joinedAt: string;
+  };
+}
+
+// Public organization profile
+export interface OrganizationPublicProfileView {
+  id: string;
+  handle: string;
+  displayName: string;
+  name: string;
+  type: string;
+  avatar?: string;
+  bannerImage?: string;
+  bio?: string;
+  website?: string;
+  location?: string;
+  category?: string;
+  socialLinks?: {
+    website?: string;
+    twitter?: string;
+    instagram?: string;
+    youtube?: string;
+    tiktok?: string;
+    discord?: string;
+  };
+  verified: boolean;
+  followerCount: number;
+  videoCount: number;
+  memberCount: number;
+  isFollowing?: boolean;
+  isMember?: boolean;
+  createdAt: string;
+}
+
+// Organization role
+export interface OrganizationRoleView {
+  id: string;
+  name: string;
+  displayName: string;
+  description?: string;
+  isSystem: boolean;
+  permissions: string[];
+  priority: number;
+  color?: string;
+  createdAt: string;
+}
+
+// Organization invite
+export interface OrganizationInviteView {
+  id: string;
+  email?: string;
+  invitedUser?: {
+    did: string;
+    handle: string;
+    displayName?: string;
+    avatar?: string;
+  };
+  roleName?: string;
+  invitedBy: {
+    did: string;
+    handle: string;
+    displayName?: string;
+  };
+  message?: string;
+  status: 'pending' | 'accepted' | 'expired' | 'revoked';
+  expiresAt: string;
+  createdAt: string;
+}
+
+// Content queue item
+export interface ContentQueueItemView {
+  id: string;
+  video: {
+    uri: string;
+    thumbnailUrl?: string;
+    caption?: string;
+    duration?: number;
+  };
+  submittedBy: {
+    did: string;
+    handle: string;
+    displayName?: string;
+    avatar?: string;
+  };
+  submittedCaption?: string;
+  status: 'pending' | 'approved' | 'rejected' | 'revision_requested';
+  priority: number;
+  createdAt: string;
+}
+
+// Organization analytics
+export interface OrganizationAnalyticsView {
+  period: string;
+  totalViews: number;
+  totalLikes: number;
+  totalComments: number;
+  totalShares: number;
+  followerCount: number;
+  videoCount: number;
+  topVideos: Array<{
+    uri: string;
+    thumbnailUrl?: string;
+    caption?: string;
+    views: number;
+    likes: number;
+  }>;
+  viewsByDay: Array<{
+    date: string;
+    views: number;
+  }>;
 }
 
 // Organization Stats types
@@ -4433,7 +5149,7 @@ export interface SystemDiagnostics {
   services: {
     database: { status: 'healthy' | 'degraded' | 'down'; latency: number };
     redis: { status: 'healthy' | 'degraded' | 'down' | 'not_configured'; latency: number };
-    api: { status: 'healthy'; uptime: number };
+    api: { status: 'healthy'; uptime: number; latency?: number };
   };
   stats: {
     totalUsers: number;
@@ -4485,6 +5201,7 @@ export interface QuickStats {
   pendingReports: number;
   newUsersToday: number;
   activeUsersNow: number;
+  activeLiveStreams?: number;
   timestamp: string;
 }
 

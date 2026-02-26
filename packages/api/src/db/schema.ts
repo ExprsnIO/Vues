@@ -249,6 +249,14 @@ export const userInteractions = pgTable(
     interactionType: text('interaction_type').notNull(), // view, like, comment, share, watch_complete
     watchDuration: integer('watch_duration'), // seconds watched
     completionRate: real('completion_rate'), // 0.0 to 1.0
+    // Enhanced engagement signals for FYP personalization
+    skipRate: real('skip_rate'), // 0.0 to 1.0 - how quickly user swiped past
+    rewatchCount: integer('rewatch_count').default(0), // number of times video was rewatched
+    loopCount: integer('loop_count').default(0), // number of complete loops watched
+    interactionQuality: real('interaction_quality'), // computed engagement quality score
+    sessionPosition: integer('session_position'), // position in viewing session (1st, 2nd, 3rd video)
+    engagementActions: jsonb('engagement_actions').$type<string[]>(), // paused, unmuted, fullscreen, shared, etc.
+    milestone: text('milestone'), // '25%', '50%', '75%', '100%' - watch progress milestone
     createdAt: timestamp('created_at').defaultNow().notNull(),
   },
   (table) => ({
@@ -256,6 +264,7 @@ export const userInteractions = pgTable(
     videoIdx: index('interactions_video_idx').on(table.videoUri),
     typeIdx: index('interactions_type_idx').on(table.interactionType),
     createdIdx: index('interactions_created_idx').on(table.createdAt),
+    qualityIdx: index('interactions_quality_idx').on(table.interactionQuality),
   })
 );
 
@@ -1319,6 +1328,11 @@ export const organizations = pgTable(
     verificationCompletedAt: timestamp('verification_completed_at'),
     verificationNotes: text('verification_notes'),
     verificationDocuments: jsonb('verification_documents').$type<Record<string, { url: string; type: string; uploadedAt: string }>>(),
+    // Organization hierarchy
+    parentOrganizationId: text('parent_organization_id'),
+    domainId: text('domain_id'),
+    hierarchyPath: text('hierarchy_path'), // Materialized path: /root-id/parent-id/current-id/
+    hierarchyLevel: integer('hierarchy_level').default(0).notNull(),
     createdAt: timestamp('created_at').defaultNow().notNull(),
     updatedAt: timestamp('updated_at').defaultNow().notNull(),
   },
@@ -1329,6 +1343,9 @@ export const organizations = pgTable(
     handleIdx: uniqueIndex('organizations_handle_idx').on(table.handle),
     publicIdx: index('organizations_public_idx').on(table.isPublic),
     verificationStatusIdx: index('organizations_verification_status_idx').on(table.verificationStatus),
+    parentOrgIdx: index('organizations_parent_org_idx').on(table.parentOrganizationId),
+    domainOrgIdx: index('organizations_domain_org_idx').on(table.domainId),
+    hierarchyPathIdx: index('organizations_hierarchy_path_idx').on(table.hierarchyPath),
   })
 );
 
@@ -2014,6 +2031,132 @@ export const creatorEarnings = pgTable(
     lastPayoutAmount: integer('last_payout_amount'),
     updatedAt: timestamp('updated_at').defaultNow().notNull(),
   }
+);
+
+// ============================================
+// Creator Subscription System
+// ============================================
+
+// Subscription tier benefits type
+export interface SubscriptionBenefits {
+  earlyAccess?: boolean;
+  exclusiveContent?: boolean;
+  behindTheScenes?: boolean;
+  directMessaging?: boolean;
+  customEmojis?: boolean;
+  badgeColor?: string;
+  monthlyCredits?: number;
+}
+
+// Creator subscription tiers - tiers defined by creators
+export const creatorSubscriptionTiers = pgTable(
+  'creator_subscription_tiers',
+  {
+    id: text('id').primaryKey(),
+    creatorDid: text('creator_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    name: text('name').notNull(), // "Bronze", "Silver", "Gold"
+    description: text('description'),
+    price: integer('price').notNull(), // cents/month
+    benefits: jsonb('benefits').$type<SubscriptionBenefits>(),
+    maxSubscribers: integer('max_subscribers'), // null = unlimited
+    currentSubscribers: integer('current_subscribers').default(0).notNull(),
+    isActive: boolean('is_active').default(true).notNull(),
+    sortOrder: integer('sort_order').default(0).notNull(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    creatorIdx: index('creator_sub_tiers_creator_idx').on(table.creatorDid),
+    activeIdx: index('creator_sub_tiers_active_idx').on(table.isActive),
+  })
+);
+
+// Creator subscriptions - user subscriptions to creators
+export const creatorSubscriptions = pgTable(
+  'creator_subscriptions',
+  {
+    id: text('id').primaryKey(),
+    subscriberDid: text('subscriber_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    creatorDid: text('creator_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    tierId: text('tier_id')
+      .notNull()
+      .references(() => creatorSubscriptionTiers.id, { onDelete: 'cascade' }),
+    status: text('status').notNull(), // 'active' | 'cancelled' | 'expired' | 'past_due'
+    currentPeriodStart: timestamp('current_period_start').notNull(),
+    currentPeriodEnd: timestamp('current_period_end').notNull(),
+    cancelledAt: timestamp('cancelled_at'),
+    stripeSubscriptionId: text('stripe_subscription_id'),
+    stripeCustomerId: text('stripe_customer_id'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    subscriberIdx: index('creator_subs_subscriber_idx').on(table.subscriberDid),
+    creatorIdx: index('creator_subs_creator_idx').on(table.creatorDid),
+    tierIdx: index('creator_subs_tier_idx').on(table.tierId),
+    statusIdx: index('creator_subs_status_idx').on(table.status),
+    stripeIdx: index('creator_subs_stripe_idx').on(table.stripeSubscriptionId),
+    uniqueSub: uniqueIndex('creator_subs_unique_idx').on(table.subscriberDid, table.creatorDid),
+  })
+);
+
+// ============================================
+// Creator Fund
+// ============================================
+
+// Creator fund payouts - monthly revenue sharing
+export const creatorFundPayouts = pgTable(
+  'creator_fund_payouts',
+  {
+    id: text('id').primaryKey(),
+    creatorDid: text('creator_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    period: text('period').notNull(), // "2024-01" format
+    viewCount: integer('view_count').notNull(),
+    engagementScore: real('engagement_score').notNull(),
+    poolShare: real('pool_share').notNull(), // percentage of total pool
+    amount: integer('amount').notNull(), // cents
+    status: text('status').default('pending').notNull(), // 'pending' | 'processing' | 'paid' | 'failed'
+    paidAt: timestamp('paid_at'),
+    transactionId: text('transaction_id'), // Reference to payment transaction
+    notes: text('notes'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    creatorIdx: index('creator_fund_creator_idx').on(table.creatorDid),
+    periodIdx: index('creator_fund_period_idx').on(table.period),
+    statusIdx: index('creator_fund_status_idx').on(table.status),
+    uniquePayout: uniqueIndex('creator_fund_unique_idx').on(table.creatorDid, table.period),
+  })
+);
+
+// Creator fund eligibility tracking
+export const creatorFundEligibility = pgTable(
+  'creator_fund_eligibility',
+  {
+    userDid: text('user_did')
+      .primaryKey()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    isEligible: boolean('is_eligible').default(false).notNull(),
+    enrolledAt: timestamp('enrolled_at'),
+    minFollowers: integer('min_followers').default(1000).notNull(), // Requirement
+    minViews: integer('min_views').default(10000).notNull(), // Monthly view requirement
+    currentFollowers: integer('current_followers').default(0).notNull(),
+    currentMonthlyViews: integer('current_monthly_views').default(0).notNull(),
+    lastCheckedAt: timestamp('last_checked_at'),
+    rejectionReason: text('rejection_reason'),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    eligibleIdx: index('creator_fund_elig_idx').on(table.isEligible),
+  })
 );
 
 // ============================================
@@ -2836,6 +2979,8 @@ export const serviceRegistry = pgTable(
     id: text('id').primaryKey(),
     type: text('type').notNull(), // 'pds' | 'relay' | 'appview' | 'labeler'
     endpoint: text('endpoint').notNull(),
+    name: text('name'),
+    description: text('description'),
     did: text('did'),
     certificateId: text('certificate_id'),
     region: text('region'),
@@ -3921,6 +4066,121 @@ export type ChallengeParticipation = typeof challengeParticipation.$inferSelect;
 export type NewChallengeParticipation = typeof challengeParticipation.$inferInsert;
 
 // ============================================
+// FYP Personalization - User Content Feedback
+// ============================================
+
+// User content feedback for "not interested" and preference signals
+export const userContentFeedback = pgTable(
+  'user_content_feedback',
+  {
+    id: text('id').primaryKey(),
+    userDid: text('user_did').notNull(),
+    targetType: text('target_type').notNull(), // 'video' | 'author' | 'tag' | 'sound'
+    targetId: text('target_id').notNull(),
+    feedbackType: text('feedback_type').notNull(), // 'not_interested' | 'see_less' | 'see_more' | 'hide_author' | 'report'
+    reason: text('reason'), // 'repetitive' | 'not_relevant' | 'offensive' | 'spam' | 'other'
+    weight: real('weight').default(1.0).notNull(), // Feedback strength/impact
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    expiresAt: timestamp('expires_at'), // Optional expiration for temporary feedback
+  },
+  (table) => ({
+    userIdx: index('user_content_feedback_user_idx').on(table.userDid),
+    targetIdx: index('user_content_feedback_target_idx').on(table.targetType, table.targetId),
+    feedbackIdx: index('user_content_feedback_type_idx').on(table.feedbackType),
+    userTargetIdx: uniqueIndex('user_content_feedback_unique_idx').on(
+      table.userDid,
+      table.targetType,
+      table.targetId,
+      table.feedbackType
+    ),
+    createdIdx: index('user_content_feedback_created_idx').on(table.createdAt),
+  })
+);
+
+// ============================================
+// FYP Personalization - User Feed Preferences
+// ============================================
+
+// Affinity scores for tags, authors, sounds
+export interface TagAffinity {
+  tag: string;
+  score: number; // -1 to 1
+  interactions: number;
+  lastUpdated: string;
+}
+
+export interface AuthorAffinity {
+  did: string;
+  score: number; // -1 to 1
+  interactions: number;
+  isFollowing: boolean;
+  lastUpdated: string;
+}
+
+export interface SoundAffinity {
+  soundId: string;
+  score: number; // -1 to 1
+  interactions: number;
+  lastUpdated: string;
+}
+
+export interface NegativeSignals {
+  hiddenAuthors: string[];
+  hiddenTags: string[];
+  notInterestedVideos: string[];
+  seeLessAuthors: string[];
+  seeLessTags: string[];
+}
+
+export interface DurationPreference {
+  min: number; // seconds
+  max: number; // seconds
+  preferred: number; // seconds
+}
+
+// User feed preferences - cached computed preferences for fast FYP generation
+export const userFeedPreferences = pgTable(
+  'user_feed_preferences',
+  {
+    userDid: text('user_did').primaryKey(),
+    // Affinity scores (computed from interactions)
+    tagAffinities: jsonb('tag_affinities').$type<TagAffinity[]>().default([]),
+    authorAffinities: jsonb('author_affinities').$type<AuthorAffinity[]>().default([]),
+    soundAffinities: jsonb('sound_affinities').$type<SoundAffinity[]>().default([]),
+    // Negative signals (from explicit feedback)
+    negativeSignals: jsonb('negative_signals').$type<NegativeSignals>().default({
+      hiddenAuthors: [],
+      hiddenTags: [],
+      notInterestedVideos: [],
+      seeLessAuthors: [],
+      seeLessTags: [],
+    }),
+    // Engagement patterns
+    avgWatchCompletion: real('avg_watch_completion').default(0.5),
+    preferredDuration: jsonb('preferred_duration').$type<DurationPreference>(),
+    peakActivityHours: jsonb('peak_activity_hours').$type<number[]>(), // Hours 0-23 when user is most active
+    // Thresholds (learned from user behavior)
+    likeThreshold: real('like_threshold').default(0.7), // Completion rate above which user typically likes
+    commentThreshold: real('comment_threshold').default(0.8), // Completion rate above which user typically comments
+    // Stats
+    totalInteractions: integer('total_interactions').default(0),
+    totalWatchTime: integer('total_watch_time').default(0), // seconds
+    // Timestamps
+    computedAt: timestamp('computed_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    computedAtIdx: index('user_feed_preferences_computed_idx').on(table.computedAt),
+  })
+);
+
+// FYP Personalization type exports
+export type UserContentFeedback = typeof userContentFeedback.$inferSelect;
+export type NewUserContentFeedback = typeof userContentFeedback.$inferInsert;
+export type UserFeedPreferences = typeof userFeedPreferences.$inferSelect;
+export type NewUserFeedPreferences = typeof userFeedPreferences.$inferInsert;
+
+// ============================================
 // Organization Type Configuration System
 // ============================================
 
@@ -4040,4 +4300,245 @@ export type OrganizationTypeConfig = typeof organizationTypeConfigs.$inferSelect
 export type NewOrganizationTypeConfig = typeof organizationTypeConfigs.$inferInsert;
 export type OrganizationCustomData = typeof organizationCustomData.$inferSelect;
 export type NewOrganizationCustomData = typeof organizationCustomData.$inferInsert;
+
+// ============================================
+// Domain Management Tables
+// ============================================
+
+// Domain features configuration type
+export interface DomainFeatures {
+  videoHosting: boolean;
+  liveStreaming: boolean;
+  messaging: boolean;
+  feedGeneration: boolean;
+  customBranding: boolean;
+  apiAccess: boolean;
+  analytics: boolean;
+}
+
+// Domain rate limits type
+export interface DomainRateLimits {
+  requestsPerMinute: number;
+  requestsPerHour: number;
+  dailyUploadLimit: number;
+  storageQuotaGb: number;
+}
+
+// Domain branding configuration type
+export interface DomainBranding {
+  logo?: string;
+  favicon?: string;
+  primaryColor?: string;
+  secondaryColor?: string;
+  customCss?: string;
+}
+
+// Domain PLC (Identity) configuration type
+export interface DomainPlcConfig {
+  enabled: boolean;
+  mode: 'standalone' | 'external' | 'disabled';
+  externalPlcUrl?: string;
+  allowCustomHandles: boolean;
+  requireInviteCode: boolean;
+  defaultPdsEndpoint?: string;
+  handleValidationRules?: {
+    minLength: number;
+    maxLength: number;
+    allowedCharacters: string;
+    reservedHandles: string[];
+  };
+  orgHandleSuffixes?: Record<string, string>; // org type -> suffix mapping
+}
+
+// Domains - hosted and federated domain management
+export const domains = pgTable(
+  'domains',
+  {
+    id: text('id').primaryKey(),
+    name: text('name').notNull(),
+    domain: text('domain').notNull().unique(),
+    type: text('type').notNull(), // 'hosted' | 'federated'
+    status: text('status').default('pending').notNull(), // 'pending' | 'verifying' | 'active' | 'suspended' | 'inactive'
+
+    // CA Integration
+    intermediateCertId: text('intermediate_cert_id')
+      .references(() => caIntermediateCertificates.id),
+
+    // Handle namespace
+    handleSuffix: text('handle_suffix'), // e.g., ".example.com" for @user.example.com
+    allowedHandlePatterns: jsonb('allowed_handle_patterns').$type<string[]>(),
+
+    // Federation settings (for federated domains)
+    pdsEndpoint: text('pds_endpoint'),
+    federationDid: text('federation_did'),
+    serviceRegistryId: text('service_registry_id')
+      .references(() => serviceRegistry.id),
+
+    // Features/Services enabled
+    features: jsonb('features').$type<DomainFeatures>().default({
+      videoHosting: true,
+      liveStreaming: true,
+      messaging: true,
+      feedGeneration: true,
+      customBranding: false,
+      apiAccess: false,
+      analytics: true,
+    }),
+
+    // Rate limits
+    rateLimits: jsonb('rate_limits').$type<DomainRateLimits>().default({
+      requestsPerMinute: 60,
+      requestsPerHour: 1000,
+      dailyUploadLimit: 100,
+      storageQuotaGb: 10,
+    }),
+
+    // Branding
+    branding: jsonb('branding').$type<DomainBranding>(),
+
+    // DNS Verification
+    dnsVerificationToken: text('dns_verification_token'),
+    dnsVerifiedAt: timestamp('dns_verified_at'),
+
+    // Ownership
+    ownerOrgId: text('owner_org_id')
+      .references(() => organizations.id, { onDelete: 'set null' }),
+    ownerUserDid: text('owner_user_did')
+      .references(() => users.did, { onDelete: 'set null' }),
+
+    // PLC (Identity) Configuration
+    plcConfig: jsonb('plc_config').$type<DomainPlcConfig>().default({
+      enabled: true,
+      mode: 'standalone',
+      allowCustomHandles: false,
+      requireInviteCode: false,
+    }),
+
+    // Stats
+    userCount: integer('user_count').default(0).notNull(),
+    groupCount: integer('group_count').default(0).notNull(),
+    certificateCount: integer('certificate_count').default(0).notNull(),
+    identityCount: integer('identity_count').default(0).notNull(),
+
+    verifiedAt: timestamp('verified_at'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    domainIdx: uniqueIndex('domains_domain_idx').on(table.domain),
+    statusIdx: index('domains_status_idx').on(table.status),
+    typeIdx: index('domains_type_idx').on(table.type),
+    ownerOrgIdx: index('domains_owner_org_idx').on(table.ownerOrgId),
+    ownerUserIdx: index('domains_owner_user_idx').on(table.ownerUserDid),
+    handleSuffixIdx: index('domains_handle_suffix_idx').on(table.handleSuffix),
+  })
+);
+
+// Domain Users - users assigned to specific domains
+export const domainUsers = pgTable(
+  'domain_users',
+  {
+    id: text('id').primaryKey(),
+    domainId: text('domain_id')
+      .notNull()
+      .references(() => domains.id, { onDelete: 'cascade' }),
+    userDid: text('user_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    role: text('role').notNull(), // 'admin' | 'moderator' | 'member'
+    permissions: jsonb('permissions').$type<string[]>().default([]),
+    handle: text('handle'), // Domain-specific handle override
+    isActive: boolean('is_active').default(true).notNull(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    domainIdx: index('domain_users_domain_idx').on(table.domainId),
+    userIdx: index('domain_users_user_idx').on(table.userDid),
+    roleIdx: index('domain_users_role_idx').on(table.domainId, table.role),
+    uniqueAssignment: uniqueIndex('domain_users_unique_idx').on(table.domainId, table.userDid),
+  })
+);
+
+// Domain Groups - groups within domains
+export const domainGroups = pgTable(
+  'domain_groups',
+  {
+    id: text('id').primaryKey(),
+    domainId: text('domain_id')
+      .notNull()
+      .references(() => domains.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    description: text('description'),
+    permissions: jsonb('permissions').$type<string[]>().default([]),
+    memberCount: integer('member_count').default(0).notNull(),
+    isDefault: boolean('is_default').default(false).notNull(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    domainIdx: index('domain_groups_domain_idx').on(table.domainId),
+    nameIdx: index('domain_groups_name_idx').on(table.domainId, table.name),
+    defaultIdx: index('domain_groups_default_idx').on(table.domainId, table.isDefault),
+  })
+);
+
+// Domain Group Members - users in domain groups
+export const domainGroupMembers = pgTable(
+  'domain_group_members',
+  {
+    id: text('id').primaryKey(),
+    groupId: text('group_id')
+      .notNull()
+      .references(() => domainGroups.id, { onDelete: 'cascade' }),
+    userDid: text('user_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    addedBy: text('added_by')
+      .references(() => users.did, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    groupIdx: index('domain_group_members_group_idx').on(table.groupId),
+    userIdx: index('domain_group_members_user_idx').on(table.userDid),
+    uniqueMembership: uniqueIndex('domain_group_members_unique_idx').on(table.groupId, table.userDid),
+  })
+);
+
+// Domain Activity Log - tracks domain-related events
+export const domainActivityLog = pgTable(
+  'domain_activity_log',
+  {
+    id: text('id').primaryKey(),
+    domainId: text('domain_id')
+      .notNull()
+      .references(() => domains.id, { onDelete: 'cascade' }),
+    actorDid: text('actor_did')
+      .references(() => users.did, { onDelete: 'set null' }),
+    action: text('action').notNull(), // 'user_added', 'user_removed', 'settings_changed', 'certificate_issued', etc.
+    targetType: text('target_type'), // 'user', 'group', 'certificate', 'settings'
+    targetId: text('target_id'),
+    metadata: jsonb('metadata').$type<Record<string, unknown>>(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    domainIdx: index('domain_activity_log_domain_idx').on(table.domainId),
+    actorIdx: index('domain_activity_log_actor_idx').on(table.actorDid),
+    actionIdx: index('domain_activity_log_action_idx').on(table.action),
+    createdIdx: index('domain_activity_log_created_idx').on(table.createdAt),
+    domainCreatedIdx: index('domain_activity_log_domain_created_idx').on(table.domainId, table.createdAt),
+  })
+);
+
+// Domain Management type exports
+export type Domain = typeof domains.$inferSelect;
+export type NewDomain = typeof domains.$inferInsert;
+export type DomainUser = typeof domainUsers.$inferSelect;
+export type NewDomainUser = typeof domainUsers.$inferInsert;
+export type DomainGroup = typeof domainGroups.$inferSelect;
+export type NewDomainGroup = typeof domainGroups.$inferInsert;
+export type DomainGroupMember = typeof domainGroupMembers.$inferSelect;
+export type NewDomainGroupMember = typeof domainGroupMembers.$inferInsert;
+export type DomainActivityLogEntry = typeof domainActivityLog.$inferSelect;
+export type NewDomainActivityLogEntry = typeof domainActivityLog.$inferInsert;
 

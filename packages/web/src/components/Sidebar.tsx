@@ -2,12 +2,17 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { useState, useEffect, createContext, useContext } from 'react';
+import { useState, useEffect, createContext, useContext, useRef } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { cn } from '@/lib/utils';
 import { useAuth } from '@/lib/auth-context';
 import { api } from '@/lib/api';
-import { SettingsPanel } from './SettingsPanel';
+import {
+  useOrganizationStore,
+  useActiveOrganization,
+  useSwitchOrganization,
+} from '@/stores/organization-store';
+// SettingsPanel removed - settings is now a full page at /settings
 
 const NAV_ITEMS = [
   { href: '/', label: 'For You', icon: HomeIcon },
@@ -67,7 +72,6 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
   return (
     <SidebarContext.Provider value={{ isOpen, toggle, close, settingsOpen, openSettings, closeSettings }}>
       {children}
-      <SettingsPanel isOpen={settingsOpen} onClose={closeSettings} />
     </SidebarContext.Provider>
   );
 }
@@ -248,37 +252,12 @@ export function Sidebar() {
           )}
         </nav>
 
-        {/* User section */}
+        {/* User section with Organization Switcher */}
         <div className="p-4 border-t border-border">
           {isLoading ? (
             <div className="h-10 bg-surface rounded-lg animate-pulse" />
           ) : user ? (
-            <div className="flex items-center gap-3">
-              <Link href={`/profile/${user.handle}`} className="w-10 h-10 rounded-full bg-surface flex items-center justify-center hover:ring-2 hover:ring-accent transition-all">
-                <span className="text-text-primary font-medium">
-                  {user.handle[0]?.toUpperCase()}
-                </span>
-              </Link>
-              <div className="flex-1 min-w-0">
-                <Link href={`/profile/${user.handle}`} className="text-text-primary text-sm font-medium truncate block hover:underline">
-                  @{user.handle}
-                </Link>
-              </div>
-              <button
-                onClick={openSettings}
-                className="text-text-muted hover:text-text-primary p-2"
-                title="Settings"
-              >
-                <SettingsIcon className="w-5 h-5" />
-              </button>
-              <button
-                onClick={() => signOut()}
-                className="text-text-muted hover:text-text-primary p-2"
-                title="Sign out"
-              >
-                <LogoutIcon className="w-5 h-5" />
-              </button>
-            </div>
+            <OrganizationSwitcher user={user} signOut={signOut} />
           ) : (
             <Link
               href="/login"
@@ -351,6 +330,255 @@ export function MobileBottomNav() {
         </div>
       </Link>
     </nav>
+  );
+}
+
+// Organization Switcher Component
+interface OrganizationSwitcherProps {
+  user: { handle: string; displayName?: string; avatar?: string };
+  signOut: () => void;
+}
+
+function OrganizationSwitcher({ user, signOut }: OrganizationSwitcherProps) {
+  const [isOpen, setIsOpen] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
+  const organizations = useOrganizationStore((state) => state.organizations);
+  const activeOrganization = useActiveOrganization();
+  const switchOrganization = useSwitchOrganization();
+
+  // Fetch organizations
+  const { data: orgsData, isLoading } = useQuery({
+    queryKey: ['user-organizations'],
+    queryFn: () => api.getUserOrganizations(),
+    staleTime: 5 * 60 * 1000,
+    refetchOnWindowFocus: false,
+  });
+
+  // Check if user is admin
+  const { data: adminSession } = useQuery({
+    queryKey: ['admin-session'],
+    queryFn: () => api.getAdminSession(),
+    retry: false,
+    staleTime: 5 * 60 * 1000,
+  });
+
+  const isAdmin = !!adminSession?.admin;
+
+  // Sync to store
+  useEffect(() => {
+    if (orgsData?.organizations) {
+      useOrganizationStore.getState().setOrganizations(orgsData.organizations);
+    }
+  }, [orgsData]);
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+        setIsOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const currentContext = activeOrganization
+    ? {
+        name: activeOrganization.displayName || activeOrganization.name,
+        avatar: activeOrganization.avatar,
+        initial: (activeOrganization.displayName || activeOrganization.name)[0]?.toUpperCase(),
+        type: 'org' as const,
+      }
+    : {
+        name: user.displayName || `@${user.handle}`,
+        avatar: user.avatar,
+        initial: user.handle[0]?.toUpperCase(),
+        type: 'personal' as const,
+      };
+
+  return (
+    <div ref={dropdownRef} className="relative">
+      {/* Current Context Button */}
+      <button
+        onClick={() => setIsOpen(!isOpen)}
+        className="w-full flex items-center gap-3 p-2 rounded-lg hover:bg-surface-hover transition-colors"
+      >
+        <div className="w-10 h-10 rounded-full bg-surface flex items-center justify-center overflow-hidden flex-shrink-0">
+          {currentContext.avatar ? (
+            <img
+              src={currentContext.avatar}
+              alt={currentContext.name}
+              className="w-full h-full object-cover"
+            />
+          ) : (
+            <span className="text-text-primary font-medium">{currentContext.initial}</span>
+          )}
+        </div>
+        <div className="flex-1 min-w-0 text-left">
+          <div className="text-text-primary text-sm font-medium truncate">
+            {currentContext.name}
+          </div>
+          <div className="text-text-muted text-xs">
+            {currentContext.type === 'org' ? 'Organization' : 'Personal Account'}
+          </div>
+        </div>
+        <ChevronIcon className={cn('w-4 h-4 text-text-muted transition-transform', isOpen && 'rotate-180')} />
+      </button>
+
+      {/* Dropdown Menu */}
+      {isOpen && (
+        <div className="absolute bottom-full left-0 right-0 mb-2 bg-surface rounded-lg border border-border shadow-xl overflow-hidden z-50">
+          {/* Personal Account */}
+          <button
+            onClick={() => {
+              switchOrganization(null);
+              setIsOpen(false);
+            }}
+            className={cn(
+              'w-full flex items-center gap-3 px-3 py-2.5 hover:bg-surface-hover transition-colors',
+              !activeOrganization && 'bg-accent/10'
+            )}
+          >
+            <div className="w-8 h-8 rounded-full bg-background flex items-center justify-center overflow-hidden">
+              {user.avatar ? (
+                <img src={user.avatar} alt={user.handle} className="w-full h-full object-cover" />
+              ) : (
+                <span className="text-text-primary text-sm font-medium">
+                  {user.handle[0]?.toUpperCase()}
+                </span>
+              )}
+            </div>
+            <div className="flex-1 min-w-0 text-left">
+              <div className="text-text-primary text-sm font-medium truncate">
+                @{user.handle}
+              </div>
+              <div className="text-text-muted text-xs">Personal Account</div>
+            </div>
+            {!activeOrganization && <CheckIcon className="w-4 h-4 text-accent" />}
+          </button>
+
+          {/* Divider if there are organizations */}
+          {organizations.length > 0 && <div className="border-t border-border" />}
+
+          {/* Organizations List */}
+          {isLoading ? (
+            <div className="px-3 py-2">
+              <div className="h-8 bg-background rounded animate-pulse" />
+            </div>
+          ) : (
+            organizations.map((org) => {
+              const isActive = activeOrganization?.id === org.id;
+              const roleName = typeof org.membership.role === 'object' && 'displayName' in org.membership.role
+                ? org.membership.role.displayName
+                : org.membership.role.name;
+              const roleColor = typeof org.membership.role === 'object' && 'color' in org.membership.role
+                ? org.membership.role.color
+                : undefined;
+
+              return (
+                <button
+                  key={org.id}
+                  onClick={() => {
+                    switchOrganization(org.id);
+                    setIsOpen(false);
+                  }}
+                  className={cn(
+                    'w-full flex items-center gap-3 px-3 py-2.5 hover:bg-surface-hover transition-colors',
+                    isActive && 'bg-accent/10'
+                  )}
+                >
+                  <div className="w-8 h-8 rounded-lg bg-accent/10 flex items-center justify-center overflow-hidden">
+                    {org.avatar ? (
+                      <img src={org.avatar} alt={org.name} className="w-full h-full object-cover" />
+                    ) : (
+                      <span className="text-accent text-sm font-bold">
+                        {(org.displayName || org.name)[0]?.toUpperCase()}
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex-1 min-w-0 text-left">
+                    <div className="flex items-center gap-2">
+                      <span className="text-text-primary text-sm font-medium truncate">
+                        {org.displayName || org.name}
+                      </span>
+                      {org.verified && <VerifiedBadge className="w-3.5 h-3.5 text-accent flex-shrink-0" />}
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span
+                        className="text-xs px-1.5 py-0.5 rounded"
+                        style={{
+                          backgroundColor: roleColor ? `${roleColor}20` : 'var(--color-background)',
+                          color: roleColor || 'var(--color-text-muted)',
+                        }}
+                      >
+                        {roleName}
+                      </span>
+                    </div>
+                  </div>
+                  {isActive && <CheckIcon className="w-4 h-4 text-accent" />}
+                </button>
+              );
+            })
+          )}
+
+          {/* Divider */}
+          <div className="border-t border-border" />
+
+          {/* Actions */}
+          <Link
+            href="/settings?tab=organizations"
+            onClick={() => setIsOpen(false)}
+            className="flex items-center gap-3 px-3 py-2.5 hover:bg-surface-hover transition-colors text-text-muted hover:text-text-primary"
+          >
+            <OrgSettingsIcon className="w-5 h-5" />
+            <span className="text-sm">Manage Organizations</span>
+          </Link>
+
+          {/* Admin Dashboard - only show for admins */}
+          {isAdmin && (
+            <Link
+              href="/admin"
+              onClick={() => setIsOpen(false)}
+              className="flex items-center gap-3 px-3 py-2.5 hover:bg-surface-hover transition-colors text-accent hover:text-accent"
+            >
+              <ShieldIcon className="w-5 h-5" />
+              <span className="text-sm">Admin Dashboard</span>
+            </Link>
+          )}
+
+          <div className="border-t border-border" />
+
+          {/* Profile and Sign Out */}
+          <Link
+            href={`/profile/${user.handle}`}
+            onClick={() => setIsOpen(false)}
+            className="flex items-center gap-3 px-3 py-2.5 hover:bg-surface-hover transition-colors text-text-muted hover:text-text-primary"
+          >
+            <UserCircleIcon className="w-5 h-5" />
+            <span className="text-sm">View Profile</span>
+          </Link>
+          <Link
+            href="/settings"
+            onClick={() => setIsOpen(false)}
+            className="flex items-center gap-3 px-3 py-2.5 hover:bg-surface-hover transition-colors text-text-muted hover:text-text-primary"
+          >
+            <SettingsIcon className="w-5 h-5" />
+            <span className="text-sm">Settings</span>
+          </Link>
+          <button
+            onClick={() => {
+              signOut();
+              setIsOpen(false);
+            }}
+            className="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-surface-hover transition-colors text-text-muted hover:text-text-primary"
+          >
+            <LogoutIcon className="w-5 h-5" />
+            <span className="text-sm">Sign Out</span>
+          </button>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -593,6 +821,54 @@ function StudioIcon({
         strokeLinejoin="round"
         d="M3.375 19.5h17.25m-17.25 0a1.125 1.125 0 01-1.125-1.125M3.375 19.5h1.5C5.496 19.5 6 18.996 6 18.375m-3.75 0V5.625m0 12.75v-1.5c0-.621.504-1.125 1.125-1.125m18.375 2.625V5.625m0 12.75c0 .621-.504 1.125-1.125 1.125m1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125m0 3.75h-1.5A1.125 1.125 0 0118 18.375M20.625 4.5H3.375m17.25 0c.621 0 1.125.504 1.125 1.125M20.625 4.5h-1.5C18.504 4.5 18 5.004 18 5.625m3.75 0v1.5c0 .621-.504 1.125-1.125 1.125M3.375 4.5c-.621 0-1.125.504-1.125 1.125M3.375 4.5h1.5C5.496 4.5 6 5.004 6 5.625m-3.75 0v1.5c0 .621.504 1.125 1.125 1.125m0 0h1.5m-1.5 0c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125m1.5-3.75C5.496 8.25 6 7.746 6 7.125v-1.5M4.875 8.25C5.496 8.25 6 8.754 6 9.375v1.5m0-5.25v5.25m0-5.25C6 5.004 6.504 4.5 7.125 4.5h9.75c.621 0 1.125.504 1.125 1.125m1.125 2.625h1.5m-1.5 0A1.125 1.125 0 0118 7.125v-1.5m1.125 2.625c-.621 0-1.125.504-1.125 1.125v1.5m2.625-2.625c.621 0 1.125.504 1.125 1.125v1.5c0 .621-.504 1.125-1.125 1.125M18 5.625v5.25M7.125 12h9.75m-9.75 0A1.125 1.125 0 016 10.875M7.125 12C6.504 12 6 12.504 6 13.125m0-2.25C6 11.496 5.496 12 4.875 12M18 10.875c0 .621-.504 1.125-1.125 1.125M18 10.875c0 .621.504 1.125 1.125 1.125m-2.25 0c.621 0 1.125.504 1.125 1.125m-12 5.25v-5.25m0 5.25c0 .621.504 1.125 1.125 1.125h9.75c.621 0 1.125-.504 1.125-1.125m-12 0v-1.5c0-.621-.504-1.125-1.125-1.125M18 18.375v-5.25m0 5.25v-1.5c0-.621.504-1.125 1.125-1.125M18 13.125v1.5c0 .621.504 1.125 1.125 1.125M18 13.125c0-.621.504-1.125 1.125-1.125M6 13.125v1.5c0 .621-.504 1.125-1.125 1.125M6 13.125C6 12.504 5.496 12 4.875 12m-1.5 0h1.5m14.25 0h1.5"
       />
+    </svg>
+  );
+}
+
+function ChevronIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
+    </svg>
+  );
+}
+
+function CheckIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+    </svg>
+  );
+}
+
+function VerifiedBadge({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="currentColor">
+      <path fillRule="evenodd" d="M8.603 3.799A4.49 4.49 0 0112 2.25c1.357 0 2.573.6 3.397 1.549a4.49 4.49 0 013.498 1.307 4.491 4.491 0 011.307 3.497A4.49 4.49 0 0121.75 12a4.49 4.49 0 01-1.549 3.397 4.491 4.491 0 01-1.307 3.497 4.491 4.491 0 01-3.497 1.307A4.49 4.49 0 0112 21.75a4.49 4.49 0 01-3.397-1.549 4.49 4.49 0 01-3.498-1.306 4.491 4.491 0 01-1.307-3.498A4.49 4.49 0 012.25 12c0-1.357.6-2.573 1.549-3.397a4.49 4.49 0 011.307-3.497 4.49 4.49 0 013.497-1.307zm7.007 6.387a.75.75 0 10-1.22-.872l-3.236 4.53L9.53 12.22a.75.75 0 00-1.06 1.06l2.25 2.25a.75.75 0 001.14-.094l3.75-5.25z" clipRule="evenodd" />
+    </svg>
+  );
+}
+
+function OrgSettingsIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M18 18.72a9.094 9.094 0 003.741-.479 3 3 0 00-4.682-2.72m.94 3.198l.001.031c0 .225-.012.447-.037.666A11.944 11.944 0 0112 21c-2.17 0-4.207-.576-5.963-1.584A6.062 6.062 0 016 18.719m12 0a5.971 5.971 0 00-.941-3.197m0 0A5.995 5.995 0 0012 12.75a5.995 5.995 0 00-5.058 2.772m0 0a3 3 0 00-4.681 2.72 8.986 8.986 0 003.74.477m.94-3.197a5.971 5.971 0 00-.94 3.197M15 6.75a3 3 0 11-6 0 3 3 0 016 0zm6 3a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0zm-13.5 0a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0z" />
+    </svg>
+  );
+}
+
+function ShieldIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" />
+    </svg>
+  );
+}
+
+function UserCircleIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M17.982 18.725A7.488 7.488 0 0012 15.75a7.488 7.488 0 00-5.982 2.975m11.963 0a9 9 0 10-11.963 0m11.963 0A8.966 8.966 0 0112 21a8.966 8.966 0 01-5.982-2.275M15 9.75a3 3 0 11-6 0 3 3 0 016 0z" />
     </svg>
   );
 }

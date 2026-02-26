@@ -1834,6 +1834,8 @@ organizationRoutes.post('/io.exprsn.org.delete', authMiddleware, async (c) => {
   const body = await c.req.json<{
     organizationId: string;
     confirmName: string;
+    childAction?: 'orphan' | 'reparent' | 'cascade';
+    newParentId?: string;
   }>();
 
   if (!body.organizationId || !body.confirmName) {
@@ -1862,11 +1864,131 @@ organizationRoutes.post('/io.exprsn.org.delete', authMiddleware, async (c) => {
     throw new HTTPException(400, { message: 'Organization name does not match' });
   }
 
+  // Get child organizations
+  const childOrgs = await db
+    .select()
+    .from(organizations)
+    .where(eq(organizations.parentOrganizationId, body.organizationId));
+
+  const childAction = body.childAction || 'orphan';
+  let orphanedCount = 0;
+  let reparentedCount = 0;
+  let deletedCount = 0;
+
+  if (childOrgs.length > 0) {
+    switch (childAction) {
+      case 'orphan':
+        // Remove parent reference, making them root-level orgs
+        await db
+          .update(organizations)
+          .set({
+            parentOrganizationId: null,
+            hierarchyPath: sql`'/' || id || '/'`,
+            hierarchyLevel: 0,
+          })
+          .where(eq(organizations.parentOrganizationId, body.organizationId));
+        orphanedCount = childOrgs.length;
+        break;
+
+      case 'reparent':
+        if (!body.newParentId) {
+          throw new HTTPException(400, { message: 'newParentId required for reparent action' });
+        }
+        // Verify new parent exists and user has permission
+        const newParent = await db
+          .select()
+          .from(organizations)
+          .where(eq(organizations.id, body.newParentId))
+          .limit(1);
+        if (!newParent[0]) {
+          throw new HTTPException(404, { message: 'New parent organization not found' });
+        }
+        // Check user owns or can manage the new parent
+        const newParentPermission = await checkOrgPermission(userDid, body.newParentId);
+        if (!newParentPermission || newParentPermission.member.role !== 'owner') {
+          throw new HTTPException(403, { message: 'You must be owner of the new parent organization' });
+        }
+
+        // Update children to point to new parent
+        const newParentPath = newParent[0].hierarchyPath || `/${body.newParentId}/`;
+        const newParentLevel = (newParent[0].hierarchyLevel || 0) + 1;
+
+        for (const child of childOrgs) {
+          const childPath = `${newParentPath}${child.id}/`;
+          await db
+            .update(organizations)
+            .set({
+              parentOrganizationId: body.newParentId,
+              hierarchyPath: childPath,
+              hierarchyLevel: newParentLevel,
+            })
+            .where(eq(organizations.id, child.id));
+
+          // Update all descendants of this child
+          await updateDescendantPaths(child.id, childPath, newParentLevel);
+        }
+        reparentedCount = childOrgs.length;
+        break;
+
+      case 'cascade':
+        // Delete all descendants recursively
+        deletedCount = await cascadeDeleteOrganization(body.organizationId);
+        // Return early since the org itself is already deleted by cascade
+        return c.json({ success: true, deletedCount: deletedCount + 1 });
+    }
+  }
+
   // Delete organization (cascade will handle related records)
   await db.delete(organizations).where(eq(organizations.id, body.organizationId));
 
-  return c.json({ success: true });
+  return c.json({
+    success: true,
+    orphanedCount,
+    reparentedCount,
+    deletedCount: deletedCount + 1,
+  });
 });
+
+// Helper function to recursively update descendant paths
+async function updateDescendantPaths(parentId: string, parentPath: string, parentLevel: number) {
+  const children = await db
+    .select()
+    .from(organizations)
+    .where(eq(organizations.parentOrganizationId, parentId));
+
+  for (const child of children) {
+    const childPath = `${parentPath}${child.id}/`;
+    const childLevel = parentLevel + 1;
+    await db
+      .update(organizations)
+      .set({
+        hierarchyPath: childPath,
+        hierarchyLevel: childLevel,
+      })
+      .where(eq(organizations.id, child.id));
+    await updateDescendantPaths(child.id, childPath, childLevel);
+  }
+}
+
+// Helper function to cascade delete organization and all descendants
+async function cascadeDeleteOrganization(orgId: string): Promise<number> {
+  let deletedCount = 0;
+
+  // Get all children
+  const children = await db
+    .select()
+    .from(organizations)
+    .where(eq(organizations.parentOrganizationId, orgId));
+
+  // Recursively delete children first
+  for (const child of children) {
+    deletedCount += await cascadeDeleteOrganization(child.id);
+    await db.delete(organizations).where(eq(organizations.id, child.id));
+    deletedCount++;
+  }
+
+  return deletedCount;
+}
 
 // ============================================
 // Public Organization Profiles
@@ -2999,6 +3121,280 @@ organizationRoutes.get('/io.exprsn.org.getUserOrganizations', authMiddleware, as
       },
     })),
   });
+});
+
+// ============================================
+// Organization Hierarchy Endpoints
+// ============================================
+
+/**
+ * Get child organizations
+ * GET /xrpc/io.exprsn.org.getChildren
+ */
+organizationRoutes.get('/io.exprsn.org.getChildren', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  const orgId = c.req.query('id');
+
+  if (!orgId) {
+    return c.json({ error: 'Organization ID is required' }, 400);
+  }
+
+  // Check if user has access to the parent organization
+  const member = await db.query.organizationMembers.findFirst({
+    where: and(
+      eq(organizationMembers.organizationId, orgId),
+      eq(organizationMembers.userDid, userDid)
+    ),
+  });
+
+  if (!member) {
+    return c.json({ error: 'Access denied' }, 403);
+  }
+
+  // Get child organizations
+  const children = await db
+    .select({
+      id: organizations.id,
+      name: organizations.name,
+      displayName: organizations.displayName,
+      handle: organizations.handle,
+      type: organizations.type,
+      avatar: organizations.avatar,
+      verified: organizations.verified,
+      memberCount: organizations.memberCount,
+      hierarchyLevel: organizations.hierarchyLevel,
+    })
+    .from(organizations)
+    .where(eq(organizations.parentOrganizationId, orgId))
+    .orderBy(organizations.name);
+
+  return c.json({ children });
+});
+
+/**
+ * Get organization ancestors (parent chain)
+ * GET /xrpc/io.exprsn.org.getAncestors
+ */
+organizationRoutes.get('/io.exprsn.org.getAncestors', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  const orgId = c.req.query('id');
+
+  if (!orgId) {
+    return c.json({ error: 'Organization ID is required' }, 400);
+  }
+
+  // Check access
+  const member = await db.query.organizationMembers.findFirst({
+    where: and(
+      eq(organizationMembers.organizationId, orgId),
+      eq(organizationMembers.userDid, userDid)
+    ),
+  });
+
+  if (!member) {
+    return c.json({ error: 'Access denied' }, 403);
+  }
+
+  // Get the organization to find its hierarchy path
+  const org = await db.query.organizations.findFirst({
+    where: eq(organizations.id, orgId),
+  });
+
+  if (!org) {
+    return c.json({ error: 'Organization not found' }, 404);
+  }
+
+  // Parse hierarchy path and get ancestors
+  const ancestors: Array<{
+    id: string;
+    name: string;
+    displayName: string | null;
+    handle: string | null;
+    type: string;
+    level: number;
+  }> = [];
+
+  if (org.hierarchyPath) {
+    const pathIds = org.hierarchyPath.split('/').filter(Boolean);
+    // Exclude the current org from ancestors
+    const ancestorIds = pathIds.slice(0, -1);
+
+    if (ancestorIds.length > 0) {
+      const ancestorOrgs = await db
+        .select({
+          id: organizations.id,
+          name: organizations.name,
+          displayName: organizations.displayName,
+          handle: organizations.handle,
+          type: organizations.type,
+          hierarchyLevel: organizations.hierarchyLevel,
+        })
+        .from(organizations)
+        .where(sql`${organizations.id} = ANY(${ancestorIds})`);
+
+      // Sort by hierarchy level
+      ancestorOrgs.sort((a, b) => a.hierarchyLevel - b.hierarchyLevel);
+
+      for (const ancestor of ancestorOrgs) {
+        ancestors.push({
+          id: ancestor.id,
+          name: ancestor.name,
+          displayName: ancestor.displayName,
+          handle: ancestor.handle,
+          type: ancestor.type,
+          level: ancestor.hierarchyLevel,
+        });
+      }
+    }
+  }
+
+  return c.json({ ancestors });
+});
+
+/**
+ * Set parent organization
+ * POST /xrpc/io.exprsn.org.setParent
+ */
+organizationRoutes.post('/io.exprsn.org.setParent', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  const body = await c.req.json<{
+    organizationId: string;
+    parentOrganizationId: string | null;
+  }>();
+
+  const { organizationId, parentOrganizationId } = body;
+
+  if (!organizationId) {
+    return c.json({ error: 'Organization ID is required' }, 400);
+  }
+
+  // Check if user is owner of the organization
+  const member = await db.query.organizationMembers.findFirst({
+    where: and(
+      eq(organizationMembers.organizationId, organizationId),
+      eq(organizationMembers.userDid, userDid)
+    ),
+  });
+
+  if (!member || member.role !== 'owner') {
+    return c.json({ error: 'Only organization owners can change hierarchy' }, 403);
+  }
+
+  // If setting a parent, verify access to parent org
+  let newHierarchyPath = `/${organizationId}/`;
+  let newHierarchyLevel = 0;
+
+  if (parentOrganizationId) {
+    // Check user has permission on parent org
+    const parentMember = await db.query.organizationMembers.findFirst({
+      where: and(
+        eq(organizationMembers.organizationId, parentOrganizationId),
+        eq(organizationMembers.userDid, userDid)
+      ),
+    });
+
+    if (!parentMember || !['owner', 'admin'].includes(parentMember.role)) {
+      return c.json({ error: 'Access denied to parent organization' }, 403);
+    }
+
+    // Get parent org details
+    const parentOrg = await db.query.organizations.findFirst({
+      where: eq(organizations.id, parentOrganizationId),
+    });
+
+    if (!parentOrg) {
+      return c.json({ error: 'Parent organization not found' }, 404);
+    }
+
+    // Prevent circular reference
+    if (parentOrg.hierarchyPath?.includes(`/${organizationId}/`)) {
+      return c.json({ error: 'Cannot create circular hierarchy' }, 400);
+    }
+
+    // Calculate new hierarchy path and level
+    newHierarchyPath = `${parentOrg.hierarchyPath || `/${parentOrganizationId}/`}${organizationId}/`;
+    newHierarchyLevel = parentOrg.hierarchyLevel + 1;
+  }
+
+  // Update the organization
+  await db
+    .update(organizations)
+    .set({
+      parentOrganizationId,
+      hierarchyPath: newHierarchyPath,
+      hierarchyLevel: newHierarchyLevel,
+      updatedAt: new Date(),
+    })
+    .where(eq(organizations.id, organizationId));
+
+  // Update all descendant organizations' hierarchy paths
+  const descendants = await db
+    .select()
+    .from(organizations)
+    .where(sql`${organizations.hierarchyPath} LIKE ${`%/${organizationId}/%`}`);
+
+  for (const desc of descendants) {
+    if (desc.id !== organizationId && desc.hierarchyPath) {
+      // Find where the old path to this org ends and append the rest
+      const pathParts = desc.hierarchyPath.split(`/${organizationId}/`);
+      if (pathParts.length > 1) {
+        const newDescPath = `${newHierarchyPath}${pathParts[1]}`;
+        const newDescLevel = newDescPath.split('/').filter(Boolean).length - 1;
+
+        await db
+          .update(organizations)
+          .set({
+            hierarchyPath: newDescPath,
+            hierarchyLevel: newDescLevel,
+            updatedAt: new Date(),
+          })
+          .where(eq(organizations.id, desc.id));
+      }
+    }
+  }
+
+  return c.json({ success: true });
+});
+
+/**
+ * Set organization domain
+ * POST /xrpc/io.exprsn.org.setDomain
+ */
+organizationRoutes.post('/io.exprsn.org.setDomain', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  const body = await c.req.json<{
+    organizationId: string;
+    domainId: string | null;
+  }>();
+
+  const { organizationId, domainId } = body;
+
+  if (!organizationId) {
+    return c.json({ error: 'Organization ID is required' }, 400);
+  }
+
+  // Check if user is owner of the organization
+  const member = await db.query.organizationMembers.findFirst({
+    where: and(
+      eq(organizationMembers.organizationId, organizationId),
+      eq(organizationMembers.userDid, userDid)
+    ),
+  });
+
+  if (!member || member.role !== 'owner') {
+    return c.json({ error: 'Only organization owners can change domain association' }, 403);
+  }
+
+  // Update the organization's domain
+  await db
+    .update(organizations)
+    .set({
+      domainId,
+      updatedAt: new Date(),
+    })
+    .where(eq(organizations.id, organizationId));
+
+  return c.json({ success: true });
 });
 
 export default organizationRoutes;

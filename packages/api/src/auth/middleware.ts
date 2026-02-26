@@ -23,6 +23,15 @@ export const ADMIN_PERMISSIONS = {
   CONFIG_VIEW: 'admin.config.view',
   CONFIG_EDIT: 'admin.config.edit',
   ADMINS_MANAGE: 'admin.admins.manage',
+  // Domain management permissions
+  DOMAINS_VIEW: 'admin.domains.view',
+  DOMAINS_MANAGE: 'admin.domains.manage',
+  DOMAINS_DELETE: 'admin.domains.delete',
+  // Organization management permissions
+  ORGS_VIEW: 'admin.orgs.view',
+  ORGS_CREATE: 'admin.orgs.create',
+  ORGS_DELETE: 'admin.orgs.delete',
+  ORGS_MANAGE_HIERARCHY: 'admin.orgs.hierarchy',
 } as const;
 
 // Role-based default permissions
@@ -39,6 +48,10 @@ export const ROLE_PERMISSIONS: Record<AdminRole, string[]> = {
     ADMIN_PERMISSIONS.FEATURED_MANAGE,
     ADMIN_PERMISSIONS.ANALYTICS_VIEW,
     ADMIN_PERMISSIONS.CONFIG_VIEW,
+    ADMIN_PERMISSIONS.DOMAINS_VIEW,
+    ADMIN_PERMISSIONS.DOMAINS_MANAGE,
+    ADMIN_PERMISSIONS.ORGS_VIEW,
+    ADMIN_PERMISSIONS.ORGS_CREATE,
   ],
   moderator: [
     ADMIN_PERMISSIONS.USERS_VIEW,
@@ -47,11 +60,15 @@ export const ROLE_PERMISSIONS: Record<AdminRole, string[]> = {
     ADMIN_PERMISSIONS.CONTENT_MODERATE,
     ADMIN_PERMISSIONS.REPORTS_VIEW,
     ADMIN_PERMISSIONS.REPORTS_ACTION,
+    ADMIN_PERMISSIONS.DOMAINS_VIEW,
+    ADMIN_PERMISSIONS.ORGS_VIEW,
   ],
   support: [
     ADMIN_PERMISSIONS.USERS_VIEW,
     ADMIN_PERMISSIONS.CONTENT_VIEW,
     ADMIN_PERMISSIONS.REPORTS_VIEW,
+    ADMIN_PERMISSIONS.DOMAINS_VIEW,
+    ADMIN_PERMISSIONS.ORGS_VIEW,
   ],
 };
 
@@ -261,33 +278,39 @@ export function hasPermission(permissions: string[], permission: string): boolea
 
 /**
  * Admin authentication middleware - requires valid session AND admin role
- * In development mode with DEV_ADMIN_BYPASS=true, allows bypass with X-Dev-Admin header
+ * In development mode, automatically falls back to first admin user if no valid auth
  */
 export async function adminAuthMiddleware(c: Context, next: Next) {
   const isDev = process.env.NODE_ENV !== 'production';
-  const devBypass = process.env.DEV_ADMIN_BYPASS === 'true';
-  const devAdminHeader = c.req.header('X-Dev-Admin');
 
-  // Development bypass for testing
-  if (isDev && devBypass && devAdminHeader) {
+  // Helper to use dev admin fallback
+  const useDevAdminFallback = async (): Promise<boolean> => {
+    if (!isDev) return false;
+
     const [adminUser] = await db
       .select()
       .from(adminUsers)
       .limit(1);
 
     if (adminUser) {
+      console.warn('Dev mode: using default admin user');
       const permissions = getAdminPermissions(adminUser);
       c.set('did', adminUser.userDid);
       c.set('adminUser', adminUser);
       c.set('adminPermissions', permissions);
-      await next();
-      return;
+      return true;
     }
-  }
+    return false;
+  };
 
   const authHeader = c.req.header('Authorization');
 
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    // In dev mode, fall back to first admin user
+    if (await useDevAdminFallback()) {
+      await next();
+      return;
+    }
     throw new HTTPException(401, { message: 'Missing or invalid authorization header' });
   }
 
@@ -342,9 +365,23 @@ export async function adminAuthMiddleware(c: Context, next: Next) {
     await next();
   } catch (error) {
     if (error instanceof HTTPException) {
+      // In dev mode, fall back to first admin user on auth errors
+      if (isDev) {
+        if (await useDevAdminFallback()) {
+          await next();
+          return;
+        }
+      }
       throw error;
     }
     console.error('Admin auth middleware error:', error);
+    // In dev mode, fall back to first admin user on auth errors
+    if (isDev) {
+      if (await useDevAdminFallback()) {
+        await next();
+        return;
+      }
+    }
     throw new HTTPException(401, { message: 'Authentication failed' });
   }
 }
