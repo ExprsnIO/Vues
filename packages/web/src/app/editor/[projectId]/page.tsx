@@ -13,6 +13,7 @@ import {
   type SelectedTool,
 } from '@/lib/editor-context';
 import type { EffectInstance } from '@/components/editor/effects';
+import { ExportModal } from '@/components/editor/ExportModal';
 
 // Dynamically import heavy editor components
 const EditorCanvasEnhanced = dynamic(
@@ -114,6 +115,8 @@ async function loadProjectFromAPI(projectId: string, token: string): Promise<Edi
     audioTracks: [],
     nodeGraph: { nodes: [], connections: [] },
     globalEffects: [],
+    groups: [],
+    markers: [],
   };
 }
 
@@ -202,8 +205,9 @@ export default function EditorProjectPage() {
 // ============================================================================
 
 function EditorUI() {
-  const { state, dispatch } = useEditor();
+  const { state, dispatch, undo, redo, canUndo, canRedo } = useEditor();
   const router = useRouter();
+  const [showExportModal, setShowExportModal] = useState(false);
 
   const formatTimecode = useCallback((frame: number) => {
     const fps = state.project.fps;
@@ -235,6 +239,34 @@ function EditorUI() {
           </div>
           <div className="h-4 w-px bg-border" />
           <span className="text-text-primary font-medium">{state.project.name}</span>
+
+          {/* Undo/Redo */}
+          <div className="flex items-center gap-1">
+            <button
+              onClick={undo}
+              disabled={!canUndo}
+              className={`p-1.5 rounded transition-colors ${
+                canUndo
+                  ? 'text-text-muted hover:text-text-primary hover:bg-surface'
+                  : 'text-text-muted/40 cursor-not-allowed'
+              }`}
+              title="Undo (Ctrl+Z)"
+            >
+              <UndoIcon className="w-4 h-4" />
+            </button>
+            <button
+              onClick={redo}
+              disabled={!canRedo}
+              className={`p-1.5 rounded transition-colors ${
+                canRedo
+                  ? 'text-text-muted hover:text-text-primary hover:bg-surface'
+                  : 'text-text-muted/40 cursor-not-allowed'
+              }`}
+              title="Redo (Ctrl+Shift+Z)"
+            >
+              <RedoIcon className="w-4 h-4" />
+            </button>
+          </div>
 
           {/* Mode Toggle */}
           <div className="flex items-center bg-surface rounded-lg p-0.5">
@@ -275,10 +307,26 @@ function EditorUI() {
           <button className="px-3 py-1.5 text-sm font-medium text-text-primary hover:bg-surface rounded transition-colors">
             Preview
           </button>
-          <button className="px-3 py-1.5 text-sm font-medium bg-accent text-white rounded hover:bg-accent-hover transition-colors">
+          <button
+            onClick={() => setShowExportModal(true)}
+            className="px-3 py-1.5 text-sm font-medium bg-accent text-white rounded hover:bg-accent-hover transition-colors"
+          >
             Export
           </button>
         </header>
+
+        {/* Export Modal */}
+        {showExportModal && (
+          <ExportModal
+            projectId={state.project.id}
+            projectName={state.project.name}
+            width={state.project.width}
+            height={state.project.height}
+            fps={state.project.fps}
+            duration={state.project.duration}
+            onClose={() => setShowExportModal(false)}
+          />
+        )}
 
         {/* Main Editor Area */}
         <div className="flex-1 flex min-h-0">
@@ -429,6 +477,22 @@ function ShapeIcon({ className }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
       <path strokeLinecap="round" strokeLinejoin="round" d="M5.25 7.5A2.25 2.25 0 017.5 5.25h9a2.25 2.25 0 012.25 2.25v9a2.25 2.25 0 01-2.25 2.25h-9a2.25 2.25 0 01-2.25-2.25v-9z" />
+    </svg>
+  );
+}
+
+function UndoIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M9 15L3 9m0 0l6-6M3 9h12a6 6 0 010 12h-3" />
+    </svg>
+  );
+}
+
+function RedoIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M15 15l6-6m0 0l-6-6m6 6H9a6 6 0 000 12h3" />
     </svg>
   );
 }

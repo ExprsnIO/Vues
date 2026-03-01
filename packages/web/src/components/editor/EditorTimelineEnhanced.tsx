@@ -4,14 +4,18 @@ import { useRef, useCallback, useState, useMemo } from 'react';
 import { useEditor } from '@/lib/editor-context';
 import type { EditorElement, AudioTrack } from '@/lib/editor-context';
 import { useBeatSnapping, formatBpm } from '@/hooks/useBeatSnapping';
+import { useTimelineSnapping, getSnapLineColor, type SnapLine } from '@/hooks/useTimelineSnapping';
+import { useClipDrag, isDraggingElement, type ClipDragHandlers } from '@/hooks/useClipDrag';
+import type { ElementGroup } from '@/lib/editor-context';
 
 export function EditorTimelineEnhanced() {
-  const { state, dispatch, selectElement, setCurrentFrame, togglePlay } = useEditor();
+  const { state, dispatch, selectElement, setCurrentFrame, togglePlay, moveElement, trimElement, startBatch, endBatch } = useEditor();
   const timelineRef = useRef<HTMLDivElement>(null);
   const [timelineZoom, setTimelineZoom] = useState(1);
+  const [draggingElementId, setDraggingElementId] = useState<string | null>(null);
 
-  const { project, currentFrame, isPlaying, selectedElementIds, snapToBeats } = state;
-  const { fps, duration, elements, audioTracks } = project;
+  const { project, currentFrame, isPlaying, selectedElementIds, snapToBeats, snapToClips, showSnapLines } = state;
+  const { fps, duration, elements, audioTracks, markers: projectMarkers = [] } = project;
 
   const pixelsPerFrame = 4 * timelineZoom;
   const totalWidth = duration * pixelsPerFrame;
@@ -38,6 +42,45 @@ export function EditorTimelineEnhanced() {
 
   // Check if current frame is on a beat
   const isOnBeat = beatSnapping.isSnappedToBeat(currentFrame);
+
+  // Use timeline snapping hook
+  const snapping = useTimelineSnapping({
+    elements,
+    audioTracks,
+    currentFrame,
+    fps,
+    markers: projectMarkers,
+    snapToClips: snapToClips ?? true,
+    snapToBeats,
+    snapToPlayhead: true,
+    snapToMarkers: true,
+    snapThreshold: 5,
+    excludeElementIds: draggingElementId ? [draggingElementId] : [],
+  });
+
+  // Use clip drag hook
+  const [dragState, dragHandlers] = useClipDrag({
+    pixelsPerFrame,
+    minClipDuration: 5,
+    onMove: (id, startFrame, endFrame) => {
+      moveElement(id, startFrame, endFrame);
+    },
+    onTrim: (id, startFrame, endFrame) => {
+      trimElement(id, startFrame, endFrame);
+    },
+    snapFrame: snapping.snapFrame,
+    snapRange: snapping.snapRange,
+    updateSnapLines: snapping.updateSnapLines,
+    clearSnapLines: snapping.clearSnapLines,
+    onDragStart: (id) => {
+      setDraggingElementId(id);
+      startBatch();
+    },
+    onDragEnd: () => {
+      setDraggingElementId(null);
+      endBatch();
+    },
+  });
 
   // Jump to next beat
   const jumpToNextBeat = useCallback(() => {
@@ -76,12 +119,12 @@ export function EditorTimelineEnhanced() {
     return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}:${String(frames).padStart(2, '0')}`;
   }, [fps]);
 
-  // Generate time markers
-  const markers: { frame: number; label: string; major: boolean }[] = [];
+  // Generate time markers for ruler
+  const timeMarkers: { frame: number; label: string; major: boolean }[] = [];
   const markerInterval = Math.max(1, Math.floor(fps / timelineZoom));
   for (let f = 0; f <= duration; f += markerInterval) {
     const isMajor = f % (fps * 5) === 0;
-    markers.push({
+    timeMarkers.push({
       frame: f,
       label: isMajor ? formatTimecode(f) : '',
       major: isMajor,
@@ -271,7 +314,7 @@ export function EditorTimelineEnhanced() {
               className="h-6 border-b border-border relative bg-surface/30 cursor-pointer"
               onClick={handleTimelineClick}
             >
-              {markers.map(({ frame, label, major }) => (
+              {timeMarkers.map(({ frame, label, major }) => (
                 <div
                   key={frame}
                   className="absolute top-0 h-full"
@@ -297,17 +340,39 @@ export function EditorTimelineEnhanced() {
               </div>
             </div>
 
-            {/* Video Tracks */}
-            {elements.map((el) => (
-              <TrackRow
-                key={el.id}
-                element={el}
-                pixelsPerFrame={pixelsPerFrame}
-                isSelected={selectedElementIds.includes(el.id)}
-                currentFrame={currentFrame}
-                onClick={() => selectElement(el.id)}
+            {/* Snap Lines */}
+            {showSnapLines && snapping.activeSnapLines.map((line, i) => (
+              <div
+                key={`snap-${i}-${line.frame}`}
+                className={`absolute top-0 w-0.5 h-full pointer-events-none z-20 transition-opacity ${
+                  line.active ? 'opacity-100' : 'opacity-50'
+                }`}
+                style={{
+                  left: line.frame * pixelsPerFrame,
+                  backgroundColor: getSnapLineColor(line.type),
+                }}
               />
             ))}
+
+            {/* Video Tracks */}
+            {elements.map((el) => {
+              const isDragging = isDraggingElement(dragState, el.id);
+              return (
+                <TrackRow
+                  key={el.id}
+                  element={el}
+                  pixelsPerFrame={pixelsPerFrame}
+                  isSelected={selectedElementIds.includes(el.id)}
+                  currentFrame={currentFrame}
+                  onClick={() => selectElement(el.id)}
+                  isDragging={isDragging}
+                  previewStartFrame={isDragging ? dragState.previewStartFrame : undefined}
+                  previewEndFrame={isDragging ? dragState.previewEndFrame : undefined}
+                  dragHandlers={dragHandlers}
+                  group={project.groups.find(g => g.elementIds.includes(el.id))}
+                />
+              );
+            })}
 
             {/* Audio Tracks */}
             {audioTracks.map((track) => (
@@ -337,15 +402,29 @@ function TrackRow({
   isSelected,
   currentFrame,
   onClick,
+  isDragging,
+  previewStartFrame,
+  previewEndFrame,
+  dragHandlers,
+  group,
 }: {
   element: EditorElement;
   pixelsPerFrame: number;
   isSelected: boolean;
   currentFrame: number;
   onClick: () => void;
+  isDragging?: boolean;
+  previewStartFrame?: number;
+  previewEndFrame?: number;
+  dragHandlers: ClipDragHandlers;
+  group?: ElementGroup;
 }) {
-  const left = element.startFrame * pixelsPerFrame;
-  const width = (element.endFrame - element.startFrame) * pixelsPerFrame;
+  // Use preview frames during drag, otherwise actual frames
+  const displayStartFrame = isDragging && previewStartFrame !== undefined ? previewStartFrame : element.startFrame;
+  const displayEndFrame = isDragging && previewEndFrame !== undefined ? previewEndFrame : element.endFrame;
+
+  const left = displayStartFrame * pixelsPerFrame;
+  const width = (displayEndFrame - displayStartFrame) * pixelsPerFrame;
 
   // Get keyframe positions
   const keyframeFrames = new Set<number>();
@@ -353,28 +432,76 @@ function TrackRow({
     kfs.forEach(kf => keyframeFrames.add(kf.frame));
   });
 
+  const handleMouseDown = (e: React.MouseEvent) => {
+    // Only handle left click
+    if (e.button !== 0) return;
+    dragHandlers.onMouseDown(e, element.id, element.startFrame, element.endFrame);
+    onClick();
+  };
+
+  const handleMouseMove = (e: React.MouseEvent) => {
+    const clipLeft = element.startFrame * pixelsPerFrame;
+    const clipWidth = (element.endFrame - element.startFrame) * pixelsPerFrame;
+    const target = e.currentTarget as HTMLElement;
+    target.style.cursor = dragHandlers.getCursor(e, element.id, clipLeft, clipWidth);
+  };
+
   return (
     <div className="h-8 border-b border-border relative">
+      {/* Ghost outline showing original position during drag */}
+      {isDragging && (
+        <div
+          className="absolute top-1 bottom-1 rounded border border-dashed border-accent/30 bg-accent/5 pointer-events-none"
+          style={{
+            left: element.startFrame * pixelsPerFrame,
+            width: (element.endFrame - element.startFrame) * pixelsPerFrame,
+          }}
+        />
+      )}
+
       {/* Track clip */}
       <div
-        onClick={onClick}
-        className={`absolute top-1 bottom-1 rounded cursor-pointer transition-all ${
-          isSelected
-            ? 'bg-accent/40 border border-accent'
-            : 'bg-surface-hover hover:bg-surface border border-border'
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        className={`absolute top-1 bottom-1 rounded transition-all select-none ${
+          isDragging
+            ? 'bg-accent/50 border-2 border-accent shadow-lg z-10'
+            : isSelected
+              ? 'bg-accent/40 border border-accent'
+              : 'bg-surface-hover hover:bg-surface border border-border'
         }`}
-        style={{ left, width }}
+        style={{
+          left,
+          width,
+          // Add group color indicator
+          borderLeftColor: group?.color,
+          borderLeftWidth: group ? 3 : undefined,
+        }}
       >
-        <span className="absolute left-2 top-1/2 -translate-y-1/2 text-xs text-text-primary truncate max-w-full pr-4">
+        {/* Trim handles */}
+        <div className="absolute left-0 top-0 bottom-0 w-2 cursor-ew-resize hover:bg-white/20" />
+        <div className="absolute right-0 top-0 bottom-0 w-2 cursor-ew-resize hover:bg-white/20" />
+
+        <span className="absolute left-2 top-1/2 -translate-y-1/2 text-xs text-text-primary truncate max-w-full pr-4 pointer-events-none">
           {element.name}
         </span>
+
+        {/* Group indicator */}
+        {group && (
+          <span
+            className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] px-1 rounded pointer-events-none"
+            style={{ backgroundColor: group.color + '40', color: group.color }}
+          >
+            {group.name}
+          </span>
+        )}
 
         {/* Keyframe markers */}
         {Array.from(keyframeFrames).map((frame) => (
           <div
             key={frame}
-            className="absolute top-1/2 -translate-y-1/2 w-2 h-2 bg-yellow-500 rotate-45"
-            style={{ left: (frame - element.startFrame) * pixelsPerFrame - 4 }}
+            className="absolute top-1/2 -translate-y-1/2 w-2 h-2 bg-yellow-500 rotate-45 pointer-events-none"
+            style={{ left: (frame - displayStartFrame) * pixelsPerFrame - 4 }}
           />
         ))}
       </div>

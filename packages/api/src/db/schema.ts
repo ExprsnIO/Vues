@@ -83,6 +83,12 @@ export const videos = pgTable(
     angryCount: integer('angry_count').default(0).notNull(),
     // Organization publishing - when video is published on behalf of an org
     publishedAsOrgId: text('published_as_org_id'),
+    // Moderation and deletion
+    moderationStatus: text('moderation_status').default('approved').notNull(), // 'pending_review' | 'approved' | 'rejected' | 'auto_approved'
+    deletedAt: timestamp('deleted_at'),
+    deletedBy: text('deleted_by'),
+    deletionType: text('deletion_type'), // 'user_soft' | 'domain_mod' | 'global_admin' | 'system_hard'
+    deletionReason: text('deletion_reason'),
     indexedAt: timestamp('indexed_at').defaultNow().notNull(),
     createdAt: timestamp('created_at').notNull(),
   },
@@ -92,6 +98,8 @@ export const videos = pgTable(
     soundIdx: index('videos_sound_idx').on(table.soundUri),
     visibilityIdx: index('videos_visibility_idx').on(table.visibility),
     publishedAsOrgIdx: index('videos_published_as_org_idx').on(table.publishedAsOrgId),
+    moderationStatusIdx: index('videos_moderation_status_idx').on(table.moderationStatus),
+    deletedAtIdx: index('videos_deleted_at_idx').on(table.deletedAt),
   })
 );
 
@@ -312,6 +320,11 @@ export const uploadJobs = pgTable(
     hlsPlaylist: text('hls_playlist'),
     thumbnailUrl: text('thumbnail_url'),
     error: text('error'),
+    // Retry support
+    retryCount: integer('retry_count').default(0).notNull(),
+    maxRetries: integer('max_retries').default(5).notNull(),
+    lastRetryAt: timestamp('last_retry_at'),
+    retryHistory: jsonb('retry_history').$type<Array<{ attemptedAt: string; error: string }>>().default([]),
     createdAt: timestamp('created_at').defaultNow().notNull(),
     updatedAt: timestamp('updated_at').defaultNow().notNull(),
   },
@@ -2720,6 +2733,70 @@ export const editorProjectHistory = pgTable(
   })
 );
 
+// Editor comments - collaboration comments on projects
+export const editorComments = pgTable(
+  'editor_comments',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => editorProjects.id, { onDelete: 'cascade' }),
+    userDid: text('user_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    parentId: text('parent_id'), // For threaded replies (self-reference)
+    // Position - either frame-based or canvas-based
+    frame: integer('frame'), // Frame number for timeline comments
+    canvasX: real('canvas_x'), // X position for canvas pin comments
+    canvasY: real('canvas_y'), // Y position for canvas pin comments
+    elementId: text('element_id'), // Optional reference to specific element
+    // Content
+    content: text('content').notNull(),
+    // Status
+    resolved: boolean('resolved').default(false),
+    resolvedAt: timestamp('resolved_at'),
+    resolvedByDid: text('resolved_by_did').references(() => users.did, { onDelete: 'set null' }),
+    // Metadata
+    mentionedDids: jsonb('mentioned_dids').$type<string[]>().default([]),
+    // Timestamps
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    projectIdx: index('editor_comments_project_idx').on(table.projectId),
+    userIdx: index('editor_comments_user_idx').on(table.userDid),
+    parentIdx: index('editor_comments_parent_idx').on(table.parentId),
+    frameIdx: index('editor_comments_frame_idx').on(table.projectId, table.frame),
+    resolvedIdx: index('editor_comments_resolved_idx').on(table.resolved),
+    createdIdx: index('editor_comments_created_idx').on(table.createdAt),
+  })
+);
+
+// Editor comment reactions - reactions to comments
+export const editorCommentReactions = pgTable(
+  'editor_comment_reactions',
+  {
+    id: text('id').primaryKey(),
+    commentId: text('comment_id')
+      .notNull()
+      .references(() => editorComments.id, { onDelete: 'cascade' }),
+    userDid: text('user_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    emoji: text('emoji').notNull(), // Unicode emoji
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    commentIdx: index('editor_comment_reactions_comment_idx').on(table.commentId),
+    userIdx: index('editor_comment_reactions_user_idx').on(table.userDid),
+    uniqueReaction: uniqueIndex('editor_comment_reactions_unique_idx').on(
+      table.commentId,
+      table.userDid,
+      table.emoji
+    ),
+  })
+);
+
 // Render jobs - video export from editor projects
 export const renderJobs = pgTable(
   'render_jobs',
@@ -3727,6 +3804,7 @@ export const renderClusters = pgTable(
     region: text('region'),
     maxWorkers: integer('max_workers'),
     currentWorkers: integer('current_workers').default(0),
+    workerCount: integer('worker_count').default(0), // Total workers assigned to this cluster
     gpuEnabled: boolean('gpu_enabled').default(false),
     gpuCount: integer('gpu_count').default(0),
     priorityRouting: jsonb('priority_routing').$type<{
@@ -4336,7 +4414,7 @@ export interface DomainBranding {
 // Domain PLC (Identity) configuration type
 export interface DomainPlcConfig {
   enabled: boolean;
-  mode: 'standalone' | 'external' | 'disabled';
+  mode: 'standalone' | 'external';
   externalPlcUrl?: string;
   allowCustomHandles: boolean;
   requireInviteCode: boolean;
@@ -4530,6 +4608,202 @@ export const domainActivityLog = pgTable(
   })
 );
 
+// Domain Clusters - assign render clusters to domains
+export const domainClusters = pgTable(
+  'domain_clusters',
+  {
+    id: text('id').primaryKey(),
+    domainId: text('domain_id')
+      .notNull()
+      .references(() => domains.id, { onDelete: 'cascade' }),
+    clusterId: text('cluster_id')
+      .notNull()
+      .references(() => renderClusters.id, { onDelete: 'cascade' }),
+    isPrimary: boolean('is_primary').default(false).notNull(),
+    priority: integer('priority').default(0).notNull(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    domainIdx: index('domain_clusters_domain_idx').on(table.domainId),
+    clusterIdx: index('domain_clusters_cluster_idx').on(table.clusterId),
+    uniqueAssignment: uniqueIndex('domain_clusters_unique_idx').on(table.domainId, table.clusterId),
+  })
+);
+
+// Domain Services - platform service configuration per domain
+export const domainServices = pgTable(
+  'domain_services',
+  {
+    id: text('id').primaryKey(),
+    domainId: text('domain_id')
+      .notNull()
+      .references(() => domains.id, { onDelete: 'cascade' }),
+    serviceType: text('service_type').notNull(), // 'pds' | 'relay' | 'appview' | 'labeler'
+    enabled: boolean('enabled').default(false).notNull(),
+    endpoint: text('endpoint'),
+    config: jsonb('config').$type<{
+      // PDS Config
+      repoLimit?: number;
+      blobLimit?: number;
+      // Relay Config
+      firehoseEnabled?: boolean;
+      filterPatterns?: string[];
+      // AppView Config
+      indexingEnabled?: boolean;
+      searchEnabled?: boolean;
+      // Labeler Config
+      autoLabel?: boolean;
+      labelCategories?: string[];
+      // Common
+      customSettings?: Record<string, unknown>;
+    }>(),
+    status: text('status').default('inactive').notNull(), // 'inactive' | 'starting' | 'running' | 'error' | 'stopped'
+    lastHealthCheck: timestamp('last_health_check'),
+    errorMessage: text('error_message'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    domainIdx: index('domain_services_domain_idx').on(table.domainId),
+    typeIdx: index('domain_services_type_idx').on(table.serviceType),
+    statusIdx: index('domain_services_status_idx').on(table.status),
+    uniqueService: uniqueIndex('domain_services_unique_idx').on(table.domainId, table.serviceType),
+  })
+);
+
+// Domain Banned Words
+export const domainBannedWords = pgTable(
+  'domain_banned_words',
+  {
+    id: text('id').primaryKey(),
+    domainId: text('domain_id')
+      .notNull()
+      .references(() => domains.id, { onDelete: 'cascade' }),
+    word: text('word').notNull(),
+    severity: text('severity').default('medium').notNull(), // 'low' | 'medium' | 'high'
+    action: text('action').default('flag').notNull(), // 'flag' | 'hide' | 'remove'
+    enabled: boolean('enabled').default(true).notNull(),
+    createdBy: text('created_by').references(() => users.did, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    domainIdx: index('domain_banned_words_domain_idx').on(table.domainId),
+    severityIdx: index('domain_banned_words_severity_idx').on(table.severity),
+    uniqueWord: uniqueIndex('domain_banned_words_unique_idx').on(table.domainId, table.word),
+  })
+);
+
+// Domain Banned Tags
+export const domainBannedTags = pgTable(
+  'domain_banned_tags',
+  {
+    id: text('id').primaryKey(),
+    domainId: text('domain_id')
+      .notNull()
+      .references(() => domains.id, { onDelete: 'cascade' }),
+    tag: text('tag').notNull(),
+    severity: text('severity').default('medium').notNull(), // 'low' | 'medium' | 'high'
+    action: text('action').default('flag').notNull(), // 'flag' | 'hide' | 'remove'
+    enabled: boolean('enabled').default(true).notNull(),
+    createdBy: text('created_by').references(() => users.did, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    domainIdx: index('domain_banned_tags_domain_idx').on(table.domainId),
+    severityIdx: index('domain_banned_tags_severity_idx').on(table.severity),
+    uniqueTag: uniqueIndex('domain_banned_tags_unique_idx').on(table.domainId, table.tag),
+  })
+);
+
+// Domain Moderation Queue
+export const domainModerationQueue = pgTable(
+  'domain_moderation_queue',
+  {
+    id: text('id').primaryKey(),
+    domainId: text('domain_id')
+      .notNull()
+      .references(() => domains.id, { onDelete: 'cascade' }),
+    contentType: text('content_type').notNull(), // 'video' | 'comment' | 'loop' | 'user'
+    contentUri: text('content_uri').notNull(),
+    authorDid: text('author_did').references(() => users.did, { onDelete: 'set null' }),
+    reason: text('reason'),
+    autoFlagged: boolean('auto_flagged').default(false).notNull(),
+    flagSource: text('flag_source'), // 'user_report' | 'ai_detection' | 'keyword_match'
+    priority: text('priority').default('medium').notNull(), // 'low' | 'medium' | 'high' | 'critical'
+    status: text('status').default('pending').notNull(), // 'pending' | 'in_review' | 'escalated' | 'resolved'
+    assignedTo: text('assigned_to').references(() => users.did, { onDelete: 'set null' }),
+    resolvedBy: text('resolved_by').references(() => users.did, { onDelete: 'set null' }),
+    resolvedAt: timestamp('resolved_at'),
+    resolution: text('resolution'), // 'approved' | 'removed' | 'warning' | 'ban'
+    notes: text('notes'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    domainIdx: index('domain_mod_queue_domain_idx').on(table.domainId),
+    statusIdx: index('domain_mod_queue_status_idx').on(table.status),
+    priorityIdx: index('domain_mod_queue_priority_idx').on(table.priority),
+    authorIdx: index('domain_mod_queue_author_idx').on(table.authorDid),
+    assignedIdx: index('domain_mod_queue_assigned_idx').on(table.assignedTo),
+    createdIdx: index('domain_mod_queue_created_idx').on(table.createdAt),
+  })
+);
+
+// Domain Handle Reservations
+export const domainHandleReservations = pgTable(
+  'domain_handle_reservations',
+  {
+    id: text('id').primaryKey(),
+    domainId: text('domain_id')
+      .notNull()
+      .references(() => domains.id, { onDelete: 'cascade' }),
+    handle: text('handle').notNull(),
+    handleType: text('handle_type').default('user').notNull(), // 'user' | 'org'
+    reason: text('reason'),
+    reservedBy: text('reserved_by').references(() => users.did, { onDelete: 'set null' }),
+    expiresAt: timestamp('expires_at'),
+    claimedBy: text('claimed_by').references(() => users.did, { onDelete: 'set null' }),
+    claimedAt: timestamp('claimed_at'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    domainIdx: index('domain_handle_res_domain_idx').on(table.domainId),
+    handleIdx: index('domain_handle_res_handle_idx').on(table.handle),
+    expiresIdx: index('domain_handle_res_expires_idx').on(table.expiresAt),
+    uniqueHandle: uniqueIndex('domain_handle_res_unique_idx').on(table.domainId, table.handle),
+  })
+);
+
+// Domain Identities (PLC)
+export const domainIdentities = pgTable(
+  'domain_identities',
+  {
+    id: text('id').primaryKey(),
+    domainId: text('domain_id')
+      .notNull()
+      .references(() => domains.id, { onDelete: 'cascade' }),
+    did: text('did').notNull().unique(),
+    handle: text('handle').notNull(),
+    pdsEndpoint: text('pds_endpoint'),
+    signingKey: text('signing_key'),
+    rotationKeys: jsonb('rotation_keys').$type<string[]>(),
+    status: text('status').default('active').notNull(), // 'active' | 'deactivated' | 'tombstoned'
+    userDid: text('user_did').references(() => users.did, { onDelete: 'set null' }),
+    createdBy: text('created_by').references(() => users.did, { onDelete: 'set null' }),
+    tombstonedAt: timestamp('tombstoned_at'),
+    tombstoneReason: text('tombstone_reason'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    domainIdx: index('domain_identities_domain_idx').on(table.domainId),
+    handleIdx: index('domain_identities_handle_idx').on(table.handle),
+    statusIdx: index('domain_identities_status_idx').on(table.status),
+    userIdx: index('domain_identities_user_idx').on(table.userDid),
+    uniqueHandle: uniqueIndex('domain_identities_domain_handle_idx').on(table.domainId, table.handle),
+  })
+);
+
 // Domain Management type exports
 export type Domain = typeof domains.$inferSelect;
 export type NewDomain = typeof domains.$inferInsert;
@@ -4541,4 +4815,748 @@ export type DomainGroupMember = typeof domainGroupMembers.$inferSelect;
 export type NewDomainGroupMember = typeof domainGroupMembers.$inferInsert;
 export type DomainActivityLogEntry = typeof domainActivityLog.$inferSelect;
 export type NewDomainActivityLogEntry = typeof domainActivityLog.$inferInsert;
+export type DomainCluster = typeof domainClusters.$inferSelect;
+export type NewDomainCluster = typeof domainClusters.$inferInsert;
+export type DomainService = typeof domainServices.$inferSelect;
+export type NewDomainService = typeof domainServices.$inferInsert;
+export type DomainBannedWord = typeof domainBannedWords.$inferSelect;
+export type NewDomainBannedWord = typeof domainBannedWords.$inferInsert;
+export type DomainBannedTag = typeof domainBannedTags.$inferSelect;
+export type NewDomainBannedTag = typeof domainBannedTags.$inferInsert;
+export type DomainModerationQueueItem = typeof domainModerationQueue.$inferSelect;
+export type NewDomainModerationQueueItem = typeof domainModerationQueue.$inferInsert;
+export type DomainHandleReservation = typeof domainHandleReservations.$inferSelect;
+export type NewDomainHandleReservation = typeof domainHandleReservations.$inferInsert;
+export type DomainIdentity = typeof domainIdentities.$inferSelect;
+export type NewDomainIdentity = typeof domainIdentities.$inferInsert;
 
+// ============================================
+// SSO Infrastructure Tables
+// OAuth2/OIDC Provider, SAML Provider, Social Login, Domain SSO
+// ============================================
+
+// OAuth2 Client Applications (for Exprsn as OIDC Provider)
+export const oauthClients = pgTable(
+  'oauth_clients',
+  {
+    id: text('id').primaryKey(),
+    clientId: text('client_id').notNull().unique(),
+    clientSecretHash: text('client_secret_hash'), // NULL for public clients
+    clientName: text('client_name').notNull(),
+    clientUri: text('client_uri'),
+    logoUri: text('logo_uri'),
+
+    // Client type
+    clientType: text('client_type').notNull().default('confidential'), // 'confidential' | 'public'
+    applicationType: text('application_type').default('web'), // 'web' | 'native' | 'spa'
+
+    // OAuth settings
+    redirectUris: jsonb('redirect_uris').$type<string[]>().notNull().default([]),
+    postLogoutRedirectUris: jsonb('post_logout_redirect_uris').$type<string[]>().default([]),
+    grantTypes: jsonb('grant_types').$type<string[]>().notNull().default(['authorization_code']),
+    responseTypes: jsonb('response_types').$type<string[]>().notNull().default(['code']),
+
+    // Token settings
+    tokenEndpointAuthMethod: text('token_endpoint_auth_method').default('client_secret_basic'),
+    accessTokenTtlSeconds: integer('access_token_ttl_seconds').default(3600),
+    refreshTokenTtlSeconds: integer('refresh_token_ttl_seconds').default(2592000),
+    idTokenTtlSeconds: integer('id_token_ttl_seconds').default(3600),
+
+    // Scopes and permissions
+    allowedScopes: jsonb('allowed_scopes').$type<string[]>().notNull().default(['openid', 'profile', 'email']),
+    requireConsent: boolean('require_consent').default(true),
+    requirePkce: boolean('require_pkce').default(true),
+
+    // Client JWKS (for private_key_jwt auth)
+    jwksUri: text('jwks_uri'),
+    jwks: jsonb('jwks'),
+
+    // Domain/Organization scoping
+    domainId: text('domain_id').references(() => domains.id, { onDelete: 'set null' }),
+    organizationId: text('organization_id').references(() => organizations.id, { onDelete: 'set null' }),
+
+    // Ownership
+    ownerDid: text('owner_did').references(() => users.did, { onDelete: 'set null' }),
+    contacts: jsonb('contacts').$type<string[]>(),
+    tosUri: text('tos_uri'),
+    policyUri: text('policy_uri'),
+
+    // Status
+    status: text('status').default('active'), // 'active' | 'suspended' | 'pending_approval'
+    approvedBy: text('approved_by'),
+    approvedAt: timestamp('approved_at'),
+
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    clientIdIdx: index('oauth_clients_client_id_idx').on(table.clientId),
+    domainIdx: index('oauth_clients_domain_idx').on(table.domainId),
+    ownerIdx: index('oauth_clients_owner_idx').on(table.ownerDid),
+    statusIdx: index('oauth_clients_status_idx').on(table.status),
+  })
+);
+
+// OAuth Authorization Codes
+export const oauthAuthorizationCodes = pgTable(
+  'oauth_authorization_codes',
+  {
+    code: text('code').primaryKey(),
+    clientId: text('client_id').notNull(),
+    userDid: text('user_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+
+    // Code details
+    redirectUri: text('redirect_uri').notNull(),
+    scope: text('scope').notNull(),
+    codeChallenge: text('code_challenge'),
+    codeChallengeMethod: text('code_challenge_method'), // 'S256' | 'plain'
+    nonce: text('nonce'),
+    state: text('state'),
+
+    // Expiration
+    expiresAt: timestamp('expires_at').notNull(),
+    usedAt: timestamp('used_at'),
+
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    clientIdx: index('oauth_auth_codes_client_idx').on(table.clientId),
+    userIdx: index('oauth_auth_codes_user_idx').on(table.userDid),
+    expiresIdx: index('oauth_auth_codes_expires_idx').on(table.expiresAt),
+  })
+);
+
+// OAuth Access/Refresh Tokens
+export const oauthTokens = pgTable(
+  'oauth_tokens',
+  {
+    id: text('id').primaryKey(),
+    clientId: text('client_id').notNull(),
+    userDid: text('user_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+
+    // Token hashes
+    accessTokenHash: text('access_token_hash').notNull().unique(),
+    refreshTokenHash: text('refresh_token_hash').unique(),
+    scope: text('scope').notNull(),
+
+    // Session tracking
+    sessionId: text('session_id'),
+
+    // Expiration
+    accessTokenExpiresAt: timestamp('access_token_expires_at').notNull(),
+    refreshTokenExpiresAt: timestamp('refresh_token_expires_at'),
+
+    // Revocation
+    revokedAt: timestamp('revoked_at'),
+    revokedBy: text('revoked_by'),
+    revocationReason: text('revocation_reason'),
+
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    clientIdx: index('oauth_tokens_client_idx').on(table.clientId),
+    userIdx: index('oauth_tokens_user_idx').on(table.userDid),
+    accessExpiresIdx: index('oauth_tokens_access_expires_idx').on(table.accessTokenExpiresAt),
+    refreshExpiresIdx: index('oauth_tokens_refresh_expires_idx').on(table.refreshTokenExpiresAt),
+  })
+);
+
+// User OAuth Consents
+export const oauthConsents = pgTable(
+  'oauth_consents',
+  {
+    id: text('id').primaryKey(),
+    userDid: text('user_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    clientId: text('client_id').notNull(),
+
+    // Granted scopes
+    scopes: jsonb('scopes').$type<string[]>().notNull(),
+
+    // Consent timestamps
+    grantedAt: timestamp('granted_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow(),
+    revokedAt: timestamp('revoked_at'),
+  },
+  (table) => ({
+    userIdx: index('oauth_consents_user_idx').on(table.userDid),
+    clientIdx: index('oauth_consents_client_idx').on(table.clientId),
+    uniqueConsent: uniqueIndex('oauth_consents_unique_idx').on(table.userDid, table.clientId),
+  })
+);
+
+// OIDC Signing Keys
+export const oidcSigningKeys = pgTable(
+  'oidc_signing_keys',
+  {
+    id: text('id').primaryKey(),
+    kid: text('kid').notNull().unique(), // Key ID for JWKS
+    algorithm: text('algorithm').default('RS256'),
+
+    // Keys
+    publicKey: text('public_key').notNull(),
+    privateKey: text('private_key').notNull(), // Encrypted at rest
+
+    // Key rotation lifecycle
+    status: text('status').default('active'), // 'active' | 'rotating' | 'retired'
+    promotedAt: timestamp('promoted_at'),
+    retiresAt: timestamp('retires_at'),
+
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    statusIdx: index('oidc_signing_keys_status_idx').on(table.status),
+    kidIdx: index('oidc_signing_keys_kid_idx').on(table.kid),
+  })
+);
+
+// SAML Service Providers (for Exprsn as SAML IdP)
+export const samlServiceProviders = pgTable(
+  'saml_service_providers',
+  {
+    id: text('id').primaryKey(),
+    entityId: text('entity_id').notNull().unique(),
+    name: text('name').notNull(),
+    description: text('description'),
+
+    // SP Endpoints
+    assertionConsumerServiceUrl: text('assertion_consumer_service_url').notNull(),
+    assertionConsumerServiceBinding: text('assertion_consumer_service_binding').default('HTTP-POST'),
+    singleLogoutServiceUrl: text('single_logout_service_url'),
+    singleLogoutServiceBinding: text('single_logout_service_binding').default('HTTP-POST'),
+
+    // NameID configuration
+    nameIdFormat: text('name_id_format').default('urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress'),
+
+    // SP Certificate
+    spCertificate: text('sp_certificate'),
+
+    // Attribute mapping
+    attributeMapping: jsonb('attribute_mapping').$type<Record<string, string>>(),
+    extraAttributes: jsonb('extra_attributes').$type<Array<{ name: string; value: string }>>().default([]),
+
+    // Domain/Organization scoping
+    domainId: text('domain_id').references(() => domains.id, { onDelete: 'set null' }),
+    organizationId: text('organization_id').references(() => organizations.id, { onDelete: 'set null' }),
+
+    // Signing settings
+    signAssertions: boolean('sign_assertions').default(true),
+    signResponse: boolean('sign_response').default(true),
+    encryptAssertions: boolean('encrypt_assertions').default(false),
+    signingCertId: text('signing_cert_id').references(() => caEntityCertificates.id),
+    encryptionCertId: text('encryption_cert_id').references(() => caEntityCertificates.id),
+
+    // Status
+    status: text('status').default('active'),
+    ownerDid: text('owner_did').references(() => users.did, { onDelete: 'set null' }),
+
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    entityIdIdx: index('saml_sps_entity_id_idx').on(table.entityId),
+    domainIdx: index('saml_sps_domain_idx').on(table.domainId),
+    statusIdx: index('saml_sps_status_idx').on(table.status),
+  })
+);
+
+// SAML Sessions (for SLO support)
+export const samlSessions = pgTable(
+  'saml_sessions',
+  {
+    id: text('id').primaryKey(),
+    sessionIndex: text('session_index').notNull().unique(),
+    spId: text('sp_id')
+      .notNull()
+      .references(() => samlServiceProviders.id, { onDelete: 'cascade' }),
+    userDid: text('user_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+
+    // NameID used in assertion
+    nameId: text('name_id').notNull(),
+    nameIdFormat: text('name_id_format').notNull(),
+
+    // Session lifetime
+    expiresAt: timestamp('expires_at').notNull(),
+    loggedOutAt: timestamp('logged_out_at'),
+
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    spIdx: index('saml_sessions_sp_idx').on(table.spId),
+    userIdx: index('saml_sessions_user_idx').on(table.userDid),
+    sessionIndexIdx: index('saml_sessions_session_index_idx').on(table.sessionIndex),
+    expiresIdx: index('saml_sessions_expires_idx').on(table.expiresAt),
+  })
+);
+
+// External Identity Providers (for Social Login / Enterprise SSO)
+export const externalIdentityProviders = pgTable(
+  'external_identity_providers',
+  {
+    id: text('id').primaryKey(),
+    name: text('name').notNull(),
+    type: text('type').notNull(), // 'oidc' | 'oauth2' | 'saml'
+    providerKey: text('provider_key').notNull().unique(), // 'google' | 'microsoft' | 'github' | etc.
+
+    // Display configuration
+    displayName: text('display_name').notNull(),
+    iconUrl: text('icon_url'),
+    buttonColor: text('button_color'),
+
+    // OAuth2/OIDC Configuration
+    clientId: text('client_id'),
+    clientSecret: text('client_secret'), // Encrypted
+    authorizationEndpoint: text('authorization_endpoint'),
+    tokenEndpoint: text('token_endpoint'),
+    userinfoEndpoint: text('userinfo_endpoint'),
+    jwksUri: text('jwks_uri'),
+    issuer: text('issuer'),
+
+    // SAML Configuration
+    ssoUrl: text('sso_url'),
+    sloUrl: text('slo_url'),
+    idpCertificate: text('idp_certificate'),
+    idpEntityId: text('idp_entity_id'),
+
+    // Request configuration
+    scopes: jsonb('scopes').$type<string[]>().default(['openid', 'profile', 'email']),
+
+    // Claim/Attribute mapping
+    claimMapping: jsonb('claim_mapping').$type<Record<string, string>>().default({
+      sub: 'external_id',
+      email: 'email',
+      name: 'display_name',
+      picture: 'avatar',
+    }),
+
+    // Domain scoping (NULL = global)
+    domainId: text('domain_id').references(() => domains.id, { onDelete: 'cascade' }),
+
+    // User provisioning
+    autoProvisionUsers: boolean('auto_provision_users').default(true),
+    defaultRole: text('default_role').default('member'),
+    requiredEmailDomain: text('required_email_domain'),
+
+    // Status
+    status: text('status').default('active'),
+    priority: integer('priority').default(0),
+
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    providerKeyIdx: index('ext_idp_provider_key_idx').on(table.providerKey),
+    domainIdx: index('ext_idp_domain_idx').on(table.domainId),
+    typeIdx: index('ext_idp_type_idx').on(table.type),
+    statusIdx: index('ext_idp_status_idx').on(table.status),
+  })
+);
+
+// Linked External Identities
+export const externalIdentities = pgTable(
+  'external_identities',
+  {
+    id: text('id').primaryKey(),
+    userDid: text('user_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    providerId: text('provider_id')
+      .notNull()
+      .references(() => externalIdentityProviders.id, { onDelete: 'cascade' }),
+
+    // External account info
+    externalId: text('external_id').notNull(),
+    email: text('email'),
+    displayName: text('display_name'),
+    avatar: text('avatar'),
+    profileUrl: text('profile_url'),
+
+    // OAuth tokens (encrypted)
+    accessToken: text('access_token'),
+    refreshToken: text('refresh_token'),
+    tokenExpiresAt: timestamp('token_expires_at'),
+
+    // Raw profile data
+    rawProfile: jsonb('raw_profile'),
+
+    // Linking timestamps
+    linkedAt: timestamp('linked_at').defaultNow().notNull(),
+    lastLoginAt: timestamp('last_login_at'),
+    unlinkedAt: timestamp('unlinked_at'),
+  },
+  (table) => ({
+    userIdx: index('ext_identities_user_idx').on(table.userDid),
+    providerIdx: index('ext_identities_provider_idx').on(table.providerId),
+    externalIdIdx: index('ext_identities_external_id_idx').on(table.externalId),
+    uniqueIdentity: uniqueIndex('ext_identities_unique_idx').on(table.providerId, table.externalId),
+  })
+);
+
+// OAuth State Storage (for CSRF protection)
+export const oauthStates = pgTable(
+  'oauth_states',
+  {
+    state: text('state').primaryKey(),
+    providerId: text('provider_id')
+      .notNull()
+      .references(() => externalIdentityProviders.id, { onDelete: 'cascade' }),
+
+    // PKCE
+    codeVerifier: text('code_verifier'),
+
+    // OIDC nonce
+    nonce: text('nonce'),
+
+    // Redirect after login
+    redirectUri: text('redirect_uri'),
+
+    // Optional: for account linking flow
+    userDid: text('user_did').references(() => users.did, { onDelete: 'cascade' }),
+
+    // Context
+    domainId: text('domain_id').references(() => domains.id, { onDelete: 'cascade' }),
+
+    expiresAt: timestamp('expires_at').notNull(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    providerIdx: index('oauth_states_provider_idx').on(table.providerId),
+    expiresIdx: index('oauth_states_expires_idx').on(table.expiresAt),
+  })
+);
+
+// SAML Assertions Received (audit)
+export const samlAssertionsReceived = pgTable(
+  'saml_assertions_received',
+  {
+    id: text('id').primaryKey(),
+    providerId: text('provider_id')
+      .notNull()
+      .references(() => externalIdentityProviders.id, { onDelete: 'cascade' }),
+    assertionId: text('assertion_id').notNull(),
+
+    // Linked user
+    userDid: text('user_did').references(() => users.did, { onDelete: 'set null' }),
+
+    // Assertion data
+    subjectNameId: text('subject_name_id').notNull(),
+    attributes: jsonb('attributes'),
+    conditions: jsonb('conditions'),
+
+    // Validation result
+    isValid: boolean('is_valid').notNull(),
+    validationErrors: jsonb('validation_errors').$type<string[]>(),
+
+    receivedAt: timestamp('received_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    providerIdx: index('saml_assertions_provider_idx').on(table.providerId),
+    userIdx: index('saml_assertions_user_idx').on(table.userDid),
+    receivedAtIdx: index('saml_assertions_received_at_idx').on(table.receivedAt),
+  })
+);
+
+// Domain SSO Configuration
+export const domainSsoConfig = pgTable(
+  'domain_sso_config',
+  {
+    id: text('id').primaryKey(),
+    domainId: text('domain_id')
+      .notNull()
+      .unique()
+      .references(() => domains.id, { onDelete: 'cascade' }),
+
+    // SSO Mode
+    ssoMode: text('sso_mode').default('optional'), // 'disabled' | 'optional' | 'required'
+
+    // Primary IdP for required mode
+    primaryIdpId: text('primary_idp_id').references(() => externalIdentityProviders.id, { onDelete: 'set null' }),
+
+    // Allowed IdPs
+    allowedIdpIds: jsonb('allowed_idp_ids').$type<string[]>().default([]),
+
+    // User provisioning
+    jitProvisioning: boolean('jit_provisioning').default(true),
+    defaultOrganizationId: text('default_organization_id').references(() => organizations.id, { onDelete: 'set null' }),
+    defaultRole: text('default_role').default('member'),
+
+    // Email domain enforcement
+    emailDomainVerification: boolean('email_domain_verification').default(true),
+    allowedEmailDomains: jsonb('allowed_email_domains').$type<string[]>().default([]),
+
+    // Session settings
+    forceReauthAfterHours: integer('force_reauth_after_hours').default(24),
+
+    // Audit
+    updatedBy: text('updated_by').references(() => users.did, { onDelete: 'set null' }),
+
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    domainIdx: index('domain_sso_config_domain_idx').on(table.domainId),
+    primaryIdpIdx: index('domain_sso_config_primary_idp_idx').on(table.primaryIdpId),
+  })
+);
+
+// SSO Audit Log
+export const ssoAuditLog = pgTable(
+  'sso_audit_log',
+  {
+    id: text('id').primaryKey(),
+
+    // Event type
+    eventType: text('event_type').notNull(), // 'login' | 'logout' | 'link' | 'unlink' | 'consent_grant' | 'consent_revoke' | 'token_issue' | 'token_revoke'
+
+    // Actor
+    userDid: text('user_did').references(() => users.did, { onDelete: 'set null' }),
+    clientId: text('client_id'),
+    providerId: text('provider_id').references(() => externalIdentityProviders.id, { onDelete: 'set null' }),
+
+    // Context
+    domainId: text('domain_id').references(() => domains.id, { onDelete: 'set null' }),
+    ipAddress: text('ip_address'),
+    userAgent: text('user_agent'),
+
+    // Event details
+    details: jsonb('details'),
+
+    // Result
+    success: boolean('success').notNull(),
+    errorMessage: text('error_message'),
+
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    userIdx: index('sso_audit_user_idx').on(table.userDid),
+    eventTypeIdx: index('sso_audit_event_type_idx').on(table.eventType),
+    createdAtIdx: index('sso_audit_created_at_idx').on(table.createdAt),
+    providerIdx: index('sso_audit_provider_idx').on(table.providerId),
+    domainIdx: index('sso_audit_domain_idx').on(table.domainId),
+  })
+);
+
+// SSO Infrastructure type exports
+export type OAuthClient = typeof oauthClients.$inferSelect;
+export type NewOAuthClient = typeof oauthClients.$inferInsert;
+export type OAuthAuthorizationCode = typeof oauthAuthorizationCodes.$inferSelect;
+export type NewOAuthAuthorizationCode = typeof oauthAuthorizationCodes.$inferInsert;
+export type OAuthToken = typeof oauthTokens.$inferSelect;
+export type NewOAuthToken = typeof oauthTokens.$inferInsert;
+export type OAuthConsent = typeof oauthConsents.$inferSelect;
+export type NewOAuthConsent = typeof oauthConsents.$inferInsert;
+export type OIDCSigningKey = typeof oidcSigningKeys.$inferSelect;
+export type NewOIDCSigningKey = typeof oidcSigningKeys.$inferInsert;
+export type SAMLServiceProvider = typeof samlServiceProviders.$inferSelect;
+export type NewSAMLServiceProvider = typeof samlServiceProviders.$inferInsert;
+export type SAMLSession = typeof samlSessions.$inferSelect;
+export type NewSAMLSession = typeof samlSessions.$inferInsert;
+export type ExternalIdentityProvider = typeof externalIdentityProviders.$inferSelect;
+export type NewExternalIdentityProvider = typeof externalIdentityProviders.$inferInsert;
+export type ExternalIdentity = typeof externalIdentities.$inferSelect;
+export type NewExternalIdentity = typeof externalIdentities.$inferInsert;
+export type OAuthState = typeof oauthStates.$inferSelect;
+export type NewOAuthState = typeof oauthStates.$inferInsert;
+export type SAMLAssertionReceived = typeof samlAssertionsReceived.$inferSelect;
+export type NewSAMLAssertionReceived = typeof samlAssertionsReceived.$inferInsert;
+export type DomainSSOConfig = typeof domainSsoConfig.$inferSelect;
+export type NewDomainSSOConfig = typeof domainSsoConfig.$inferInsert;
+export type SSOAuditLogEntry = typeof ssoAuditLog.$inferSelect;
+export type NewSSOAuditLogEntry = typeof ssoAuditLog.$inferInsert;
+
+// ==========================================
+// Video Moderation & Deletion System
+// ==========================================
+
+// Video Deletion Log - Audit trail for all video deletions
+export const videoDeletionLog = pgTable(
+  'video_deletion_log',
+  {
+    id: text('id').primaryKey(),
+    videoUri: text('video_uri').notNull(),
+    videoCid: text('video_cid'),
+    authorDid: text('author_did').notNull(),
+    deletedBy: text('deleted_by').notNull(),
+    deletionType: text('deletion_type').notNull(), // 'user_soft' | 'domain_mod' | 'global_admin' | 'system_hard'
+    reason: text('reason'),
+    // Preserved video metadata for audit
+    caption: text('caption'),
+    tags: jsonb('tags').$type<string[]>().default([]),
+    cdnUrl: text('cdn_url'),
+    thumbnailUrl: text('thumbnail_url'),
+    viewCount: integer('view_count').default(0),
+    likeCount: integer('like_count').default(0),
+    // Restore capability
+    canRestore: boolean('can_restore').default(true),
+    restoredAt: timestamp('restored_at'),
+    restoredBy: text('restored_by'),
+    // Domain context (if deleted by domain moderator)
+    domainId: text('domain_id'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    videoUriIdx: index('video_deletion_log_video_uri_idx').on(table.videoUri),
+    authorDidIdx: index('video_deletion_log_author_did_idx').on(table.authorDid),
+    deletedByIdx: index('video_deletion_log_deleted_by_idx').on(table.deletedBy),
+    deletionTypeIdx: index('video_deletion_log_deletion_type_idx').on(table.deletionType),
+    createdAtIdx: index('video_deletion_log_created_at_idx').on(table.createdAt),
+  })
+);
+
+// Moderation Notifications - In-app notifications for moderators
+export const moderationNotifications = pgTable(
+  'moderation_notifications',
+  {
+    id: text('id').primaryKey(),
+    recipientId: text('recipient_id').notNull(), // Admin user ID or 'all_moderators'
+    type: text('type').notNull(), // 'new_content' | 'escalation' | 'high_risk' | 'appeal' | 'queue_full'
+    priority: text('priority').default('normal').notNull(), // 'low' | 'normal' | 'high' | 'urgent'
+    title: text('title').notNull(),
+    message: text('message').notNull(),
+    // Related content
+    contentType: text('content_type'), // 'video' | 'comment' | 'profile'
+    contentId: text('content_id'),
+    contentUri: text('content_uri'),
+    // Metadata
+    metadata: jsonb('metadata').$type<Record<string, unknown>>().default({}),
+    // Status
+    readAt: timestamp('read_at'),
+    dismissedAt: timestamp('dismissed_at'),
+    actionedAt: timestamp('actioned_at'),
+    actionedBy: text('actioned_by'),
+    actionTaken: text('action_taken'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    expiresAt: timestamp('expires_at'),
+  },
+  (table) => ({
+    recipientIdx: index('moderation_notifications_recipient_idx').on(table.recipientId),
+    typeIdx: index('moderation_notifications_type_idx').on(table.type),
+    priorityIdx: index('moderation_notifications_priority_idx').on(table.priority),
+    readIdx: index('moderation_notifications_read_idx').on(table.readAt),
+    createdAtIdx: index('moderation_notifications_created_at_idx').on(table.createdAt),
+  })
+);
+
+// Trusted Users - Users eligible for auto-approval
+export const trustedUsers = pgTable(
+  'trusted_users',
+  {
+    id: text('id').primaryKey(),
+    userDid: text('user_did').notNull().unique(),
+    trustLevel: text('trust_level').default('basic').notNull(), // 'basic' | 'verified' | 'creator' | 'partner'
+    // Trust grants
+    autoApprove: boolean('auto_approve').default(true),
+    skipAiReview: boolean('skip_ai_review').default(false),
+    extendedUploadLimits: boolean('extended_upload_limits').default(false),
+    // Grant info
+    grantedBy: text('granted_by').notNull(),
+    grantedAt: timestamp('granted_at').defaultNow().notNull(),
+    grantReason: text('grant_reason'),
+    // Revocation
+    revokedAt: timestamp('revoked_at'),
+    revokedBy: text('revoked_by'),
+    revokeReason: text('revoke_reason'),
+    // Stats
+    totalUploads: integer('total_uploads').default(0),
+    approvedUploads: integer('approved_uploads').default(0),
+    rejectedUploads: integer('rejected_uploads').default(0),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    userDidIdx: index('trusted_users_user_did_idx').on(table.userDid),
+    trustLevelIdx: index('trusted_users_trust_level_idx').on(table.trustLevel),
+    autoApproveIdx: index('trusted_users_auto_approve_idx').on(table.autoApprove),
+  })
+);
+
+// Video Moderation Queue - Videos pending review
+export const videoModerationQueue = pgTable(
+  'video_moderation_queue',
+  {
+    id: text('id').primaryKey(),
+    videoUri: text('video_uri').notNull().unique(),
+    authorDid: text('author_did').notNull(),
+    // Submission info
+    submittedAt: timestamp('submitted_at').defaultNow().notNull(),
+    // Risk assessment
+    riskScore: integer('risk_score').default(0),
+    riskLevel: text('risk_level').default('unknown'), // 'unknown' | 'safe' | 'low' | 'medium' | 'high' | 'critical'
+    flags: jsonb('flags').$type<string[]>().default([]),
+    aiAnalysis: jsonb('ai_analysis').$type<Record<string, unknown>>().default({}),
+    // Review status
+    status: text('status').default('pending').notNull(), // 'pending' | 'in_review' | 'approved' | 'rejected' | 'escalated'
+    priority: integer('priority').default(0),
+    // Assignment
+    assignedTo: text('assigned_to'),
+    assignedAt: timestamp('assigned_at'),
+    // Review result
+    reviewedBy: text('reviewed_by'),
+    reviewedAt: timestamp('reviewed_at'),
+    reviewNotes: text('review_notes'),
+    rejectionReason: text('rejection_reason'),
+    // Domain context
+    domainId: text('domain_id'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    videoUriIdx: index('video_moderation_queue_video_uri_idx').on(table.videoUri),
+    authorDidIdx: index('video_moderation_queue_author_did_idx').on(table.authorDid),
+    statusIdx: index('video_moderation_queue_status_idx').on(table.status),
+    priorityIdx: index('video_moderation_queue_priority_idx').on(table.priority, table.submittedAt),
+    assignedToIdx: index('video_moderation_queue_assigned_to_idx').on(table.assignedTo),
+    riskLevelIdx: index('video_moderation_queue_risk_level_idx').on(table.riskLevel),
+  })
+);
+
+// Domain Moderators - Users with moderation privileges within a domain
+export const domainModerators = pgTable(
+  'domain_moderators',
+  {
+    id: text('id').primaryKey(),
+    domainId: text('domain_id').notNull(),
+    userDid: text('user_did').notNull(),
+    // Permissions
+    canApprove: boolean('can_approve').default(true),
+    canReject: boolean('can_reject').default(true),
+    canDelete: boolean('can_delete').default(false),
+    canEscalate: boolean('can_escalate').default(true),
+    canWarnUsers: boolean('can_warn_users').default(false),
+    canSuspendUsers: boolean('can_suspend_users').default(false),
+    // Assignment
+    appointedBy: text('appointed_by').notNull(),
+    appointedAt: timestamp('appointed_at').defaultNow().notNull(),
+    // Status
+    active: boolean('active').default(true),
+    deactivatedAt: timestamp('deactivated_at'),
+    deactivatedBy: text('deactivated_by'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    domainIdIdx: index('domain_moderators_domain_id_idx').on(table.domainId),
+    userDidIdx: index('domain_moderators_user_did_idx').on(table.userDid),
+    activeIdx: index('domain_moderators_active_idx').on(table.active),
+    domainUserUnique: uniqueIndex('domain_moderators_domain_user_idx').on(table.domainId, table.userDid),
+  })
+);
+
+// Video Moderation & Deletion type exports
+export type VideoDeletionLogEntry = typeof videoDeletionLog.$inferSelect;
+export type NewVideoDeletionLogEntry = typeof videoDeletionLog.$inferInsert;
+export type ModerationNotification = typeof moderationNotifications.$inferSelect;
+export type NewModerationNotification = typeof moderationNotifications.$inferInsert;
+export type TrustedUser = typeof trustedUsers.$inferSelect;
+export type NewTrustedUser = typeof trustedUsers.$inferInsert;
+export type VideoModerationQueueItem = typeof videoModerationQueue.$inferSelect;
+export type NewVideoModerationQueueItem = typeof videoModerationQueue.$inferInsert;
+export type DomainModerator = typeof domainModerators.$inferSelect;
+export type NewDomainModerator = typeof domainModerators.$inferInsert;
