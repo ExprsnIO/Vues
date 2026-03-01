@@ -232,6 +232,106 @@ moderationAdminRouter.get(
   }
 );
 
+/**
+ * Get appeal by ID with related sanction
+ */
+moderationAdminRouter.get(
+  '/io.exprsn.admin.moderation.getAppeal',
+  requirePermission(ADMIN_PERMISSIONS.CONTENT_VIEW),
+  async (c) => {
+    const appealId = c.req.query('appealId');
+
+    if (!appealId) {
+      return c.json({ error: 'appealId is required' }, 400);
+    }
+
+    try {
+      const service = getModerationService();
+      const result = await service.getAppealById(appealId);
+      if (!result) {
+        return c.json({ error: 'Appeal not found' }, 404);
+      }
+      return c.json(result);
+    } catch (error) {
+      console.error('Failed to get appeal:', error);
+      return c.json({ error: error instanceof Error ? error.message : 'Failed to get appeal' }, 500);
+    }
+  }
+);
+
+/**
+ * Review an appeal (approve or deny)
+ */
+moderationAdminRouter.post(
+  '/io.exprsn.admin.moderation.reviewAppeal',
+  requirePermission(ADMIN_PERMISSIONS.CONTENT_MODERATE),
+  async (c) => {
+    const body = await c.req.json<{
+      appealId: string;
+      decision: 'approved' | 'denied';
+      reviewNotes?: string;
+    }>();
+    const adminUser = c.get('adminUser');
+
+    if (!body.appealId || !body.decision) {
+      return c.json({ error: 'appealId and decision are required' }, 400);
+    }
+
+    if (!['approved', 'denied'].includes(body.decision)) {
+      return c.json({ error: 'decision must be "approved" or "denied"' }, 400);
+    }
+
+    try {
+      const service = getModerationService();
+      const appeal = await service.reviewAppeal(
+        body.appealId,
+        body.decision,
+        adminUser.userDid,
+        body.reviewNotes
+      );
+
+      // Send notification to user about appeal decision
+      const { getModerationNotificationService } = await import('../services/moderation/ModerationNotificationService.js');
+      const notificationService = getModerationNotificationService();
+      await notificationService.notifyAppealDecision(
+        appeal.userId,
+        appeal.id,
+        body.decision,
+        body.reviewNotes
+      );
+
+      return c.json({ success: true, appeal });
+    } catch (error) {
+      console.error('Failed to review appeal:', error);
+      return c.json({ error: error instanceof Error ? error.message : 'Failed to review appeal' }, 500);
+    }
+  }
+);
+
+/**
+ * Assign an appeal to a moderator
+ */
+moderationAdminRouter.post(
+  '/io.exprsn.admin.moderation.assignAppeal',
+  requirePermission(ADMIN_PERMISSIONS.CONTENT_MODERATE),
+  async (c) => {
+    const body = await c.req.json<{ appealId: string; assigneeId: string }>();
+
+    if (!body.appealId || !body.assigneeId) {
+      return c.json({ error: 'appealId and assigneeId are required' }, 400);
+    }
+
+    try {
+      const service = getModerationService();
+      await service.assignAppeal(body.appealId, body.assigneeId);
+      return c.json({ success: true });
+    } catch (error) {
+      console.error('Failed to assign appeal:', error);
+      return c.json({ error: error instanceof Error ? error.message : 'Failed to assign appeal' }, 500);
+    }
+  }
+);
+
 // ============================================
 // Reports
 // ============================================

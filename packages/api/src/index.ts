@@ -58,12 +58,19 @@ import soundsRouter from './routes/sounds.js';
 import challengesRouter from './routes/challenges.js';
 import { watchPartyRouter } from './routes/watchParty.js';
 import { reactionsRouter } from './routes/reactions.js';
+import ssoRoutes from './routes/sso/index.js';
+import { videoDeletionRouter } from './routes/video-deletion.js';
+import { videoModerationRouter } from './routes/video-moderation.js';
 import { initializeIdentityService } from './services/identity/index.js';
 import { cronService } from './services/cron/index.js';
 import { oauthAgent } from './services/oauth/OAuthAgent.js';
-import { scopeExtractMiddleware, configBasedRateLimit } from './auth/scope-middleware.js';
+import { db } from './db/index.js';
+import * as schema from './db/schema.js';
+import { gte, sql } from 'drizzle-orm';
+import { scopeExtractMiddleware, domainContextMiddleware, configBasedRateLimit } from './auth/scope-middleware.js';
 import { Redis } from 'ioredis';
 import { RelayService, CommitEvent as RelayCommitEvent } from '@exprsn/relay';
+import { setRelayService } from './services/relay/index.js';
 
 // Global relay service reference for use by PDS
 let relayService: RelayService | null = null;
@@ -71,7 +78,24 @@ let relayService: RelayService | null = null;
 const app = new Hono();
 
 // Global middleware
-app.use('*', cors());
+app.use('*', cors({
+  origin: (origin) => {
+    // Allow requests from configured origins or common development origins
+    const allowedOrigins = process.env.CORS_ORIGIN?.split(',') || [
+      'http://localhost:3000',
+      'http://localhost:3001',
+      'http://127.0.0.1:3000',
+    ];
+    // Allow if no origin (same-origin or non-browser) or if origin is in allowed list
+    if (!origin || allowedOrigins.includes(origin)) {
+      return origin || '*';
+    }
+    return null;
+  },
+  credentials: true,
+  allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowHeaders: ['Content-Type', 'Authorization', 'X-Dev-Admin'],
+}));
 app.use('*', logger());
 app.use('*', prettyJSON());
 app.use('*', secureHeaders({
@@ -81,7 +105,10 @@ app.use('*', secureHeaders({
 // OAuth scope extraction middleware for /xrpc routes
 app.use('/xrpc/*', scopeExtractMiddleware);
 
-// Config-based rate limiting for /xrpc routes
+// Domain context extraction middleware for /xrpc routes
+app.use('/xrpc/*', domainContextMiddleware);
+
+// Config-based rate limiting for /xrpc routes (uses domain context for domain-specific limits)
 app.use('/xrpc/*', configBasedRateLimit());
 
 // Health check
@@ -226,10 +253,15 @@ app.route('/xrpc', renderAdminRouter); // Render pipeline admin
 // NOTE: presetsRouter and clusterAdminRouter are mounted in main() after setup wizard
 // because clusterAdminRouter.use('*', adminAuthMiddleware) would intercept /first-run
 app.route('/xrpc', analyticsRoutes); // Creator analytics
+app.route('/xrpc', videoDeletionRouter); // Video deletion and upload retry
+app.route('/xrpc', videoModerationRouter); // Content moderation gate and queue
 // PLC routes - standard directory at /plc, XRPC routes already have /xrpc prefix
 app.route('/plc', plcRouter); // Standard PLC directory endpoints (did:plc resolution)
 // NOTE: plcRouter at '/' is mounted in main() after setup wizard to avoid /:did catching /first-run
 app.route('/oauth', oauthRouter);
+
+// SSO routes (OIDC Provider, SAML Provider, Social Login, Domain SSO)
+app.route('/sso', ssoRoutes);
 
 // PDS will be mounted after relay is initialized in main()
 const pdsConfig = getPdsConfig();
@@ -301,7 +333,6 @@ async function main() {
   // Mount setup wizard first (before any catch-all routes)
   // This must happen before PDS and other '/' mounted routes
   try {
-    // @ts-expect-error - optional dependency
     const { setupRouter } = await import('@exprsn/setup');
     app.route('/first-run', setupRouter);
     console.log('Setup wizard mounted at /first-run');
@@ -345,6 +376,9 @@ async function main() {
         maxBackfillEvents: parseInt(process.env.RELAY_MAX_BACKFILL || '10000', 10),
       });
 
+      // Set global relay service accessor for use by routes
+      setRelayService(relayService);
+
       console.log('Relay service initialized');
     } catch (err) {
       console.warn('Failed to initialize relay service:', err);
@@ -372,6 +406,126 @@ async function main() {
   const cronEnabled = process.env.CRON_ENABLED !== 'false';
   if (cronEnabled) {
     await cronService.initialize();
+
+    // Register preference computation job (every 15 minutes)
+    const { UserPreferenceModel } = await import('./services/preferences/UserPreferenceModel.js');
+    const prefModel = new UserPreferenceModel({
+      db: db as import('drizzle-orm/postgres-js').PostgresJsDatabase<typeof schema>,
+      lookbackDays: 7,
+      decayHalfLifeDays: 3,
+    });
+
+    cronService.register('preference-computation', 15 * 60 * 1000, async () => {
+      try {
+        // Get active users (interacted in last 24h)
+        const activeUsers = await db
+          .selectDistinct({ did: schema.userInteractions.userDid })
+          .from(schema.userInteractions)
+          .where(gte(schema.userInteractions.createdAt, sql`NOW() - INTERVAL '24 hours'`));
+
+        console.log(`Computing preferences for ${activeUsers.length} active users`);
+
+        for (const { did } of activeUsers) {
+          await prefModel.computePreferences(did);
+        }
+
+        console.log('Preference computation complete');
+      } catch (err) {
+        console.error('Preference computation failed:', err);
+      }
+    });
+    console.log('Preference computation cron job registered');
+
+    // Register creator fund distribution job (1st of each month at midnight UTC)
+    const creatorFundEnabled = process.env.CREATOR_FUND_ENABLED === 'true';
+    if (creatorFundEnabled) {
+      const { nanoid } = await import('nanoid');
+      const { format, subMonths } = await import('date-fns');
+
+      // Run daily at midnight-ish, check if it's the 1st of the month
+      cronService.register('creator-fund-distribution', 24 * 60 * 60 * 1000, async () => {
+        // Only run on the 1st of the month
+        const today = new Date();
+        if (today.getUTCDate() !== 1) {
+          return;
+        }
+
+        try {
+          const poolAmount = parseInt(process.env.CREATOR_FUND_MONTHLY_POOL || '10000', 10) * 100; // cents
+          const period = format(subMonths(today, 1), 'yyyy-MM');
+
+          console.log(`Starting creator fund distribution for ${period}, pool: $${poolAmount / 100}`);
+
+          // Get engagement scores for eligible creators (1000+ views last month)
+          const eligibleCreators = await db
+            .select({
+              creatorDid: schema.videos.authorDid,
+              totalViews: sql<number>`COALESCE(SUM(${schema.videos.viewCount}), 0)::int`,
+              totalLikes: sql<number>`COALESCE(SUM(${schema.videos.likeCount}), 0)::int`,
+            })
+            .from(schema.videos)
+            .where(
+              gte(schema.videos.createdAt, sql`DATE_TRUNC('month', NOW() - INTERVAL '1 month')`)
+            )
+            .groupBy(schema.videos.authorDid)
+            .having(sql`SUM(${schema.videos.viewCount}) >= 1000`);
+
+          if (eligibleCreators.length === 0) {
+            console.log('No eligible creators for creator fund this period');
+            return;
+          }
+
+          // Calculate total engagement (views * 1 + likes * 5)
+          const totalEngagement = eligibleCreators.reduce(
+            (sum, c) => sum + c.totalViews + c.totalLikes * 5,
+            0
+          );
+
+          // Distribute pool based on engagement share
+          for (const creator of eligibleCreators) {
+            const engagement = creator.totalViews + creator.totalLikes * 5;
+            const share = engagement / totalEngagement;
+            const payout = Math.floor(poolAmount * share);
+
+            if (payout < 100) continue; // Skip payouts under $1
+
+            await db.insert(schema.creatorFundPayouts).values({
+              id: nanoid(),
+              creatorDid: creator.creatorDid,
+              period,
+              viewCount: creator.totalViews,
+              engagementScore: engagement,
+              poolShare: share,
+              amount: payout,
+              status: 'pending',
+            }).onConflictDoNothing();
+
+            // Add to creator earnings
+            await db
+              .insert(schema.creatorEarnings)
+              .values({
+                userDid: creator.creatorDid,
+                totalEarnings: payout,
+                pendingBalance: payout,
+                availableBalance: 0,
+              })
+              .onConflictDoUpdate({
+                target: schema.creatorEarnings.userDid,
+                set: {
+                  totalEarnings: sql`${schema.creatorEarnings.totalEarnings} + ${payout}`,
+                  pendingBalance: sql`${schema.creatorEarnings.pendingBalance} + ${payout}`,
+                  updatedAt: new Date(),
+                },
+              });
+          }
+
+          console.log(`Creator fund distributed to ${eligibleCreators.length} creators`);
+        } catch (err) {
+          console.error('Creator fund distribution failed:', err);
+        }
+      });
+      console.log('Creator fund cron job registered');
+    }
   }
 
   // Initialize OAuth agent for automated token management
@@ -427,9 +581,27 @@ async function main() {
     app.route('/xrpc', relayRouter);
   }
 
+  // Initialize federation consumer for inbound federation
+  const federationConsumerEnabled = process.env.FEDERATION_CONSUMER_ENABLED === 'true';
+  if (federationConsumerEnabled) {
+    try {
+      const { FederationConsumerWorker } = await import('./workers/federationConsumer.js');
+      const federationConsumer = new FederationConsumerWorker({
+        db: db as import('drizzle-orm/postgres-js').PostgresJsDatabase<typeof schema>,
+      });
+      await federationConsumer.start();
+      console.log('Federation consumer started');
+    } catch (err) {
+      console.error('Failed to start federation consumer:', err);
+    }
+  }
+
   console.log(`Server running at http://${host}:${port}`);
   console.log('WebSocket namespaces: /chat, /editor-collab, /render-progress, /admin, /watch-party' + (relayEnabled ? ', /xrpc/com.atproto.sync.subscribeRepos' : ''));
-  console.log('Well-known endpoints: /.well-known/atproto-did, /.well-known/did.json, /.well-known/exprsn-services');
+  console.log('Well-known endpoints: /.well-known/atproto-did, /.well-known/did.json, /.well-known/openid-configuration, /.well-known/exprsn-services');
+  console.log('SSO endpoints: /sso/oauth/authorize, /sso/oauth/token, /sso/oauth/userinfo, /sso/oauth/jwks');
+  console.log('SAML endpoints: /sso/saml/metadata, /sso/saml/sso, /sso/saml/slo');
+  console.log('Social login: /sso/auth/providers, /sso/auth/:providerId/login, /sso/auth/callback');
 }
 
 main().catch((err) => {

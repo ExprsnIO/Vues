@@ -15,6 +15,7 @@ declare module 'hono' {
   interface ContextVariableMap {
     tokenScopes: string[];
     tokenType: 'local' | 'oauth' | 'apiKey' | 'service';
+    domainId?: string;
   }
 }
 
@@ -128,6 +129,58 @@ export async function scopeExtractMiddleware(c: Context, next: Next) {
 }
 
 /**
+ * Domain context middleware
+ * Resolves the domain context from request headers or user association
+ * Resolution order:
+ * 1. x-exprsn-domain header (explicit domain context)
+ * 2. Host header mapping (e.g., api.example.com -> domain record)
+ * 3. User's primary domain (via domainUsers table lookup)
+ */
+export async function domainContextMiddleware(c: Context, next: Next) {
+  const { domains, domainUsers } = await import('../db/schema.js');
+
+  // 1. Check explicit domain header
+  const explicitDomain = c.req.header('x-exprsn-domain');
+  if (explicitDomain) {
+    c.set('domainId', explicitDomain);
+    await next();
+    return;
+  }
+
+  // 2. Check Host header mapping
+  const host = c.req.header('host');
+  if (host) {
+    // Strip port number if present
+    const hostname = host.replace(/:\d+$/, '');
+
+    // Look up domain by hostname
+    const domain = await db.query.domains.findFirst({
+      where: eq(domains.domain, hostname),
+    });
+
+    if (domain) {
+      c.set('domainId', domain.id);
+      await next();
+      return;
+    }
+  }
+
+  // 3. Look up user's primary domain
+  const did = c.get('did');
+  if (did) {
+    const domainUser = await db.query.domainUsers.findFirst({
+      where: eq(domainUsers.userDid, did),
+    });
+
+    if (domainUser) {
+      c.set('domainId', domainUser.domainId);
+    }
+  }
+
+  await next();
+}
+
+/**
  * Factory function to create scope requirement middleware
  */
 export function requireScope(...requiredScopes: string[]) {
@@ -215,12 +268,14 @@ export function configBasedRateLimit() {
   return async (c: Context, next: Next) => {
     const did = c.get('did');
     const adminUser = c.get('adminUser');
+    const domainId = c.get('domainId');
     const endpoint = c.req.path;
 
-    // Get rate limit for this user
+    // Get rate limit for this user/domain
     const limits = await oauthAgent.getRateLimit({
       did,
       isAdmin: !!adminUser,
+      domainId,
     });
 
     const { redis } = await import('../cache/redis.js');

@@ -350,18 +350,37 @@ export class OAuthAgentService {
   }
 
   /**
-   * Get rate limit for a user/organization based on config
+   * Get rate limit for a user/organization/domain based on config
    */
   async getRateLimit(options: {
     did?: string;
     isAdmin?: boolean;
     organizationId?: string;
+    domainId?: string;
   }): Promise<{ requestsPerMinute: number; burstLimit: number }> {
     const [config] = await db
       .select()
       .from(authConfig)
       .where(eq(authConfig.id, 'default'))
       .limit(1);
+
+    // Check domain-specific limits first (highest priority)
+    if (options.domainId) {
+      const { domains } = await import('../../db/schema.js');
+      const [domain] = await db
+        .select()
+        .from(domains)
+        .where(eq(domains.id, options.domainId))
+        .limit(1);
+
+      const rateLimits = domain?.rateLimits as { requestsPerMinute?: number; burstLimit?: number } | null;
+      if (rateLimits?.requestsPerMinute) {
+        return {
+          requestsPerMinute: rateLimits.requestsPerMinute,
+          burstLimit: rateLimits.burstLimit || config?.userBurstLimit || 20,
+        };
+      }
+    }
 
     // Check organization-specific limits if applicable
     if (options.organizationId) {

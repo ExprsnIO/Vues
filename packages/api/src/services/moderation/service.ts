@@ -763,6 +763,119 @@ class ModerationService {
       processedAt: item.processedAt,
     };
   }
+
+  /**
+   * Review an appeal (approve or deny)
+   */
+  async reviewAppeal(
+    appealId: string,
+    decision: 'approved' | 'denied',
+    reviewedBy: string,
+    notes?: string
+  ): Promise<typeof moderationAppeals.$inferSelect> {
+    const appeal = await db.query.moderationAppeals.findFirst({
+      where: eq(moderationAppeals.id, appealId),
+    });
+
+    if (!appeal) {
+      throw new Error('Appeal not found');
+    }
+
+    const now = new Date();
+
+    // Update the appeal
+    const [updatedAppeal] = await db
+      .update(moderationAppeals)
+      .set({
+        status: decision,
+        decision,
+        reviewedBy,
+        reviewedAt: now,
+        reviewNotes: notes,
+        updatedAt: now,
+      })
+      .where(eq(moderationAppeals.id, appealId))
+      .returning();
+
+    if (!updatedAppeal) {
+      throw new Error('Failed to update appeal');
+    }
+
+    // If approved, reverse the sanction
+    if (decision === 'approved' && appeal.userActionId) {
+      await this.reverseSanction(appeal.userActionId);
+    }
+
+    // Log the action
+    await this.logAction({
+      action: `appeal_${decision}`,
+      contentType: 'appeal',
+      contentId: appealId,
+      sourceService: 'moderation',
+      performedBy: reviewedBy,
+      isAutomated: false,
+      reason: notes || `Appeal ${decision}`,
+    });
+
+    return updatedAppeal;
+  }
+
+  /**
+   * Reverse a user sanction (set active=false)
+   */
+  async reverseSanction(userActionId: string): Promise<void> {
+    const now = new Date();
+
+    await db
+      .update(moderationUserActions)
+      .set({
+        active: false,
+        expiresAt: now,
+        updatedAt: now,
+      })
+      .where(eq(moderationUserActions.id, userActionId));
+  }
+
+  /**
+   * Assign an appeal to a moderator for review
+   */
+  async assignAppeal(appealId: string, assigneeId: string): Promise<void> {
+    const now = new Date();
+
+    await db
+      .update(moderationAppeals)
+      .set({
+        status: 'reviewing',
+        reviewedBy: assigneeId,
+        updatedAt: now,
+      })
+      .where(eq(moderationAppeals.id, appealId));
+  }
+
+  /**
+   * Get a single appeal by ID with related user action
+   */
+  async getAppealById(appealId: string): Promise<{
+    appeal: typeof moderationAppeals.$inferSelect;
+    userAction?: typeof moderationUserActions.$inferSelect;
+  } | null> {
+    const appeal = await db.query.moderationAppeals.findFirst({
+      where: eq(moderationAppeals.id, appealId),
+    });
+
+    if (!appeal) {
+      return null;
+    }
+
+    let userAction: typeof moderationUserActions.$inferSelect | undefined;
+    if (appeal.userActionId) {
+      userAction = await db.query.moderationUserActions.findFirst({
+        where: eq(moderationUserActions.id, appeal.userActionId),
+      }) ?? undefined;
+    }
+
+    return { appeal, userAction };
+  }
 }
 
 // Singleton instance
