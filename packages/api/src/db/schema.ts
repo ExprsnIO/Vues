@@ -3401,6 +3401,7 @@ export const moderationAppeals = pgTable('moderation_appeals', {
   id: text('id').primaryKey(),
   moderationItemId: text('moderation_item_id').references(() => moderationItems.id),
   userActionId: text('user_action_id').references(() => moderationUserActions.id),
+  sanctionId: text('sanction_id').references(() => userSanctions.id), // Link to user_sanctions for user-initiated appeals
   userId: text('user_id').notNull(),
   reason: text('reason').notNull(),
   additionalInfo: text('additional_info'),
@@ -3416,6 +3417,7 @@ export const moderationAppeals = pgTable('moderation_appeals', {
   userIdIdx: index('moderation_appeals_user_id_idx').on(table.userId),
   statusIdx: index('moderation_appeals_status_idx').on(table.status),
   submittedAtIdx: index('moderation_appeals_submitted_at_idx').on(table.submittedAt),
+  sanctionIdIdx: index('moderation_appeals_sanction_id_idx').on(table.sanctionId),
 }));
 
 // AI Agents - configured AI moderation agents

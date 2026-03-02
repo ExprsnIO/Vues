@@ -1002,6 +1002,70 @@ class ApiClient {
     });
   }
 
+  // Studio Render Jobs
+  async createStudioRenderJob(data: {
+    projectId: string;
+    format?: 'mp4' | 'webm' | 'mov';
+    quality?: 'draft' | 'medium' | 'high' | 'ultra';
+    resolution?: { width: number; height: number };
+    frameRate?: number;
+    priority?: 'low' | 'normal' | 'high';
+  }): Promise<{ jobId: string; estimatedTime?: number }> {
+    return this.fetch('/xrpc/io.exprsn.studio.createRenderJob', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async getStudioRenderStatus(jobId: string): Promise<{
+    jobId: string;
+    projectId: string;
+    status: 'pending' | 'queued' | 'rendering' | 'encoding' | 'uploading' | 'completed' | 'failed' | 'paused';
+    progress: number;
+    currentStep?: string;
+    outputUrl?: string;
+    outputSize?: number;
+    duration?: number;
+    error?: string;
+    createdAt: string;
+    completedAt?: string;
+  }> {
+    return this.fetch(`/xrpc/io.exprsn.studio.getRenderStatus?jobId=${jobId}`);
+  }
+
+  async listStudioRenderJobs(options: {
+    projectId?: string;
+    status?: string;
+    limit?: number;
+  } = {}): Promise<{ jobs: Array<{
+    jobId: string;
+    projectId: string;
+    status: string;
+    progress: number;
+    outputUrl?: string;
+    createdAt: string;
+  }> }> {
+    const params = new URLSearchParams();
+    if (options.projectId) params.set('projectId', options.projectId);
+    if (options.status) params.set('status', options.status);
+    if (options.limit) params.set('limit', String(options.limit));
+    return this.fetch(`/xrpc/io.exprsn.studio.listRenderJobs?${params}`);
+  }
+
+  async cancelStudioRenderJob(jobId: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.studio.cancelRenderJob', {
+      method: 'POST',
+      body: JSON.stringify({ jobId }),
+    });
+  }
+
+  async retryStudioRenderJob(jobId: string): Promise<{ jobId: string }> {
+    return this.fetch('/xrpc/io.exprsn.studio.retryRenderJob', {
+      method: 'POST',
+      body: JSON.stringify({ jobId }),
+    });
+  }
+
   async getAdminReports(options: {
     status?: string;
     contentType?: string;
@@ -4520,6 +4584,85 @@ class ApiClient {
 
   async getUserWatchParties(): Promise<{ parties: WatchPartyView[] }> {
     return this.fetch('/xrpc/io.exprsn.party.getUserParties');
+  }
+
+  // =============================================================================
+  // User Moderation API (reports, sanctions, appeals)
+  // =============================================================================
+
+  async getUserModerationReports(status?: string): Promise<{
+    reports: Array<{
+      id: string;
+      contentType: string;
+      contentUri: string;
+      reason: string;
+      description?: string;
+      status: string;
+      actionTaken?: string;
+      createdAt: string;
+      reviewedAt?: string;
+    }>;
+    cursor?: string;
+  }> {
+    const params = new URLSearchParams();
+    if (status) params.set('status', status);
+    return this.fetch(`/xrpc/io.exprsn.user.moderation.getMyReports?${params}`);
+  }
+
+  async getUserAccountStatus(): Promise<{
+    accountStanding: 'good' | 'warning' | 'restricted';
+    activeSanctions: Array<{
+      id: string;
+      type: string;
+      reason: string;
+      expiresAt?: string;
+      appealStatus?: string;
+      createdAt: string;
+      canAppeal?: boolean;
+    }>;
+    sanctionHistory: Array<{
+      id: string;
+      type: string;
+      reason: string;
+      expiresAt?: string;
+      appealStatus?: string;
+      createdAt: string;
+    }>;
+  }> {
+    return this.fetch('/xrpc/io.exprsn.user.moderation.getAccountStatus');
+  }
+
+  async submitUserAppeal(data: {
+    sanctionId: string;
+    reason: string;
+    additionalInfo?: string;
+  }): Promise<{
+    success: boolean;
+    appealId: string;
+    message: string;
+  }> {
+    return this.fetch('/xrpc/io.exprsn.user.moderation.submitAppeal', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async getUserAppeals(): Promise<{
+    appeals: Array<{
+      id: string;
+      sanctionId?: string;
+      sanction?: { type: string; reason: string };
+      reason: string;
+      additionalInfo?: string;
+      status: string;
+      decision?: string;
+      reviewNotes?: string;
+      reviewedAt?: string;
+      submittedAt: string;
+    }>;
+    cursor?: string;
+  }> {
+    return this.fetch('/xrpc/io.exprsn.user.moderation.getMyAppeals');
   }
 }
 

@@ -61,6 +61,7 @@ import { reactionsRouter } from './routes/reactions.js';
 import ssoRoutes from './routes/sso/index.js';
 import { videoDeletionRouter } from './routes/video-deletion.js';
 import { videoModerationRouter } from './routes/video-moderation.js';
+import { userModerationRouter } from './routes/user-moderation.js';
 import { initializeIdentityService } from './services/identity/index.js';
 import { cronService } from './services/cron/index.js';
 import { oauthAgent } from './services/oauth/OAuthAgent.js';
@@ -70,6 +71,7 @@ import { gte, sql } from 'drizzle-orm';
 import { scopeExtractMiddleware, domainContextMiddleware, configBasedRateLimit } from './auth/scope-middleware.js';
 import { Redis } from 'ioredis';
 import { RelayService, CommitEvent as RelayCommitEvent } from '@exprsn/relay';
+import { initializeRenderService, S3StorageProvider } from './services/studio/RenderService.js';
 import { setRelayService } from './services/relay/index.js';
 
 // Global relay service reference for use by PDS
@@ -255,6 +257,7 @@ app.route('/xrpc', renderAdminRouter); // Render pipeline admin
 app.route('/xrpc', analyticsRoutes); // Creator analytics
 app.route('/xrpc', videoDeletionRouter); // Video deletion and upload retry
 app.route('/xrpc', videoModerationRouter); // Content moderation gate and queue
+app.route('/xrpc', userModerationRouter); // User-facing moderation (reports, sanctions, appeals)
 // PLC routes - standard directory at /plc, XRPC routes already have /xrpc prefix
 app.route('/plc', plcRouter); // Standard PLC directory endpoints (did:plc resolution)
 // NOTE: plcRouter at '/' is mounted in main() after setup wizard to avoid /:did catching /first-run
@@ -362,15 +365,25 @@ async function main() {
     console.warn('OAUTH_PRIVATE_KEY not set - OAuth disabled');
   }
 
-  // Initialize relay service before PDS (so onCommit callback works)
+  // Initialize Redis for various services (relay, render, caching)
   const relayEnabled = process.env.RELAY_ENABLED === 'true';
+  const renderEnabled = process.env.RENDER_ENABLED !== 'false';
   let redis: Redis | null = null;
 
-  if (relayEnabled) {
+  // Redis is needed for relay, render service, and caching
+  if (relayEnabled || renderEnabled) {
     try {
       const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
       redis = new Redis(redisUrl);
+      console.log('Redis connected');
+    } catch (err) {
+      console.warn('Failed to connect to Redis:', err);
+    }
+  }
 
+  // Initialize relay service if enabled
+  if (relayEnabled && redis) {
+    try {
       relayService = new RelayService({
         redis,
         maxBackfillEvents: parseInt(process.env.RELAY_MAX_BACKFILL || '10000', 10),
@@ -382,6 +395,28 @@ async function main() {
       console.log('Relay service initialized');
     } catch (err) {
       console.warn('Failed to initialize relay service:', err);
+    }
+  }
+
+  // Initialize RenderService if Redis is available
+  if (redis) {
+    try {
+      const bucketName = process.env.S3_BUCKET || process.env.DO_SPACES_BUCKET || 'exprsn-renders';
+      const cdnBaseUrl = process.env.CDN_URL || process.env.DO_SPACES_CDN || `https://${bucketName}.s3.amazonaws.com`;
+
+      const storageProvider = new S3StorageProvider({
+        bucketName,
+        cdnBaseUrl,
+      });
+
+      initializeRenderService({
+        redis,
+        storageProvider,
+        concurrency: parseInt(process.env.RENDER_WORKER_CONCURRENCY || '2', 10),
+      });
+      console.log('RenderService initialized');
+    } catch (err) {
+      console.warn('Failed to initialize RenderService:', err);
     }
   }
 
