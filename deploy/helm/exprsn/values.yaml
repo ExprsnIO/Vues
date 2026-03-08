@@ -1,0 +1,245 @@
+# Default values for Exprsn Helm chart
+
+# Global settings
+global:
+  environment: production
+  imagePullSecrets: []
+  storageClass: standard
+
+# API Service
+api:
+  enabled: true
+  replicaCount: 3
+  image:
+    repository: exprsn/api
+    tag: latest
+    pullPolicy: Always
+  service:
+    type: ClusterIP
+    port: 3000
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 2
+
+# Web Application
+web:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: exprsn/web
+    tag: latest
+    pullPolicy: Always
+  service:
+    type: ClusterIP
+    port: 3000
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+
+# Render Workers
+renderWorker:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: exprsn/render-worker
+    tag: latest
+    pullPolicy: Always
+  resources:
+    requests:
+      cpu: 1000m
+      memory: 2Gi
+    limits:
+      cpu: 4000m
+      memory: 8Gi
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 20
+    targetCPUUtilizationPercentage: 60
+  nodeSelector:
+    workload-type: compute
+  tolerations:
+    - key: "workload-type"
+      operator: "Equal"
+      value: "compute"
+      effect: "NoSchedule"
+
+# PDS (Personal Data Server)
+pds:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: exprsn/pds
+    tag: latest
+    pullPolicy: Always
+  service:
+    type: ClusterIP
+    port: 2583
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+# Relay
+relay:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: exprsn/relay
+    tag: latest
+    pullPolicy: Always
+  service:
+    type: ClusterIP
+    port: 2584
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# Feed Generator
+feedGenerator:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: exprsn/feed-generator
+    tag: latest
+    pullPolicy: Always
+  service:
+    type: ClusterIP
+    port: 3000
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# Ingress
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "500m"
+  hosts:
+    - host: exprsn.app
+      paths:
+        - path: /
+          pathType: Prefix
+          service: web
+    - host: api.exprsn.app
+      paths:
+        - path: /
+          pathType: Prefix
+          service: api
+  tls:
+    - secretName: exprsn-tls
+      hosts:
+        - exprsn.app
+        - api.exprsn.app
+
+# External Database
+externalDatabase:
+  host: ""
+  port: 5432
+  database: exprsn
+  username: exprsn
+  existingSecret: ""
+  existingSecretPasswordKey: password
+
+# External Redis
+externalRedis:
+  host: ""
+  port: 6379
+  existingSecret: ""
+  existingSecretPasswordKey: password
+
+# Built-in PostgreSQL (for dev/testing)
+postgresql:
+  enabled: false
+  auth:
+    username: exprsn
+    database: exprsn
+    existingSecret: ""
+  primary:
+    persistence:
+      enabled: true
+      size: 50Gi
+
+# Built-in Redis (for dev/testing)
+redis:
+  enabled: false
+  auth:
+    enabled: true
+    existingSecret: ""
+  master:
+    persistence:
+      enabled: true
+      size: 10Gi
+
+# S3/Object Storage
+objectStorage:
+  endpoint: ""
+  bucket: exprsn
+  region: us-east-1
+  existingSecret: ""
+  existingSecretAccessKey: access-key
+  existingSecretSecretKey: secret-key
+
+# Secrets (create manually or use external secrets manager)
+secrets:
+  create: false
+  jwtSecret: ""
+  encryptionKey: ""
+
+# Service Account
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+# Monitoring
+monitoring:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+    interval: 30s
+  prometheusRules:
+    enabled: true
+
+# Network Policies
+networkPolicies:
+  enabled: true

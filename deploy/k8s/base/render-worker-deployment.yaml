@@ -1,0 +1,143 @@
+# Exprsn Render Worker Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: exprsn-render-worker
+  namespace: exprsn
+  labels:
+    app: exprsn-render-worker
+    app.kubernetes.io/name: exprsn-render-worker
+    app.kubernetes.io/component: worker
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: exprsn-render-worker
+  template:
+    metadata:
+      labels:
+        app: exprsn-render-worker
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "3100"
+    spec:
+      serviceAccountName: exprsn-worker
+      terminationGracePeriodSeconds: 300
+      containers:
+        - name: render-worker
+          image: exprsn/render-worker:latest
+          imagePullPolicy: Always
+          ports:
+            - name: health
+              containerPort: 3100
+              protocol: TCP
+          env:
+            - name: NODE_ENV
+              value: "production"
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: exprsn-secrets
+                  key: redis-url
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: exprsn-secrets
+                  key: database-url
+            - name: S3_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: exprsn-config
+                  key: s3-endpoint
+            - name: S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: exprsn-secrets
+                  key: s3-access-key
+            - name: S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: exprsn-secrets
+                  key: s3-secret-key
+            - name: WORKER_CONCURRENCY
+              value: "4"
+            - name: GRACEFUL_SHUTDOWN_TIMEOUT
+              value: "60000"
+          resources:
+            requests:
+              cpu: "1000m"
+              memory: "2Gi"
+            limits:
+              cpu: "4000m"
+              memory: "8Gi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: health
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: health
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+          volumeMounts:
+            - name: render-temp
+              mountPath: /tmp/renders
+      volumes:
+        - name: render-temp
+          emptyDir:
+            sizeLimit: 50Gi
+      nodeSelector:
+        workload-type: compute
+      tolerations:
+        - key: "workload-type"
+          operator: "Equal"
+          value: "compute"
+          effect: "NoSchedule"
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: exprsn-render-worker-hpa
+  namespace: exprsn
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: exprsn-render-worker
+  minReplicas: 2
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60
+    - type: External
+      external:
+        metric:
+          name: redis_queue_length
+          selector:
+            matchLabels:
+              queue: render-jobs
+        target:
+          type: AverageValue
+          averageValue: "5"
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Pods
+          value: 4
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 600
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 300

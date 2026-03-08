@@ -1,0 +1,8 @@
+# Exprsn Kubernetes Namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: exprsn
+  labels:
+    app.kubernetes.io/name: exprsn
+    app.kubernetes.io/part-of: exprsn
