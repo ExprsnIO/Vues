@@ -1311,6 +1311,7 @@ export const organizations = pgTable(
     bannerImage: text('banner_image'), // Profile banner
     location: text('location'),
     category: text('category'), // 'Music' | 'Gaming' | 'Education' | etc.
+    status: text('status').default('active').notNull(), // 'active' | 'suspended' | 'pending'
     socialLinks: jsonb('social_links').$type<{
       twitter?: string;
       instagram?: string;
@@ -1346,6 +1347,9 @@ export const organizations = pgTable(
     domainId: text('domain_id'),
     hierarchyPath: text('hierarchy_path'), // Materialized path: /root-id/parent-id/current-id/
     hierarchyLevel: integer('hierarchy_level').default(0).notNull(),
+    suspendedAt: timestamp('suspended_at'),
+    suspendedBy: text('suspended_by').references(() => users.did, { onDelete: 'set null' }),
+    suspendedReason: text('suspended_reason'),
     createdAt: timestamp('created_at').defaultNow().notNull(),
     updatedAt: timestamp('updated_at').defaultNow().notNull(),
   },
@@ -1353,6 +1357,7 @@ export const organizations = pgTable(
     ownerIdx: index('organizations_owner_idx').on(table.ownerDid),
     typeIdx: index('organizations_type_idx').on(table.type),
     nameIdx: index('organizations_name_idx').on(table.name),
+    statusIdx: index('organizations_status_idx').on(table.status),
     handleIdx: uniqueIndex('organizations_handle_idx').on(table.handle),
     publicIdx: index('organizations_public_idx').on(table.isPublic),
     verificationStatusIdx: index('organizations_verification_status_idx').on(table.verificationStatus),
@@ -4413,14 +4418,45 @@ export interface DomainBranding {
   customCss?: string;
 }
 
+export interface DomainFederationConfig {
+  enabled: boolean;
+  inboundEnabled: boolean;
+  outboundEnabled: boolean;
+  syncPosts: boolean;
+  syncLikes: boolean;
+  syncFollows: boolean;
+  syncProfiles: boolean;
+  syncBlobs: boolean;
+  discoveryEnabled: boolean;
+  searchEnabled: boolean;
+  allowedDomains: string[];
+  blockedDomains: string[];
+  preferredRelayEndpoints?: string[];
+}
+
+// DID method types - 'plc' is standard, 'exprn' is future custom method
+export type DidMethod = 'plc' | 'web' | 'exprn';
+
 // Domain PLC (Identity) configuration type
 export interface DomainPlcConfig {
   enabled: boolean;
   mode: 'standalone' | 'external';
+  // DID method to use for new identities
+  didMethod: DidMethod;
+  // Self-hosted PLC server configuration
+  selfHostedPlc?: {
+    enabled: boolean;
+    url: string;
+    rotationKey?: string; // PLC server's rotation key for signing operations
+    adminKey?: string; // Admin key for management operations
+  };
+  // External PLC directory (if mode is 'external')
   externalPlcUrl?: string;
   allowCustomHandles: boolean;
   requireInviteCode: boolean;
   defaultPdsEndpoint?: string;
+  // Handle suffix for this domain (e.g., 'exprsn' for @user.exprsn)
+  handleSuffix?: string;
   handleValidationRules?: {
     minLength: number;
     maxLength: number;
@@ -4490,8 +4526,23 @@ export const domains = pgTable(
     plcConfig: jsonb('plc_config').$type<DomainPlcConfig>().default({
       enabled: true,
       mode: 'standalone',
+      didMethod: 'plc',
       allowCustomHandles: false,
       requireInviteCode: false,
+    }),
+    federationConfig: jsonb('federation_config').$type<DomainFederationConfig>().default({
+      enabled: false,
+      inboundEnabled: true,
+      outboundEnabled: true,
+      syncPosts: true,
+      syncLikes: true,
+      syncFollows: true,
+      syncProfiles: true,
+      syncBlobs: true,
+      discoveryEnabled: true,
+      searchEnabled: true,
+      allowedDomains: [],
+      blockedDomains: [],
     }),
 
     // Stats
@@ -4563,6 +4614,29 @@ export const domainGroups = pgTable(
   })
 );
 
+export const domainRoles = pgTable(
+  'domain_roles',
+  {
+    id: text('id').primaryKey(),
+    domainId: text('domain_id')
+      .notNull()
+      .references(() => domains.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    displayName: text('display_name').notNull(),
+    description: text('description'),
+    isSystem: boolean('is_system').default(false).notNull(),
+    priority: integer('priority').default(0).notNull(),
+    permissions: jsonb('permissions').$type<string[]>().default([]),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    domainIdx: index('domain_roles_domain_idx').on(table.domainId),
+    uniqueRoleIdx: uniqueIndex('domain_roles_unique_idx').on(table.domainId, table.name),
+    priorityIdx: index('domain_roles_priority_idx').on(table.domainId, table.priority),
+  })
+);
+
 // Domain Group Members - users in domain groups
 export const domainGroupMembers = pgTable(
   'domain_group_members',
@@ -4582,6 +4656,46 @@ export const domainGroupMembers = pgTable(
     groupIdx: index('domain_group_members_group_idx').on(table.groupId),
     userIdx: index('domain_group_members_user_idx').on(table.userDid),
     uniqueMembership: uniqueIndex('domain_group_members_unique_idx').on(table.groupId, table.userDid),
+  })
+);
+
+export const domainUserRoles = pgTable(
+  'domain_user_roles',
+  {
+    id: text('id').primaryKey(),
+    domainUserId: text('domain_user_id')
+      .notNull()
+      .references(() => domainUsers.id, { onDelete: 'cascade' }),
+    roleId: text('role_id')
+      .notNull()
+      .references(() => domainRoles.id, { onDelete: 'cascade' }),
+    assignedBy: text('assigned_by').references(() => users.did, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    domainUserIdx: index('domain_user_roles_domain_user_idx').on(table.domainUserId),
+    roleIdx: index('domain_user_roles_role_idx').on(table.roleId),
+    uniqueAssignmentIdx: uniqueIndex('domain_user_roles_unique_idx').on(table.domainUserId, table.roleId),
+  })
+);
+
+export const domainGroupRoles = pgTable(
+  'domain_group_roles',
+  {
+    id: text('id').primaryKey(),
+    groupId: text('group_id')
+      .notNull()
+      .references(() => domainGroups.id, { onDelete: 'cascade' }),
+    roleId: text('role_id')
+      .notNull()
+      .references(() => domainRoles.id, { onDelete: 'cascade' }),
+    assignedBy: text('assigned_by').references(() => users.did, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    groupIdx: index('domain_group_roles_group_idx').on(table.groupId),
+    roleIdx: index('domain_group_roles_role_idx').on(table.roleId),
+    uniqueAssignmentIdx: uniqueIndex('domain_group_roles_unique_idx').on(table.groupId, table.roleId),
   })
 );
 
@@ -4813,8 +4927,14 @@ export type DomainUser = typeof domainUsers.$inferSelect;
 export type NewDomainUser = typeof domainUsers.$inferInsert;
 export type DomainGroup = typeof domainGroups.$inferSelect;
 export type NewDomainGroup = typeof domainGroups.$inferInsert;
+export type DomainRole = typeof domainRoles.$inferSelect;
+export type NewDomainRole = typeof domainRoles.$inferInsert;
 export type DomainGroupMember = typeof domainGroupMembers.$inferSelect;
 export type NewDomainGroupMember = typeof domainGroupMembers.$inferInsert;
+export type DomainUserRole = typeof domainUserRoles.$inferSelect;
+export type NewDomainUserRole = typeof domainUserRoles.$inferInsert;
+export type DomainGroupRole = typeof domainGroupRoles.$inferSelect;
+export type NewDomainGroupRole = typeof domainGroupRoles.$inferInsert;
 export type DomainActivityLogEntry = typeof domainActivityLog.$inferSelect;
 export type NewDomainActivityLogEntry = typeof domainActivityLog.$inferInsert;
 export type DomainCluster = typeof domainClusters.$inferSelect;
@@ -5145,6 +5265,7 @@ export const externalIdentityProviders = pgTable(
     autoProvisionUsers: boolean('auto_provision_users').default(true),
     defaultRole: text('default_role').default('member'),
     requiredEmailDomain: text('required_email_domain'),
+    jitConfig: jsonb('jit_config'),
 
     // Status
     status: text('status').default('active'),

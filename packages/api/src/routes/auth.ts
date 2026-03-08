@@ -3,20 +3,49 @@ import { HTTPException } from 'hono/http-exception';
 import bcrypt from 'bcryptjs';
 import { eq } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
+import crypto from 'crypto';
 import { db, actorRepos, users, sessions } from '../db/index.js';
+import { PlcService, getPlcConfig, type DidMethod } from '../services/plc/index.js';
 
 export const authRouter = new Hono();
 
-// Domain for DID generation
-const PDS_DOMAIN = process.env.PDS_DOMAIN || 'exprsn.local';
+// Domain for DID generation (fallback for legacy did:web)
+const PDS_DOMAIN = process.env.PDS_DOMAIN || 'localhost:3002';
+const PDS_ENDPOINT = process.env.PDS_ENDPOINT || 'http://localhost:3002';
 
 /**
- * Generate a did:web identifier
+ * Generate a DID based on the configured method
+ * Supports: did:plc (default), did:web (legacy), did:exprn (future)
  */
-function generateDid(handle: string): string {
-  // Format: did:web:domain:user:handle
-  const safeHandle = handle.replace(/[^a-z0-9]/gi, '').toLowerCase();
-  return `did:web:${PDS_DOMAIN}:user:${safeHandle}`;
+async function generateDid(handle: string, method?: DidMethod): Promise<string> {
+  const config = await getPlcConfig();
+  const didMethod = method || (config.enabled ? 'plc' : 'web');
+
+  switch (didMethod) {
+    case 'plc':
+      // Generate a proper did:plc identifier
+      return PlcService.generateDid();
+
+    case 'exprn':
+      // Future: Custom Exprsn DID method
+      // For now, use same format as plc but with exprn prefix
+      const randomBytes = crypto.randomBytes(16);
+      const base32Chars = 'abcdefghijklmnopqrstuvwxyz234567';
+      let result = '';
+      for (let i = 0; i < 24; i++) {
+        const byte = randomBytes[i % randomBytes.length];
+        if (byte !== undefined) {
+          result += base32Chars[byte % 32];
+        }
+      }
+      return `did:exprn:${result}`;
+
+    case 'web':
+    default:
+      // Legacy did:web format
+      const safeHandle = handle.replace(/[^a-z0-9]/gi, '').toLowerCase();
+      return `did:web:${PDS_DOMAIN}:user:${safeHandle}`;
+  }
 }
 
 /**
@@ -147,13 +176,34 @@ authRouter.post('/io.exprsn.auth.createAccount', async (c) => {
   }
 
   // Generate DID and keys
-  const did = generateDid(handle);
+  const did = await generateDid(handle);
   const { publicKey, privateKey } = await generateKeyPair();
   const passwordHash = await bcrypt.hash(body.password, 10);
 
   // Generate session tokens
   const { accessToken, refreshToken } = generateTokens();
   const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
+
+  // Get PLC config to determine if we should register with PLC
+  const plcConfig = await getPlcConfig();
+
+  // If PLC is enabled, register the DID with the PLC service
+  if (plcConfig.enabled && did.startsWith('did:plc:')) {
+    try {
+      // Convert the SPKI public key to multibase format for PLC
+      const publicKeyMultibase = `z${Buffer.from(publicKey, 'base64').toString('base64url')}`;
+
+      await PlcService.createDid({
+        handle: `${handle}.${plcConfig.handleSuffix || 'exprsn'}`,
+        signingKey: publicKeyMultibase,
+        rotationKeys: [publicKeyMultibase], // User controls their own rotation key
+        pdsEndpoint: PDS_ENDPOINT,
+      });
+    } catch (plcError) {
+      // Log but don't fail - PLC registration can be retried
+      console.error('Failed to register DID with PLC:', plcError);
+    }
+  }
 
   // Create account in actor_repos
   await db.insert(actorRepos).values({

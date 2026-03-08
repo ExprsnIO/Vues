@@ -77,15 +77,33 @@ export interface RotateKeyInput {
 }
 
 /**
+ * DID method types
+ */
+export type DidMethod = 'plc' | 'web' | 'exprn';
+
+/**
+ * Self-hosted PLC server configuration
+ */
+export interface SelfHostedPlcConfig {
+  enabled: boolean;
+  url: string;
+  rotationKey?: string;
+  adminKey?: string;
+}
+
+/**
  * PLC Configuration
  */
 export interface PlcConfig {
   enabled: boolean;
   mode: 'standalone' | 'external';
+  didMethod: DidMethod;
+  selfHostedPlc?: SelfHostedPlcConfig;
   externalPlcUrl?: string;
   domain: string;
   handleSuffix: string; // e.g., 'exprsn' for @user.exprsn
   orgHandleSuffix: string; // e.g., 'org.exprsn' for @user.org.exprsn
+  defaultPdsEndpoint?: string;
   allowCustomHandles: boolean;
   requireInviteCode: boolean;
 }
@@ -103,12 +121,15 @@ export async function getPlcConfig(): Promise<PlcConfig> {
   const config = result[0]?.value as Partial<PlcConfig> | undefined;
 
   return {
-    enabled: config?.enabled ?? process.env.PLC_ENABLED === 'true',
+    enabled: config?.enabled ?? (process.env.PLC_ENABLED !== 'false'),
     mode: config?.mode ?? (process.env.PLC_MODE as 'standalone' | 'external') ?? 'standalone',
+    didMethod: config?.didMethod ?? (process.env.DID_METHOD as DidMethod) ?? 'plc',
+    selfHostedPlc: config?.selfHostedPlc,
     externalPlcUrl: config?.externalPlcUrl ?? process.env.EXTERNAL_PLC_URL,
     domain: config?.domain ?? process.env.PLC_DOMAIN ?? 'plc.exprsn.io',
-    handleSuffix: config?.handleSuffix ?? 'exprsn',
+    handleSuffix: config?.handleSuffix ?? process.env.HANDLE_SUFFIX ?? 'exprsn',
     orgHandleSuffix: config?.orgHandleSuffix ?? 'org.exprsn',
+    defaultPdsEndpoint: config?.defaultPdsEndpoint ?? process.env.PDS_ENDPOINT ?? 'http://localhost:3002',
     allowCustomHandles: config?.allowCustomHandles ?? false,
     requireInviteCode: config?.requireInviteCode ?? false,
   };

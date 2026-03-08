@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { useAuth } from '@/lib/auth-context';
+import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
 type AccountType = 'user' | 'organization' | 'business' | 'creator';
@@ -120,6 +121,7 @@ export default function SignUpPage() {
     setIsLoading(true);
 
     try {
+      // Step 1: Create the user account
       await signUp({
         handle: formData.handle,
         email: formData.email,
@@ -127,14 +129,34 @@ export default function SignUpPage() {
         displayName: formData.displayName || formData.handle,
       });
 
-      // Store account type metadata for profile setup
-      // This can be used to prompt the user to complete their profile
-      if (accountType !== 'user') {
+      // Step 2: Create organization for business/organization accounts
+      if (accountType === 'organization' || accountType === 'business') {
+        try {
+          // Determine organization type
+          const orgType = accountType === 'business'
+            ? 'business'
+            : organizationType; // 'team' | 'enterprise' | 'nonprofit'
+
+          await api.createOrganization({
+            name: formData.organizationName,
+            type: orgType,
+            website: formData.website || undefined,
+          });
+        } catch (orgError) {
+          // Log the error but don't block signup - user can create org later
+          console.error('Failed to create organization:', orgError);
+          // Store pending setup for retry
+          localStorage.setItem('pendingAccountSetup', JSON.stringify({
+            accountType,
+            organizationType: accountType === 'organization' ? organizationType : undefined,
+            organizationName: formData.organizationName || undefined,
+            website: formData.website || undefined,
+          }));
+        }
+      } else if (accountType === 'creator') {
+        // Store creator metadata for profile setup
         localStorage.setItem('pendingAccountSetup', JSON.stringify({
           accountType,
-          organizationType: accountType === 'organization' ? organizationType : undefined,
-          organizationName: formData.organizationName || undefined,
-          website: formData.website || undefined,
         }));
       }
 
