@@ -63,20 +63,26 @@ function getSocket(token: string): Socket {
       auth: { token },
       transports: ['websocket', 'polling'],
       reconnection: true,
-      reconnectionAttempts: 5,
-      reconnectionDelay: 1000,
+      reconnectionAttempts: 3,
+      reconnectionDelay: 2000,
+      timeout: 5000,
     });
 
     socket.on('connect', () => {
-      console.log('AdminSocket: Connected');
+      if (process.env.NODE_ENV === 'development') {
+        console.log('AdminSocket: Connected');
+      }
     });
 
     socket.on('disconnect', (reason) => {
-      console.log('AdminSocket: Disconnected:', reason);
+      if (process.env.NODE_ENV === 'development') {
+        console.log('AdminSocket: Disconnected:', reason);
+      }
     });
 
     socket.on('connect_error', (error) => {
-      console.error('AdminSocket: Connection error:', error.message);
+      // Silently handle connection errors - this is expected when not authenticated
+      // or when admin socket is not available
     });
   }
 
