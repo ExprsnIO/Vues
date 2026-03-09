@@ -9,6 +9,7 @@ import { useAdminSocket, type AdminNotification } from '@/hooks/useAdminSocket';
 import { useAdminDomain } from '@/lib/admin-domain-context';
 import toast from 'react-hot-toast';
 import { useEffect } from 'react';
+import { AdminChart, MultiMetricChart } from '@/components/admin/charts/AdminChart';
 
 export default function AdminDashboard() {
   const { selectedDomainId, selectedDomain, isGlobal } = useAdminDomain();
@@ -195,6 +196,42 @@ export default function AdminDashboard() {
           />
         )}
       </div>
+
+      {/* Charts Section */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <AdminChart
+          title="User Growth"
+          metric="users"
+          domainId={!isGlobal ? selectedDomainId : undefined}
+          fill
+          color="#3b82f6"
+        />
+        <AdminChart
+          title="Video Uploads"
+          metric="videos"
+          domainId={!isGlobal ? selectedDomainId : undefined}
+          fill
+          color="#8b5cf6"
+        />
+      </div>
+
+      {isGlobal && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <MultiMetricChart
+            title="Engagement Metrics"
+            metrics={[
+              { metric: 'views', label: 'Views', color: '#10b981' },
+              { metric: 'likes', label: 'Likes', color: '#ef4444' },
+            ]}
+          />
+          <AdminChart
+            title="Moderation Reports"
+            metric="reports"
+            type="bar"
+            color="#f59e0b"
+          />
+        </div>
+      )}
 
       {/* Notifications Panel */}
       {notifications.length > 0 && (

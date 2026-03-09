@@ -41,6 +41,7 @@ interface NavGroup {
 }
 
 const STORAGE_KEY = 'admin-nav-expanded';
+const SIDEBAR_COLLAPSED_KEY = 'admin-sidebar-collapsed';
 
 function getInitialExpandedState(): string[] {
   if (typeof window === 'undefined') return ['users', 'content'];
@@ -49,6 +50,15 @@ function getInitialExpandedState(): string[] {
     return stored ? JSON.parse(stored) : ['users', 'content'];
   } catch {
     return ['users', 'content'];
+  }
+}
+
+function getInitialSidebarCollapsed(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === 'true';
+  } catch {
+    return false;
   }
 }
 
@@ -216,8 +226,26 @@ function AdminLayoutContent({ children }: { children: React.ReactNode }) {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expandedGroups, setExpandedGroups] = useState<string[]>(getInitialExpandedState);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(getInitialSidebarCollapsed);
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
   const { selectedDomainId, isGlobal } = useAdminDomain();
+
+  // Persist sidebar collapsed state
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(isSidebarCollapsed));
+    }
+  }, [isSidebarCollapsed]);
+
+  // Close mobile menu on route change
+  useEffect(() => {
+    setIsMobileMenuOpen(false);
+  }, [pathname]);
+
+  const toggleSidebar = useCallback(() => {
+    setIsSidebarCollapsed(prev => !prev);
+  }, []);
 
   // Poll quick stats every 30 seconds
   const { data: quickStats } = useQuery<QuickStats>({
@@ -334,37 +362,93 @@ function AdminLayoutContent({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="min-h-screen bg-background flex">
+      {/* Mobile menu backdrop */}
+      {isMobileMenuOpen && (
+        <div
+          className="fixed inset-0 bg-black/50 z-40 lg:hidden"
+          onClick={() => setIsMobileMenuOpen(false)}
+        />
+      )}
+
+      {/* Mobile header */}
+      <div className="fixed top-0 left-0 right-0 h-14 bg-surface border-b border-border flex items-center px-4 z-30 lg:hidden">
+        <button
+          onClick={() => setIsMobileMenuOpen(true)}
+          className="p-2 rounded-lg hover:bg-surface-hover text-text-secondary"
+        >
+          <MenuIcon className="w-5 h-5" />
+        </button>
+        <Link href="/admin" className="ml-3 flex items-center gap-2">
+          <div className="w-7 h-7 bg-gradient-to-br from-accent to-accent-hover rounded-lg flex items-center justify-center">
+            <span className="text-text-inverse font-bold text-xs">E</span>
+          </div>
+          <span className="font-bold text-text-primary text-sm">Admin</span>
+        </Link>
+      </div>
+
       {/* Sidebar */}
-      <aside className="w-64 bg-surface border-r border-border flex flex-col">
-        {/* Logo */}
-        <div className="p-4 border-b border-border">
+      <aside
+        className={`
+          fixed lg:sticky top-0 left-0 h-screen bg-surface border-r border-border flex flex-col z-50
+          transition-all duration-200 ease-in-out
+          ${isMobileMenuOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}
+          ${isSidebarCollapsed ? 'lg:w-16' : 'lg:w-64'} w-64
+        `}
+      >
+        {/* Logo + Toggle */}
+        <div className="p-4 border-b border-border flex items-center justify-between">
           <Link href="/admin" className="flex items-center gap-2">
-            <div className="w-8 h-8 bg-gradient-to-br from-accent to-accent-hover rounded-lg flex items-center justify-center">
+            <div className="w-8 h-8 bg-gradient-to-br from-accent to-accent-hover rounded-lg flex items-center justify-center flex-shrink-0">
               <span className="text-text-inverse font-bold text-sm">E</span>
             </div>
-            <span className="font-bold text-text-primary">Admin Panel</span>
+            {!isSidebarCollapsed && (
+              <span className="font-bold text-text-primary">Admin Panel</span>
+            )}
           </Link>
+          <div className="flex items-center gap-1">
+            {/* Mobile close button */}
+            <button
+              onClick={() => setIsMobileMenuOpen(false)}
+              className="p-1.5 rounded-lg hover:bg-surface-hover text-text-secondary lg:hidden"
+            >
+              <CloseIcon className="w-4 h-4" />
+            </button>
+            {/* Desktop collapse toggle */}
+            <button
+              onClick={toggleSidebar}
+              className="p-1.5 rounded-lg hover:bg-surface-hover text-text-secondary hidden lg:block"
+              title={isSidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            >
+              <CollapseIcon className={`w-4 h-4 transition-transform duration-200 ${isSidebarCollapsed ? 'rotate-180' : ''}`} />
+            </button>
+          </div>
         </div>
 
         {/* Domain Selector */}
-        <div className="p-3 border-b border-border">
-          <DomainSelector />
-        </div>
+        {!isSidebarCollapsed && (
+          <div className="p-3 border-b border-border">
+            <DomainSelector />
+          </div>
+        )}
 
         {/* Navigation */}
         <nav className="flex-1 p-3 overflow-y-auto">
           {/* Dashboard - standalone */}
-          <Link
-            href={dashboardHref}
-            className={`flex items-center gap-3 px-3 py-2 rounded-lg transition-colors mb-2 ${
-              pathname === dashboardHref || (pathname === '/admin' && isGlobal)
-                ? 'bg-accent text-text-inverse'
-                : 'text-text-secondary hover:bg-surface-hover hover:text-text-primary'
-            }`}
-          >
-            <DashboardIcon className="w-5 h-5" />
-            <span>Dashboard</span>
-          </Link>
+          <NavTooltip label="Dashboard" show={isSidebarCollapsed}>
+            <Link
+              href={dashboardHref}
+              className={`flex items-center gap-3 px-3 py-2 rounded-lg transition-colors mb-2 ${
+                isSidebarCollapsed ? 'justify-center' : ''
+              } ${
+                pathname === dashboardHref || (pathname === '/admin' && isGlobal)
+                  ? 'bg-accent text-text-inverse'
+                  : 'text-text-secondary hover:bg-surface-hover hover:text-text-primary'
+              }`}
+            >
+              <DashboardIcon className="w-5 h-5 flex-shrink-0" />
+              {!isSidebarCollapsed && <span>Dashboard</span>}
+            </Link>
+          </NavTooltip>
 
           {/* Accordion Groups */}
           <div className="space-y-1">
@@ -375,56 +459,66 @@ function AdminLayoutContent({ children }: { children: React.ReactNode }) {
               return (
                 <div key={group.id}>
                   {/* Group Header */}
-                  <button
-                    onClick={() => toggleGroup(group.id)}
-                    className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg transition-colors ${
-                      groupActive && !isExpanded
-                        ? 'bg-accent/10 text-accent'
-                        : 'text-text-secondary hover:bg-surface-hover hover:text-text-primary'
-                    }`}
-                  >
-                    <group.icon className="w-5 h-5" />
-                    <span className="flex-1 text-left text-sm font-medium">{group.label}</span>
-                    <ChevronIcon
-                      className={`w-4 h-4 transition-transform duration-200 ${
-                        isExpanded ? 'rotate-180' : ''
+                  <NavTooltip label={group.label} show={isSidebarCollapsed}>
+                    <button
+                      onClick={() => !isSidebarCollapsed && toggleGroup(group.id)}
+                      className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg transition-colors ${
+                        isSidebarCollapsed ? 'justify-center' : ''
+                      } ${
+                        groupActive && !isExpanded
+                          ? 'bg-accent/10 text-accent'
+                          : 'text-text-secondary hover:bg-surface-hover hover:text-text-primary'
                       }`}
-                    />
-                  </button>
-
-                  {/* Group Items */}
-                  <div
-                    className={`overflow-hidden transition-all duration-200 ${
-                      isExpanded ? 'max-h-96 opacity-100' : 'max-h-0 opacity-0'
-                    }`}
-                  >
-                    <ul className="ml-4 mt-1 space-y-0.5 border-l border-border pl-3">
-                      {group.items.map((item) => (
-                        <li key={item.href}>
-                          <Link
-                            href={item.href}
-                            className={`flex items-center gap-2 px-2 py-1.5 rounded-md transition-colors text-sm ${
-                              isActive(item.href)
-                                ? 'bg-accent text-text-inverse'
-                                : 'text-text-secondary hover:bg-surface-hover hover:text-text-primary'
+                    >
+                      <group.icon className="w-5 h-5 flex-shrink-0" />
+                      {!isSidebarCollapsed && (
+                        <>
+                          <span className="flex-1 text-left text-sm font-medium">{group.label}</span>
+                          <ChevronIcon
+                            className={`w-4 h-4 transition-transform duration-200 ${
+                              isExpanded ? 'rotate-180' : ''
                             }`}
-                          >
-                            <item.icon className="w-4 h-4" />
-                            <span className="flex-1">{item.label}</span>
-                            {item.badge !== undefined && item.badge > 0 && (
-                              <span
-                                className={`px-1.5 py-0.5 text-xs font-medium rounded-full text-white min-w-[18px] text-center ${
-                                  item.badgeColor || 'bg-accent'
-                                }`}
-                              >
-                                {item.badge > 99 ? '99+' : item.badge}
-                              </span>
-                            )}
-                          </Link>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
+                          />
+                        </>
+                      )}
+                    </button>
+                  </NavTooltip>
+
+                  {/* Group Items - only show when expanded and not collapsed */}
+                  {!isSidebarCollapsed && (
+                    <div
+                      className={`overflow-hidden transition-all duration-200 ${
+                        isExpanded ? 'max-h-96 opacity-100' : 'max-h-0 opacity-0'
+                      }`}
+                    >
+                      <ul className="ml-4 mt-1 space-y-0.5 border-l border-border pl-3">
+                        {group.items.map((item) => (
+                          <li key={item.href}>
+                            <Link
+                              href={item.href}
+                              className={`flex items-center gap-2 px-2 py-1.5 rounded-md transition-colors text-sm ${
+                                isActive(item.href)
+                                  ? 'bg-accent text-text-inverse'
+                                  : 'text-text-secondary hover:bg-surface-hover hover:text-text-primary'
+                              }`}
+                            >
+                              <item.icon className="w-4 h-4" />
+                              <span className="flex-1">{item.label}</span>
+                              {item.badge !== undefined && item.badge > 0 && (
+                                <span
+                                  className={`px-1.5 py-0.5 text-xs font-medium rounded-full text-white min-w-[18px] text-center ${
+                                    item.badgeColor || 'bg-accent'
+                                  }`}
+                                >
+                                  {item.badge > 99 ? '99+' : item.badge}
+                                </span>
+                              )}
+                            </Link>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -432,7 +526,7 @@ function AdminLayoutContent({ children }: { children: React.ReactNode }) {
         </nav>
 
         {/* Quick Stats Summary */}
-        {quickStats && (
+        {quickStats && !isSidebarCollapsed && (
           <div className="px-3 py-2 border-t border-border">
             <div className="grid grid-cols-2 gap-2 text-center">
               <div className="p-2 rounded-lg bg-surface-hover">
@@ -447,37 +541,55 @@ function AdminLayoutContent({ children }: { children: React.ReactNode }) {
           </div>
         )}
 
+        {/* Collapsed stats indicator */}
+        {quickStats && isSidebarCollapsed && (
+          <div className="px-2 py-2 border-t border-border">
+            <NavTooltip label={`${quickStats.activeUsersNow} online`} show={true}>
+              <div className="p-2 rounded-lg bg-surface-hover text-center">
+                <p className="text-sm font-bold text-text-primary">{quickStats.activeUsersNow}</p>
+              </div>
+            </NavTooltip>
+          </div>
+        )}
+
         {/* Admin info */}
         <div className="p-3 border-t border-border">
-          <div className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-full bg-surface-hover overflow-hidden flex-shrink-0">
-              {adminSession?.user?.avatar ? (
-                <img
-                  src={adminSession.user.avatar}
-                  alt={adminSession.user.handle}
-                  className="w-full h-full object-cover"
-                />
-              ) : (
-                <div className="w-full h-full flex items-center justify-center text-text-muted font-semibold text-sm">
-                  {adminSession?.user?.handle?.[0]?.toUpperCase() || '?'}
+          <NavTooltip
+            label={`${adminSession?.user?.displayName || adminSession?.user?.handle || 'Admin'} (${adminSession?.admin.role.replace('_', ' ')})`}
+            show={isSidebarCollapsed}
+          >
+            <div className={`flex items-center gap-2 ${isSidebarCollapsed ? 'justify-center' : ''}`}>
+              <div className="w-8 h-8 rounded-full bg-surface-hover overflow-hidden flex-shrink-0">
+                {adminSession?.user?.avatar ? (
+                  <img
+                    src={adminSession.user.avatar}
+                    alt={adminSession.user.handle}
+                    className="w-full h-full object-cover"
+                  />
+                ) : (
+                  <div className="w-full h-full flex items-center justify-center text-text-muted font-semibold text-sm">
+                    {adminSession?.user?.handle?.[0]?.toUpperCase() || '?'}
+                  </div>
+                )}
+              </div>
+              {!isSidebarCollapsed && (
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-text-primary truncate">
+                    {adminSession?.user?.displayName || adminSession?.user?.handle}
+                  </p>
+                  <p className="text-xs text-text-muted capitalize">
+                    {adminSession?.admin.role.replace('_', ' ')}
+                  </p>
                 </div>
               )}
             </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium text-text-primary truncate">
-                {adminSession?.user?.displayName || adminSession?.user?.handle}
-              </p>
-              <p className="text-xs text-text-muted capitalize">
-                {adminSession?.admin.role.replace('_', ' ')}
-              </p>
-            </div>
-          </div>
+          </NavTooltip>
         </div>
       </aside>
 
       {/* Main content */}
-      <main className="flex-1 overflow-auto">
-        <div className="p-8">{children}</div>
+      <main className="flex-1 overflow-auto pt-14 lg:pt-0">
+        <div className="p-4 lg:p-8">{children}</div>
       </main>
     </div>
   );
@@ -726,5 +838,43 @@ function TokensIcon({ className }: { className?: string }) {
     <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
       <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z" />
     </svg>
+  );
+}
+
+function MenuIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
+    </svg>
+  );
+}
+
+function CloseIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+    </svg>
+  );
+}
+
+function CollapseIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" />
+    </svg>
+  );
+}
+
+// Tooltip wrapper for collapsed sidebar items
+function NavTooltip({ children, label, show }: { children: React.ReactNode; label: string; show: boolean }) {
+  if (!show) return <>{children}</>;
+
+  return (
+    <div className="relative group">
+      {children}
+      <div className="absolute left-full top-1/2 -translate-y-1/2 ml-2 px-2 py-1 bg-surface-elevated border border-border rounded-md shadow-lg text-sm text-text-primary whitespace-nowrap opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-150 z-50 pointer-events-none">
+        {label}
+      </div>
+    </div>
   );
 }

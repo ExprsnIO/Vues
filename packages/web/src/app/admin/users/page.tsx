@@ -1,28 +1,59 @@
 'use client';
 
-import { useState, useMemo } from 'react';
+import { useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import { formatCount } from '@/lib/utils';
 import { BulkActionBar } from '@/components/admin/BulkActionBar';
 import { ExportButton } from '@/components/admin/ExportModal';
+import { DataTable, Column } from '@/components/admin/ui/DataTable';
+import { FilterBar } from '@/components/admin/ui/FilterBar';
+import { useAdminFilters } from '@/hooks/useAdminFilters';
 import toast from 'react-hot-toast';
 
+interface User {
+  did: string;
+  handle: string;
+  displayName?: string;
+  avatar?: string;
+  verified: boolean;
+  status: string;
+  followerCount: number;
+  videoCount: number;
+  createdAt: string;
+}
+
 export default function AdminUsersPage() {
-  const [search, setSearch] = useState('');
-  const [verified, setVerified] = useState<string>('');
-  const [sort, setSort] = useState('recent');
-  const [selectedDids, setSelectedDids] = useState<Set<string>>(new Set());
   const queryClient = useQueryClient();
 
+  const filters = useAdminFilters({
+    defaultSort: { key: 'createdAt', direction: 'desc' },
+    syncWithUrl: true,
+  });
+
+  // Map sort key to API sort param
+  const apiSortParam = useMemo(() => {
+    if (!filters.sortKey) return 'recent';
+    const sortMap: Record<string, string> = {
+      createdAt: 'recent',
+      followerCount: 'followers',
+      videoCount: 'videos',
+    };
+    return sortMap[filters.sortKey] || 'recent';
+  }, [filters.sortKey]);
+
   const { data, isLoading } = useQuery({
-    queryKey: ['admin', 'users', { search, verified, sort }],
+    queryKey: ['admin', 'users', {
+      search: filters.search,
+      verified: filters.filters.verified?.[0],
+      sort: apiSortParam,
+    }],
     queryFn: () =>
       api.getAdminUsers({
-        q: search || undefined,
-        verified: verified || undefined,
-        sort,
+        q: filters.search || undefined,
+        verified: filters.filters.verified?.[0] || undefined,
+        sort: apiSortParam,
       }),
   });
 
@@ -38,223 +69,163 @@ export default function AdminUsersPage() {
     },
   });
 
-  const users = data?.users || [];
+  const users: User[] = data?.users || [];
 
-  // Selection handlers
-  const toggleSelection = (did: string) => {
-    setSelectedDids((prev) => {
-      const next = new Set(prev);
-      if (next.has(did)) {
-        next.delete(did);
-      } else {
-        next.add(did);
-      }
-      return next;
-    });
-  };
+  const columns: Column<User>[] = useMemo(() => [
+    {
+      key: 'user',
+      header: 'User',
+      render: (user) => (
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-full bg-surface-hover overflow-hidden">
+            {user.avatar ? (
+              <img
+                src={user.avatar}
+                alt={user.handle}
+                className="w-full h-full object-cover"
+              />
+            ) : (
+              <div className="w-full h-full flex items-center justify-center text-text-muted font-semibold">
+                {user.handle[0]?.toUpperCase()}
+              </div>
+            )}
+          </div>
+          <div>
+            <p className="font-medium text-text-primary flex items-center gap-1">
+              {user.displayName || user.handle}
+              {user.verified && (
+                <VerifiedBadge className="w-4 h-4 text-accent" />
+              )}
+            </p>
+            <p className="text-sm text-text-muted">@{user.handle}</p>
+          </div>
+        </div>
+      ),
+    },
+    {
+      key: 'status',
+      header: 'Status',
+      render: (user) => <StatusBadge status={user.status} />,
+    },
+    {
+      key: 'followerCount',
+      header: 'Followers',
+      sortable: true,
+      render: (user) => <span className="text-text-primary">{formatCount(user.followerCount)}</span>,
+    },
+    {
+      key: 'videoCount',
+      header: 'Videos',
+      sortable: true,
+      render: (user) => <span className="text-text-primary">{formatCount(user.videoCount)}</span>,
+    },
+    {
+      key: 'createdAt',
+      header: 'Joined',
+      sortable: true,
+      render: (user) => (
+        <span className="text-text-muted">
+          {new Date(user.createdAt).toLocaleDateString()}
+        </span>
+      ),
+    },
+    {
+      key: 'actions',
+      header: 'Actions',
+      align: 'right',
+      render: (user) => (
+        <div className="flex items-center justify-end gap-2">
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              verifyMutation.mutate({
+                did: user.did,
+                verified: !user.verified,
+              });
+            }}
+            className="px-3 py-1 text-sm bg-surface-hover hover:bg-border rounded transition-colors"
+            disabled={verifyMutation.isPending}
+          >
+            {user.verified ? 'Unverify' : 'Verify'}
+          </button>
+          <Link
+            href={`/admin/users/${encodeURIComponent(user.did)}`}
+            className="px-3 py-1 text-sm bg-accent hover:bg-accent-hover text-text-inverse rounded transition-colors"
+            onClick={(e) => e.stopPropagation()}
+          >
+            View
+          </Link>
+        </div>
+      ),
+    },
+  ], [verifyMutation]);
 
-  const toggleSelectAll = () => {
-    if (selectedDids.size === users.length) {
-      setSelectedDids(new Set());
-    } else {
-      setSelectedDids(new Set(users.map((u: any) => u.did)));
-    }
-  };
-
-  const clearSelection = () => {
-    setSelectedDids(new Set());
-  };
-
-  const isAllSelected = users.length > 0 && selectedDids.size === users.length;
-  const isSomeSelected = selectedDids.size > 0 && selectedDids.size < users.length;
+  const filterConfig = [
+    {
+      key: 'verified',
+      label: 'Verification',
+      multiple: false,
+      options: [
+        { value: 'true', label: 'Verified' },
+        { value: 'false', label: 'Unverified' },
+      ],
+    },
+    {
+      key: 'status',
+      label: 'Status',
+      options: [
+        { value: 'active', label: 'Active' },
+        { value: 'warning', label: 'Warning' },
+        { value: 'mute', label: 'Muted' },
+        { value: 'suspend', label: 'Suspended' },
+        { value: 'ban', label: 'Banned' },
+      ],
+    },
+  ];
 
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold text-text-primary">Users</h1>
-        <div className="flex items-center gap-3">
-          {selectedDids.size > 0 && (
-            <span className="text-sm text-text-muted">
-              {selectedDids.size} selected
-            </span>
-          )}
-          <ExportButton
-            exportType="users"
-            filters={{
-              status: verified ? (verified === 'true' ? 'active' : 'inactive') : undefined,
-            }}
-          />
-        </div>
+        <ExportButton
+          exportType="users"
+          filters={{
+            status: filters.filters.verified?.[0] === 'true' ? 'active' : undefined,
+          }}
+        />
       </div>
 
       {/* Filters */}
-      <div className="flex flex-wrap gap-4">
-        <div className="flex-1 min-w-[200px]">
-          <input
-            type="text"
-            placeholder="Search users..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="w-full px-4 py-2 bg-surface border border-border rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-accent"
-          />
-        </div>
-        <select
-          value={verified}
-          onChange={(e) => setVerified(e.target.value)}
-          className="px-4 py-2 bg-surface border border-border rounded-lg text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
-        >
-          <option value="">All users</option>
-          <option value="true">Verified only</option>
-          <option value="false">Unverified only</option>
-        </select>
-        <select
-          value={sort}
-          onChange={(e) => setSort(e.target.value)}
-          className="px-4 py-2 bg-surface border border-border rounded-lg text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
-        >
-          <option value="recent">Most Recent</option>
-          <option value="followers">Most Followers</option>
-          <option value="videos">Most Videos</option>
-        </select>
-      </div>
+      <FilterBar
+        filters={filters}
+        filterConfig={filterConfig}
+        searchPlaceholder="Search users by handle or name..."
+        pageKey="admin-users"
+      />
 
       {/* Users Table */}
-      <div className="bg-surface border border-border rounded-xl overflow-hidden">
-        <table className="w-full">
-          <thead className="bg-surface-hover">
-            <tr>
-              <th className="px-4 py-3 text-left">
-                <input
-                  type="checkbox"
-                  checked={isAllSelected}
-                  ref={(el) => {
-                    if (el) el.indeterminate = isSomeSelected;
-                  }}
-                  onChange={toggleSelectAll}
-                  className="w-4 h-4 rounded border-border text-accent focus:ring-accent"
-                />
-              </th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-text-muted uppercase tracking-wider">
-                User
-              </th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-text-muted uppercase tracking-wider">
-                Status
-              </th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-text-muted uppercase tracking-wider">
-                Followers
-              </th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-text-muted uppercase tracking-wider">
-                Videos
-              </th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-text-muted uppercase tracking-wider">
-                Joined
-              </th>
-              <th className="px-6 py-3 text-right text-xs font-medium text-text-muted uppercase tracking-wider">
-                Actions
-              </th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-border">
-            {isLoading ? (
-              <tr>
-                <td colSpan={7} className="px-6 py-8 text-center text-text-muted">
-                  Loading...
-                </td>
-              </tr>
-            ) : users.length === 0 ? (
-              <tr>
-                <td colSpan={7} className="px-6 py-8 text-center text-text-muted">
-                  No users found
-                </td>
-              </tr>
-            ) : (
-              users.map((user: any) => (
-                <tr
-                  key={user.did}
-                  className={`hover:bg-surface-hover ${
-                    selectedDids.has(user.did) ? 'bg-accent/5' : ''
-                  }`}
-                >
-                  <td className="px-4 py-4">
-                    <input
-                      type="checkbox"
-                      checked={selectedDids.has(user.did)}
-                      onChange={() => toggleSelection(user.did)}
-                      className="w-4 h-4 rounded border-border text-accent focus:ring-accent"
-                    />
-                  </td>
-                  <td className="px-6 py-4">
-                    <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 rounded-full bg-surface-hover overflow-hidden">
-                        {user.avatar ? (
-                          <img
-                            src={user.avatar}
-                            alt={user.handle}
-                            className="w-full h-full object-cover"
-                          />
-                        ) : (
-                          <div className="w-full h-full flex items-center justify-center text-text-muted font-semibold">
-                            {user.handle[0]?.toUpperCase()}
-                          </div>
-                        )}
-                      </div>
-                      <div>
-                        <p className="font-medium text-text-primary flex items-center gap-1">
-                          {user.displayName || user.handle}
-                          {user.verified && (
-                            <VerifiedBadge className="w-4 h-4 text-accent" />
-                          )}
-                        </p>
-                        <p className="text-sm text-text-muted">@{user.handle}</p>
-                      </div>
-                    </div>
-                  </td>
-                  <td className="px-6 py-4">
-                    <StatusBadge status={user.status} />
-                  </td>
-                  <td className="px-6 py-4 text-text-primary">
-                    {formatCount(user.followerCount)}
-                  </td>
-                  <td className="px-6 py-4 text-text-primary">
-                    {formatCount(user.videoCount)}
-                  </td>
-                  <td className="px-6 py-4 text-text-muted">
-                    {new Date(user.createdAt).toLocaleDateString()}
-                  </td>
-                  <td className="px-6 py-4 text-right">
-                    <div className="flex items-center justify-end gap-2">
-                      <button
-                        onClick={() =>
-                          verifyMutation.mutate({
-                            did: user.did,
-                            verified: !user.verified,
-                          })
-                        }
-                        className="px-3 py-1 text-sm bg-surface-hover hover:bg-border rounded transition-colors"
-                        disabled={verifyMutation.isPending}
-                      >
-                        {user.verified ? 'Unverify' : 'Verify'}
-                      </button>
-                      <Link
-                        href={`/admin/users/${encodeURIComponent(user.did)}`}
-                        className="px-3 py-1 text-sm bg-accent hover:bg-accent-hover text-text-inverse rounded transition-colors"
-                      >
-                        View
-                      </Link>
-                    </div>
-                  </td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </div>
+      <DataTable
+        data={users}
+        columns={columns}
+        keyExtractor={(user) => user.did}
+        loading={isLoading}
+        emptyMessage="users"
+        selectable
+        selectedKeys={filters.filters.selected || []}
+        onSelectionChange={(keys) => filters.setFilter('selected', keys)}
+        sortKey={filters.sortKey || undefined}
+        sortDirection={filters.sortDirection}
+        onSort={filters.setSort}
+        onRowClick={(user) => {
+          window.location.href = `/admin/users/${encodeURIComponent(user.did)}`;
+        }}
+      />
 
       {/* Bulk Action Bar */}
       <BulkActionBar
-        selectedDids={Array.from(selectedDids)}
-        onClearSelection={clearSelection}
-        onActionComplete={clearSelection}
+        selectedDids={filters.filters.selected || []}
+        onClearSelection={() => filters.setFilter('selected', [])}
+        onActionComplete={() => filters.setFilter('selected', [])}
       />
     </div>
   );

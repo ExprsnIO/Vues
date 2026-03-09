@@ -3,9 +3,11 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api';
+import { useTheme } from '@/stores/settings-store';
+import { themeMetas, themes, type ThemeId } from '@exprsn/shared';
 import toast from 'react-hot-toast';
 
-type Tab = 'system' | 'environment';
+type Tab = 'system' | 'environment' | 'appearance';
 type Environment = 'development' | 'staging' | 'production';
 type EnvView = 'variables' | 'archives' | 'compare';
 
@@ -135,9 +137,28 @@ export default function AdminSettingsPage() {
             <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-accent" />
           )}
         </button>
+        <button
+          onClick={() => setActiveTab('appearance')}
+          className={`px-4 py-2 text-sm font-medium transition-colors relative ${
+            activeTab === 'appearance'
+              ? 'text-accent'
+              : 'text-text-muted hover:text-text-primary'
+          }`}
+        >
+          Appearance
+          {activeTab === 'appearance' && (
+            <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-accent" />
+          )}
+        </button>
       </div>
 
-      {activeTab === 'system' ? <SystemConfigTab /> : <EnvironmentConfigTab />}
+      {activeTab === 'system' ? (
+        <SystemConfigTab />
+      ) : activeTab === 'environment' ? (
+        <EnvironmentConfigTab />
+      ) : (
+        <AppearanceTab />
+      )}
     </div>
   );
 }
@@ -282,6 +303,208 @@ function SystemConfigTab() {
         />
       )}
     </div>
+  );
+}
+
+// ============================================================================
+// Appearance Tab
+// ============================================================================
+
+function AppearanceTab() {
+  const { themeId, colorMode, setTheme, setColorMode, resolvedColorMode } = useTheme();
+
+  return (
+    <div className="space-y-8">
+      {/* Theme Selection */}
+      <div className="bg-surface border border-border rounded-xl p-6">
+        <h3 className="text-lg font-semibold text-text-primary mb-2">Theme</h3>
+        <p className="text-sm text-text-muted mb-6">
+          Choose a color theme that suits your preference. Changes apply immediately.
+        </p>
+
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
+          {themeMetas.map((theme) => {
+            const isSelected = themeId === theme.id;
+            const themeColors = themes[theme.id as ThemeId];
+
+            return (
+              <button
+                key={theme.id}
+                onClick={() => setTheme(theme.id as ThemeId)}
+                className={`relative p-4 rounded-xl border-2 transition-all text-left ${
+                  isSelected
+                    ? 'border-accent bg-accent/5 ring-2 ring-accent/20'
+                    : 'border-border hover:border-text-muted bg-surface'
+                }`}
+              >
+                {/* Theme preview colors */}
+                <div className="flex gap-1 mb-3">
+                  <div
+                    className="w-6 h-6 rounded-full border border-border/50"
+                    style={{ backgroundColor: themeColors.dark.background }}
+                    title="Dark background"
+                  />
+                  <div
+                    className="w-6 h-6 rounded-full border border-border/50"
+                    style={{ backgroundColor: themeColors.dark.accent }}
+                    title="Accent color"
+                  />
+                  <div
+                    className="w-6 h-6 rounded-full border border-border/50"
+                    style={{ backgroundColor: themeColors.light.background }}
+                    title="Light background"
+                  />
+                </div>
+
+                <p className="font-medium text-text-primary text-sm">{theme.name}</p>
+                <p className="text-xs text-text-muted mt-0.5 line-clamp-2">{theme.description}</p>
+
+                {isSelected && (
+                  <div className="absolute top-2 right-2">
+                    <CheckIcon className="w-4 h-4 text-accent" />
+                  </div>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Color Mode Selection */}
+      <div className="bg-surface border border-border rounded-xl p-6">
+        <h3 className="text-lg font-semibold text-text-primary mb-2">Color Mode</h3>
+        <p className="text-sm text-text-muted mb-6">
+          Select light, dark, or system preference for automatic switching.
+        </p>
+
+        <div className="flex flex-wrap gap-3">
+          {[
+            { id: 'light', label: 'Light', icon: SunIcon, description: 'Always use light mode' },
+            { id: 'dark', label: 'Dark', icon: MoonIcon, description: 'Always use dark mode' },
+            { id: 'system', label: 'System', icon: MonitorIcon, description: 'Follow system preference' },
+          ].map((mode) => {
+            const isSelected = colorMode === mode.id;
+            const Icon = mode.icon;
+
+            return (
+              <button
+                key={mode.id}
+                onClick={() => setColorMode(mode.id as 'light' | 'dark' | 'system')}
+                className={`flex items-center gap-3 px-4 py-3 rounded-xl border-2 transition-all ${
+                  isSelected
+                    ? 'border-accent bg-accent/5'
+                    : 'border-border hover:border-text-muted bg-surface'
+                }`}
+              >
+                <Icon className={`w-5 h-5 ${isSelected ? 'text-accent' : 'text-text-muted'}`} />
+                <div className="text-left">
+                  <p className={`font-medium text-sm ${isSelected ? 'text-accent' : 'text-text-primary'}`}>
+                    {mode.label}
+                  </p>
+                  <p className="text-xs text-text-muted">{mode.description}</p>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+
+        {colorMode === 'system' && (
+          <p className="mt-4 text-sm text-text-muted">
+            Currently using: <span className="text-text-primary font-medium capitalize">{resolvedColorMode}</span> (based on your system settings)
+          </p>
+        )}
+      </div>
+
+      {/* Theme Preview */}
+      <div className="bg-surface border border-border rounded-xl p-6">
+        <h3 className="text-lg font-semibold text-text-primary mb-2">Preview</h3>
+        <p className="text-sm text-text-muted mb-6">
+          See how the current theme looks with sample UI elements.
+        </p>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          {/* Sample buttons */}
+          <div className="space-y-4">
+            <h4 className="text-sm font-medium text-text-primary">Buttons</h4>
+            <div className="flex flex-wrap gap-2">
+              <button className="px-4 py-2 bg-accent hover:bg-accent-hover text-text-inverse rounded-lg text-sm transition-colors">
+                Primary
+              </button>
+              <button className="px-4 py-2 bg-surface-hover hover:bg-border text-text-primary rounded-lg text-sm transition-colors">
+                Secondary
+              </button>
+              <button className="px-4 py-2 border border-accent text-accent hover:bg-accent/10 rounded-lg text-sm transition-colors">
+                Outline
+              </button>
+            </div>
+          </div>
+
+          {/* Sample badges */}
+          <div className="space-y-4">
+            <h4 className="text-sm font-medium text-text-primary">Status Badges</h4>
+            <div className="flex flex-wrap gap-2">
+              <span className="px-2 py-1 text-xs font-medium rounded-full bg-green-500/10 text-green-500">Success</span>
+              <span className="px-2 py-1 text-xs font-medium rounded-full bg-yellow-500/10 text-yellow-500">Warning</span>
+              <span className="px-2 py-1 text-xs font-medium rounded-full bg-red-500/10 text-red-500">Error</span>
+              <span className="px-2 py-1 text-xs font-medium rounded-full bg-blue-500/10 text-blue-500">Info</span>
+            </div>
+          </div>
+
+          {/* Sample text */}
+          <div className="space-y-2">
+            <h4 className="text-sm font-medium text-text-primary">Typography</h4>
+            <p className="text-text-primary">Primary text color</p>
+            <p className="text-text-secondary">Secondary text color</p>
+            <p className="text-text-muted">Muted text color</p>
+          </div>
+
+          {/* Sample form */}
+          <div className="space-y-2">
+            <h4 className="text-sm font-medium text-text-primary">Form Elements</h4>
+            <input
+              type="text"
+              placeholder="Sample input..."
+              className="w-full px-3 py-2 bg-background border border-border rounded-lg text-text-primary text-sm focus:outline-none focus:border-accent"
+              readOnly
+            />
+            <div className="flex gap-2">
+              <div className="flex items-center">
+                <input type="checkbox" className="w-4 h-4 rounded border-border text-accent focus:ring-accent" defaultChecked />
+                <span className="ml-2 text-sm text-text-primary">Checkbox</span>
+              </div>
+              <div className="flex items-center">
+                <input type="radio" className="w-4 h-4 border-border text-accent focus:ring-accent" defaultChecked />
+                <span className="ml-2 text-sm text-text-primary">Radio</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SunIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
+    </svg>
+  );
+}
+
+function MoonIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
+    </svg>
+  );
+}
+
+function MonitorIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+    </svg>
   );
 }
 

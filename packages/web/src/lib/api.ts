@@ -567,6 +567,21 @@ class ApiClient {
     return this.fetch('/xrpc/io.exprsn.admin.analytics.dashboard');
   }
 
+  async getAdminTimeSeries(options: {
+    metric: 'users' | 'videos' | 'views' | 'likes' | 'reports' | 'renders';
+    period?: '7d' | '30d' | '90d';
+    domainId?: string;
+  }): Promise<{
+    labels: string[];
+    datasets: { label: string; data: number[]; color?: string }[];
+  }> {
+    const params = new URLSearchParams();
+    params.set('metric', options.metric);
+    if (options.period) params.set('period', options.period);
+    if (options.domainId) params.set('domainId', options.domainId);
+    return this.fetch(`/xrpc/io.exprsn.admin.stats.timeSeries?${params}`);
+  }
+
   async getAdminUsers(options: {
     q?: string;
     verified?: string;
@@ -6103,6 +6118,17 @@ class ApiClient {
     }>;
   }> {
     return this.fetch('/xrpc/io.exprsn.admin.domains.permissions.catalog');
+  }
+
+  async adminDomainUserEffectivePermissions(domainId: string, userId: string): Promise<{
+    effectivePermissions: string[];
+    breakdown: {
+      direct: string[];
+      fromRoles: Array<{ roleId: string; roleName: string; permissions: string[] }>;
+      fromGroups: Array<{ groupId: string; groupName: string; permissions: string[] }>;
+    };
+  }> {
+    return this.fetch(`/xrpc/io.exprsn.admin.domains.users.effectivePermissions?domainId=${domainId}&userId=${userId}`);
   }
 
   async adminDomainRolesList(domainId: string): Promise<{

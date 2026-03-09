@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { api } from '@/lib/api';
 import { formatCount } from '@/lib/utils';
 import { ExportButton } from '@/components/admin/ExportModal';
+import { AdminChart, MultiMetricChart } from '@/components/admin/charts/AdminChart';
 
 export default function AdminAnalyticsPage() {
   const { data, isLoading } = useQuery({
@@ -143,6 +144,42 @@ export default function AdminAnalyticsPage() {
             </div>
           </div>
         </div>
+      </div>
+
+      {/* Charts Section */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <AdminChart
+          title="User Growth Over Time"
+          metric="users"
+          defaultPeriod="30d"
+          fill
+          color="#3b82f6"
+        />
+        <AdminChart
+          title="Video Uploads Over Time"
+          metric="videos"
+          defaultPeriod="30d"
+          fill
+          color="#8b5cf6"
+        />
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <MultiMetricChart
+          title="Engagement Trends"
+          metrics={[
+            { metric: 'views', label: 'Views', color: '#10b981' },
+            { metric: 'likes', label: 'Likes', color: '#ef4444' },
+          ]}
+          defaultPeriod="30d"
+        />
+        <AdminChart
+          title="Reports Over Time"
+          metric="reports"
+          type="bar"
+          defaultPeriod="30d"
+          color="#f59e0b"
+        />
       </div>
 
       {/* Top Content */}
