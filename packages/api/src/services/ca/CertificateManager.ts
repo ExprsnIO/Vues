@@ -639,7 +639,7 @@ export class CertificateManager {
       .where(
         and(
           eq(caEntityCertificates.status, 'active'),
-          sql`${caEntityCertificates.notAfter} <= ${expiryThreshold}`,
+          sql`${caEntityCertificates.notAfter} <= ${expiryThreshold.toISOString()}`,
           sql`${caEntityCertificates.notAfter} > NOW()`
         )
       )
@@ -907,7 +907,7 @@ export class CertificateManager {
       .where(
         and(
           eq(caEntityCertificates.status, 'active'),
-          sql`${caEntityCertificates.notAfter} < ${thirtyDaysFromNow}`
+          sql`${caEntityCertificates.notAfter} < ${thirtyDaysFromNow.toISOString()}`
         )
       );
 
@@ -1087,7 +1087,7 @@ export class CertificateManager {
       .update(caEntityCertificates)
       .set({
         status: 'revoked',
-        revokedAt: now,
+        revokedAt: now.toISOString(),
         revocationReason: reason,
       })
       .where(
