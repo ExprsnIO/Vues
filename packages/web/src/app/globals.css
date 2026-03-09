@@ -49,8 +49,14 @@
 }
 
 body {
+  font-family: var(--font-sans), system-ui, sans-serif;
   color: var(--color-text-primary);
   background: var(--color-background);
+}
+
+.font-dyslexic-friendly,
+.dyslexic-friendly {
+  font-family: var(--font-dyslexic), var(--font-sans), system-ui, sans-serif;
 }
 
 /* Accessibility: Reduced Motion */
@@ -167,4 +173,28 @@ body {
 
 .like-animation {
   animation: like-pop 0.8s ease-out forwards;
+}
+
+/* Video player animations */
+@keyframes scale-up {
+  0% {
+    transform: scale(0.5);
+    opacity: 0;
+  }
+  50% {
+    transform: scale(1.1);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.animate-like-pop {
+  animation: like-pop 1s ease-out forwards;
+}
+
+.animate-scale-up {
+  animation: scale-up 0.3s ease-out forwards;
 }

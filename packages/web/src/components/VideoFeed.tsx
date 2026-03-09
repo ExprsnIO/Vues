@@ -1,16 +1,28 @@
 'use client';
 
-import { useEffect, useRef, useCallback, useState } from 'react';
+import { useEffect, useRef, useCallback, useState, useMemo } from 'react';
 import { useInfiniteQuery } from '@tanstack/react-query';
 import { useInView } from 'react-intersection-observer';
 import { api, type VideoView } from '@/lib/api';
-import { VideoPlayer } from './VideoPlayer';
+import { VideoPlayer, type VideoPlayerHandle } from './VideoPlayer';
 import { VideoActions } from './VideoActions';
 import { VideoOverlay } from './VideoOverlay';
 import { SuggestedUsers } from './SuggestedUsers';
 
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3002';
+
 interface VideoFeedProps {
   feedType: string;
+}
+
+// Track watch progress for a video
+interface WatchProgress {
+  startTime: number;
+  watchedDuration: number;
+  loopCount: number;
+  milestonesSent: Set<string>;
+  engagementActions: Set<string>;
+  videoDuration: number;
 }
 
 export function VideoFeed({ feedType }: VideoFeedProps) {
@@ -18,6 +30,8 @@ export function VideoFeed({ feedType }: VideoFeedProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const videoRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const viewTrackedRef = useRef<Set<string>>(new Set());
+  const watchProgressRef = useRef<Map<string, WatchProgress>>(new Map());
+  const preloadedVideosRef = useRef<Set<string>>(new Set());
 
   const { data, fetchNextPage, hasNextPage, isFetchingNextPage, isLoading } =
     useInfiniteQuery({
@@ -29,15 +43,112 @@ export function VideoFeed({ feedType }: VideoFeedProps) {
 
   const videos = data?.pages.flatMap((page) => page.feed) ?? [];
 
-  // Load more when near end
+  // Preload next videos when current video changes
+  useEffect(() => {
+    if (videos.length === 0) return;
+
+    // Preload next 2 videos
+    const videosToPreload = videos.slice(currentIndex + 1, currentIndex + 3);
+    videosToPreload.forEach((video) => {
+      if (preloadedVideosRef.current.has(video.uri)) return;
+      preloadedVideosRef.current.add(video.uri);
+
+      const videoEmbed = video.video;
+      const rawSrc = videoEmbed?.hlsPlaylist || videoEmbed?.cdnUrl;
+      if (!rawSrc) return;
+
+      const src = rawSrc.startsWith('/') ? `${API_BASE}${rawSrc}` : rawSrc;
+
+      // Create link preload for video
+      const link = document.createElement('link');
+      link.rel = 'preload';
+      link.as = 'fetch';
+      link.href = src;
+      link.crossOrigin = 'anonymous';
+      document.head.appendChild(link);
+
+      // Also preload thumbnail
+      const rawPoster = videoEmbed?.thumbnail || video.thumbnailUrl;
+      if (rawPoster) {
+        const poster = rawPoster.startsWith('/') ? `${API_BASE}${rawPoster}` : rawPoster;
+        const imgLink = document.createElement('link');
+        imgLink.rel = 'preload';
+        imgLink.as = 'image';
+        imgLink.href = poster;
+        document.head.appendChild(imgLink);
+      }
+    });
+  }, [currentIndex, videos]);
+
+  // Load more when near end - start earlier for smoother experience
   const { ref: loadMoreRef } = useInView({
     threshold: 0,
+    rootMargin: '200px', // Start loading 200px before visible
     onChange: (inView) => {
       if (inView && hasNextPage && !isFetchingNextPage) {
         fetchNextPage();
       }
     },
   });
+
+  // Track engagement action
+  const trackEngagement = useCallback((videoUri: string, action: string) => {
+    const progress = watchProgressRef.current.get(videoUri);
+    if (progress) {
+      progress.engagementActions.add(action);
+    }
+  }, []);
+
+  // Handle video progress updates
+  const handleVideoProgress = useCallback(
+    (videoUri: string, currentTime: number, duration: number, looped: boolean) => {
+      let progress = watchProgressRef.current.get(videoUri);
+
+      if (!progress) {
+        progress = {
+          startTime: Date.now(),
+          watchedDuration: 0,
+          loopCount: 0,
+          milestonesSent: new Set(),
+          engagementActions: new Set(),
+          videoDuration: duration,
+        };
+        watchProgressRef.current.set(videoUri, progress);
+      }
+
+      progress.watchedDuration = currentTime;
+      progress.videoDuration = duration;
+
+      if (looped) {
+        progress.loopCount++;
+      }
+
+      // Send milestone updates
+      const completionRate = duration > 0 ? currentTime / duration : 0;
+      const milestones = ['25%', '50%', '75%', '100%'] as const;
+
+      for (const milestone of milestones) {
+        const threshold = parseInt(milestone) / 100;
+        if (completionRate >= threshold && !progress.milestonesSent.has(milestone)) {
+          progress.milestonesSent.add(milestone);
+
+          // Send tracking update
+          api
+            .trackView(videoUri, {
+              watchDuration: Math.round(currentTime),
+              completed: milestone === '100%',
+              loopCount: progress.loopCount,
+              sessionPosition: currentIndex + 1,
+              engagementActions: Array.from(progress.engagementActions),
+              milestone,
+              videoDuration: duration,
+            })
+            .catch(() => {});
+        }
+      }
+    },
+    [currentIndex]
+  );
 
   // Handle scroll to update current video
   const handleScroll = useCallback(() => {
@@ -65,13 +176,35 @@ export function VideoFeed({ feedType }: VideoFeedProps) {
     });
 
     if (closestIndex !== currentIndex) {
+      // Send final tracking for the video we're leaving
+      const prevVideo = videos[currentIndex];
+      if (prevVideo) {
+        const progress = watchProgressRef.current.get(prevVideo.uri);
+        if (progress && progress.watchedDuration > 0) {
+          const completionRate = progress.videoDuration > 0
+            ? progress.watchedDuration / progress.videoDuration
+            : 0;
+
+          api
+            .trackView(prevVideo.uri, {
+              watchDuration: Math.round(progress.watchedDuration),
+              completed: completionRate >= 0.95,
+              loopCount: progress.loopCount,
+              sessionPosition: currentIndex + 1,
+              engagementActions: Array.from(progress.engagementActions),
+              videoDuration: progress.videoDuration,
+            })
+            .catch(() => {});
+        }
+      }
+
       setCurrentIndex(closestIndex);
 
       // Track view for the new current video
       const currentVideo = videos[closestIndex];
       if (currentVideo && !viewTrackedRef.current.has(currentVideo.uri)) {
         viewTrackedRef.current.add(currentVideo.uri);
-        api.trackView(currentVideo.uri).catch(() => {});
+        api.trackView(currentVideo.uri, { sessionPosition: closestIndex + 1 }).catch(() => {});
       }
     }
   }, [videos, currentIndex]);
@@ -88,9 +221,18 @@ export function VideoFeed({ feedType }: VideoFeedProps) {
   useEffect(() => {
     if (videos.length > 0 && !viewTrackedRef.current.has(videos[0].uri)) {
       viewTrackedRef.current.add(videos[0].uri);
-      api.trackView(videos[0].uri).catch(() => {});
+      api.trackView(videos[0].uri, { sessionPosition: 1 }).catch(() => {});
     }
   }, [videos]);
+
+  // Memoize context value for video items
+  const feedContext = useMemo(
+    () => ({
+      onProgress: handleVideoProgress,
+      onEngagement: trackEngagement,
+    }),
+    [handleVideoProgress, trackEngagement]
+  );
 
   if (isLoading) {
     return (
@@ -132,6 +274,8 @@ export function VideoFeed({ feedType }: VideoFeedProps) {
           key={video.uri}
           video={video}
           isActive={index === currentIndex}
+          onProgress={feedContext.onProgress}
+          onEngagement={feedContext.onEngagement}
           ref={(el) => {
             if (el) {
               videoRefs.current.set(video.uri, el);
@@ -157,15 +301,20 @@ export function VideoFeed({ feedType }: VideoFeedProps) {
 interface VideoItemProps {
   video: VideoView;
   isActive: boolean;
+  onProgress: (videoUri: string, currentTime: number, duration: number, looped: boolean) => void;
+  onEngagement: (videoUri: string, action: string) => void;
 }
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3002';
 
 const VideoItem = ({
   video,
   isActive,
+  onProgress,
+  onEngagement,
   ref,
 }: VideoItemProps & { ref: (el: HTMLDivElement | null) => void }) => {
+  const videoRef = useRef<VideoPlayerHandle>(null);
+  const lastTimeRef = useRef(0);
+
   // Video data is nested under video.video from the API
   const videoEmbed = video.video;
   const rawSrc = videoEmbed?.hlsPlaylist || videoEmbed?.cdnUrl || '';
@@ -174,18 +323,51 @@ const VideoItem = ({
   const rawPoster = videoEmbed?.thumbnail || video.thumbnailUrl || '';
   const poster = rawPoster.startsWith('/') ? `${API_BASE}${rawPoster}` : rawPoster;
 
+  // Handle time updates for progress tracking
+  const handleTimeUpdate = useCallback((currentTime: number, duration: number) => {
+    // Detect loop (time went backwards)
+    const looped = currentTime < lastTimeRef.current - 1;
+    lastTimeRef.current = currentTime;
+
+    onProgress(video.uri, currentTime, duration, looped);
+  }, [video.uri, onProgress]);
+
+  // Handle play event
+  const handlePlay = useCallback(() => {
+    onEngagement(video.uri, 'played');
+  }, [video.uri, onEngagement]);
+
+  // Handle pause event
+  const handlePause = useCallback(() => {
+    onEngagement(video.uri, 'paused');
+  }, [video.uri, onEngagement]);
+
+  // Handle double-tap to like
+  const handleDoubleTap = useCallback(() => {
+    onEngagement(video.uri, 'liked');
+  }, [video.uri, onEngagement]);
+
   return (
     <div ref={ref} className="relative h-screen w-full snap-start">
       <VideoPlayer
+        ref={videoRef}
         src={src}
         poster={poster}
         autoPlay={isActive}
         loop
         muted  // Must be muted for autoplay to work in browsers
+        showControls={false}  // Hide controls in feed view
         className="h-full w-full"
+        onTimeUpdate={handleTimeUpdate}
+        onPlay={handlePlay}
+        onPause={handlePause}
+        onDoubleTap={handleDoubleTap}
       />
       <VideoOverlay video={video} />
-      <VideoActions video={video} />
+      <VideoActions
+        video={video}
+        onEngagement={(action) => onEngagement(video.uri, action)}
+      />
     </div>
   );
 };
