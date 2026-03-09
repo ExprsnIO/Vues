@@ -83,7 +83,7 @@ caRoutes.post(
       organization?: string;
       organizationalUnit?: string;
       validityDays?: number;
-      pathLen?: number;
+      pathLength?: number;
     }>();
 
     if (!body.commonName) {
@@ -96,7 +96,7 @@ caRoutes.post(
         organization: body.organization,
         organizationalUnit: body.organizationalUnit,
         validityDays: body.validityDays,
-        pathLen: body.pathLen,
+        pathLength: body.pathLength,
       });
 
       return c.json({
@@ -368,8 +368,8 @@ caRoutes.post('/io.exprsn.ca.verifyCertificate', async (c) => {
     certificate: result.certificate
       ? {
           serialNumber: result.certificate.serialNumber,
-          commonName: result.certificate.commonName,
-          organization: result.certificate.organization,
+          commonName: result.certificate.subject.commonName,
+          organization: result.certificate.subject.organizationName,
           issuer: result.certificate.issuer,
           notBefore: result.certificate.notBefore.toISOString(),
           notAfter: result.certificate.notAfter.toISOString(),
@@ -575,6 +575,180 @@ caRoutes.post(
         message: error instanceof Error ? error.message : 'Failed to issue service certificate',
       });
     }
+  }
+);
+
+// ============================================
+// Admin Certificate Management
+// ============================================
+
+// Get certificate stats (admin only)
+caRoutes.get(
+  '/io.exprsn.ca.admin.getStats',
+  adminAuthMiddleware,
+  async (c) => {
+    const stats = await certificateManager.getStats();
+    return c.json(stats);
+  }
+);
+
+// List all CAs (admin only)
+caRoutes.get(
+  '/io.exprsn.ca.admin.listCAs',
+  adminAuthMiddleware,
+  async (c) => {
+    const cas = await certificateManager.listAllCAs();
+    return c.json({ cas });
+  }
+);
+
+// List all certificates (admin only) - not just user's own
+caRoutes.get(
+  '/io.exprsn.ca.admin.listAllCertificates',
+  adminAuthMiddleware,
+  async (c) => {
+    const status = c.req.query('status');
+    const certType = c.req.query('type');
+    const search = c.req.query('q');
+    const limit = Math.min(parseInt(c.req.query('limit') || '50'), 200);
+    const offset = parseInt(c.req.query('offset') || '0');
+
+    const result = await certificateManager.listAllCertificates({
+      status: status || undefined,
+      certType: certType || undefined,
+      search: search || undefined,
+      limit,
+      offset,
+    });
+
+    return c.json(result);
+  }
+);
+
+// Batch revoke certificates (admin only)
+caRoutes.post(
+  '/io.exprsn.ca.admin.batchRevoke',
+  adminAuthMiddleware,
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_EDIT),
+  async (c) => {
+    const body = await c.req.json<{
+      certificateIds: string[];
+      reason?: string;
+    }>();
+
+    if (!body.certificateIds || body.certificateIds.length === 0) {
+      throw new HTTPException(400, { message: 'Certificate IDs required' });
+    }
+
+    const results = await certificateManager.batchRevokeCertificates(
+      body.certificateIds,
+      body.reason || 'unspecified'
+    );
+
+    return c.json(results);
+  }
+);
+
+// Batch download certificates (admin only)
+caRoutes.post(
+  '/io.exprsn.ca.admin.batchDownload',
+  adminAuthMiddleware,
+  async (c) => {
+    const body = await c.req.json<{
+      certificateIds: string[];
+      format?: 'pem' | 'der' | 'pkcs12';
+      includePrivateKey?: boolean;
+      password?: string;
+    }>();
+
+    if (!body.certificateIds || body.certificateIds.length === 0) {
+      throw new HTTPException(400, { message: 'Certificate IDs required' });
+    }
+
+    if (body.format === 'pkcs12' && body.includePrivateKey && !body.password) {
+      throw new HTTPException(400, { message: 'Password required for PKCS#12 export' });
+    }
+
+    const results = await certificateManager.batchDownloadCertificates(
+      body.certificateIds,
+      body.format || 'pem',
+      body.includePrivateKey || false,
+      body.password
+    );
+
+    return c.json({ certificates: results });
+  }
+);
+
+// Batch issue certificates (admin only)
+caRoutes.post(
+  '/io.exprsn.ca.admin.batchIssue',
+  adminAuthMiddleware,
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_EDIT),
+  async (c) => {
+    const body = await c.req.json<{
+      certificates: Array<{
+        commonName: string;
+        subjectDid?: string;
+        serviceId?: string;
+        email?: string;
+      }>;
+      issuerId?: string;
+      certType?: 'client' | 'server' | 'code_signing';
+      validityDays?: number;
+    }>();
+
+    if (!body.certificates || body.certificates.length === 0) {
+      throw new HTTPException(400, { message: 'Certificates array required' });
+    }
+
+    const results = await certificateManager.batchIssueCertificates(
+      body.certificates,
+      body.issuerId,
+      body.certType || 'client',
+      body.validityDays || 365
+    );
+
+    return c.json(results);
+  }
+);
+
+// Get certificate with full details (admin only)
+caRoutes.get(
+  '/io.exprsn.ca.admin.getCertificateDetails',
+  adminAuthMiddleware,
+  async (c) => {
+    const id = c.req.query('id');
+    if (!id) {
+      throw new HTTPException(400, { message: 'Certificate ID required' });
+    }
+
+    const result = await certificateManager.getCertificateWithDetails(id);
+    if (!result) {
+      throw new HTTPException(404, { message: 'Certificate not found' });
+    }
+
+    return c.json(result);
+  }
+);
+
+// Admin revoke with reason (admin only)
+caRoutes.post(
+  '/io.exprsn.ca.admin.revokeCertificate',
+  adminAuthMiddleware,
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_EDIT),
+  async (c) => {
+    const body = await c.req.json<{
+      certificateId: string;
+      reason?: string;
+    }>();
+
+    if (!body.certificateId) {
+      throw new HTTPException(400, { message: 'Certificate ID required' });
+    }
+
+    await certificateManager.revokeCertificate(body.certificateId, body.reason);
+    return c.json({ success: true });
   }
 );
 

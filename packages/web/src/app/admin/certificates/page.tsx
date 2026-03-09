@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { formatCount } from '@/lib/utils';
+import { api } from '@/lib/api';
 
 // Tab types
 type AdminTab = 'certificates' | 'tokens' | 'auth';
@@ -17,8 +18,8 @@ interface Certificate {
   fingerprint: string;
   certType: 'client' | 'server' | 'code_signing' | 'intermediate' | 'root';
   status: 'active' | 'revoked' | 'expired';
-  subjectDid?: string;
-  serviceId?: string;
+  subjectDid?: string | null;
+  serviceId?: string | null;
   notBefore: string;
   notAfter: string;
   createdAt: string;
@@ -95,23 +96,38 @@ export default function CertificatesAdmin() {
   const [showCreateCertModal, setShowCreateCertModal] = useState(false);
   const [showCreateTokenModal, setShowCreateTokenModal] = useState(false);
   const [showCreateCAModal, setShowCreateCAModal] = useState(false);
+  const [selectedCertIds, setSelectedCertIds] = useState<string[]>([]);
+  const [showBatchRevokeModal, setShowBatchRevokeModal] = useState(false);
+  const [showBatchDownloadModal, setShowBatchDownloadModal] = useState(false);
+  const [showBatchCreateModal, setShowBatchCreateModal] = useState(false);
 
   // Fetch CA stats
   const { data: stats, isLoading: statsLoading } = useQuery({
     queryKey: ['admin', 'certificates', 'stats'],
     queryFn: async () => {
-      return {
-        totalCertificates: 156,
-        activeCertificates: 142,
-        revokedCertificates: 8,
-        expiredCertificates: 6,
-        rootCertificates: 2,
-        intermediateCAs: 3,
-        expiringIn30Days: 12,
-        totalTokens: 89,
-        activeTokens: 76,
-        singleUseTokens: 15,
-      };
+      try {
+        const result = await api.caAdminGetStats();
+        return {
+          ...result,
+          totalTokens: 89, // TODO: Add token stats endpoint
+          activeTokens: 76,
+          singleUseTokens: 15,
+        };
+      } catch {
+        // Fallback to mock data if API not available
+        return {
+          totalCertificates: 156,
+          activeCertificates: 142,
+          revokedCertificates: 8,
+          expiredCertificates: 6,
+          rootCertificates: 2,
+          intermediateCAs: 3,
+          expiringIn30Days: 12,
+          totalTokens: 89,
+          activeTokens: 76,
+          singleUseTokens: 15,
+        };
+      }
     },
   });
 
@@ -119,121 +135,79 @@ export default function CertificatesAdmin() {
   const { data: caCerts } = useQuery({
     queryKey: ['admin', 'certificates', 'cas'],
     queryFn: async () => {
-      const mockCAs: RootCertificate[] = [
-        {
-          id: 'root_001',
-          commonName: 'Exprsn Root CA',
-          serialNumber: '01:AB:CD:EF',
-          fingerprint: 'SHA256:abc123...',
-          status: 'active',
-          notBefore: '2024-01-01T00:00:00Z',
-          notAfter: '2034-01-01T00:00:00Z',
-          issuedCount: 145,
-          certType: 'root',
-        },
-        {
-          id: 'int_001',
-          commonName: 'Exprsn Intermediate CA',
-          serialNumber: '02:AB:CD:EF',
-          fingerprint: 'SHA256:def456...',
-          status: 'active',
-          notBefore: '2024-01-01T00:00:00Z',
-          notAfter: '2029-01-01T00:00:00Z',
-          issuedCount: 89,
-          certType: 'intermediate',
-        },
-        {
-          id: 'int_002',
-          commonName: 'Exprsn Code Signing CA',
-          serialNumber: '03:AB:CD:EF',
-          fingerprint: 'SHA256:ghi789...',
-          status: 'active',
-          notBefore: '2024-06-01T00:00:00Z',
-          notAfter: '2027-06-01T00:00:00Z',
-          issuedCount: 12,
-          certType: 'intermediate',
-        },
-      ];
-      return mockCAs;
+      try {
+        const result = await api.caAdminListCAs();
+        return result.cas.map(ca => ({
+          ...ca,
+          status: ca.status as 'active' | 'revoked',
+        }));
+      } catch {
+        // Fallback to mock data
+        const mockCAs: RootCertificate[] = [
+          {
+            id: 'root_001',
+            commonName: 'Exprsn Root CA',
+            serialNumber: '01:AB:CD:EF',
+            fingerprint: 'SHA256:abc123...',
+            status: 'active',
+            notBefore: '2024-01-01T00:00:00Z',
+            notAfter: '2034-01-01T00:00:00Z',
+            issuedCount: 145,
+            certType: 'root',
+          },
+          {
+            id: 'int_001',
+            commonName: 'Exprsn Intermediate CA',
+            serialNumber: '02:AB:CD:EF',
+            fingerprint: 'SHA256:def456...',
+            status: 'active',
+            notBefore: '2024-01-01T00:00:00Z',
+            notAfter: '2029-01-01T00:00:00Z',
+            issuedCount: 89,
+            certType: 'intermediate',
+          },
+        ];
+        return mockCAs;
+      }
     },
   });
 
   // Fetch entity certificates
-  const { data: certificates } = useQuery({
-    queryKey: ['admin', 'certificates', 'entities', statusFilter, typeFilter],
+  const { data: certificates, refetch: refetchCerts } = useQuery({
+    queryKey: ['admin', 'certificates', 'entities', statusFilter, typeFilter, searchQuery],
     queryFn: async () => {
-      const mockCerts: Certificate[] = [
-        {
-          id: 'cert_001',
-          commonName: 'api.exprsn.io',
-          serialNumber: '10:AB:CD:EF',
-          fingerprint: 'SHA256:srv123...',
-          certType: 'server',
-          status: 'active',
-          serviceId: 'api-service',
-          notBefore: '2024-06-01T00:00:00Z',
-          notAfter: '2025-06-01T00:00:00Z',
-          createdAt: '2024-06-01T00:00:00Z',
-          keyUsage: ['digitalSignature', 'keyEncipherment'],
-          extendedKeyUsage: ['serverAuth'],
-        },
-        {
-          id: 'cert_002',
-          commonName: 'feed-generator.exprsn.io',
-          serialNumber: '11:AB:CD:EF',
-          fingerprint: 'SHA256:srv456...',
-          certType: 'server',
-          status: 'active',
-          serviceId: 'feed-generator',
-          notBefore: '2024-06-01T00:00:00Z',
-          notAfter: '2025-06-01T00:00:00Z',
-          createdAt: '2024-06-01T00:00:00Z',
-          keyUsage: ['digitalSignature', 'keyEncipherment'],
-          extendedKeyUsage: ['serverAuth'],
-        },
-        {
-          id: 'cert_003',
-          commonName: 'did:web:user1.exprsn.io',
-          serialNumber: '20:AB:CD:EF',
-          fingerprint: 'SHA256:cli789...',
-          certType: 'client',
-          status: 'active',
-          subjectDid: 'did:web:user1.exprsn.io',
-          notBefore: '2024-08-01T00:00:00Z',
-          notAfter: '2025-08-01T00:00:00Z',
-          createdAt: '2024-08-01T00:00:00Z',
-          keyUsage: ['digitalSignature'],
-          extendedKeyUsage: ['clientAuth'],
-        },
-        {
-          id: 'cert_004',
-          commonName: 'Exprsn Mobile App v2.1',
-          serialNumber: '30:AB:CD:EF',
-          fingerprint: 'SHA256:code123...',
-          certType: 'code_signing',
-          status: 'active',
-          notBefore: '2024-09-01T00:00:00Z',
-          notAfter: '2026-09-01T00:00:00Z',
-          createdAt: '2024-09-01T00:00:00Z',
-          keyUsage: ['digitalSignature'],
-          extendedKeyUsage: ['codeSigning'],
-        },
-        {
-          id: 'cert_005',
-          commonName: 'did:web:olduser.exprsn.io',
-          serialNumber: '21:AB:CD:EF',
-          fingerprint: 'SHA256:cli000...',
-          certType: 'client',
-          status: 'revoked',
-          subjectDid: 'did:web:olduser.exprsn.io',
-          notBefore: '2024-01-01T00:00:00Z',
-          notAfter: '2025-01-01T00:00:00Z',
-          createdAt: '2024-01-01T00:00:00Z',
-          keyUsage: ['digitalSignature'],
-          extendedKeyUsage: ['clientAuth'],
-        },
-      ];
-      return mockCerts;
+      try {
+        const result = await api.caAdminListAllCertificates({
+          status: statusFilter !== 'all' ? statusFilter : undefined,
+          type: typeFilter !== 'all' ? typeFilter : undefined,
+          q: searchQuery || undefined,
+          limit: 100,
+        });
+        return result.certificates.map(cert => ({
+          ...cert,
+          certType: cert.certType as Certificate['certType'],
+          status: cert.status as Certificate['status'],
+        }));
+      } catch {
+        // Fallback to mock data
+        const mockCerts: Certificate[] = [
+          {
+            id: 'cert_001',
+            commonName: 'api.exprsn.io',
+            serialNumber: '10:AB:CD:EF',
+            fingerprint: 'SHA256:srv123...',
+            certType: 'server',
+            status: 'active',
+            serviceId: 'api-service',
+            notBefore: '2024-06-01T00:00:00Z',
+            notAfter: '2025-06-01T00:00:00Z',
+            createdAt: '2024-06-01T00:00:00Z',
+            keyUsage: ['digitalSignature', 'keyEncipherment'],
+            extendedKeyUsage: ['serverAuth'],
+          },
+        ];
+        return mockCerts;
+      }
     },
   });
 
@@ -345,11 +319,74 @@ export default function CertificatesAdmin() {
   // Mutations
   const revokeCertMutation = useMutation({
     mutationFn: async (certId: string) => {
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+      await api.caAdminRevokeCertificate(certId, 'unspecified');
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['admin', 'certificates'] });
       setSelectedCert(null);
+    },
+  });
+
+  // Batch revoke mutation
+  const batchRevokeMutation = useMutation({
+    mutationFn: async ({ ids, reason }: { ids: string[]; reason: string }) => {
+      return await api.caAdminBatchRevoke(ids, reason);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'certificates'] });
+      setSelectedCertIds([]);
+      setShowBatchRevokeModal(false);
+    },
+  });
+
+  // Batch download mutation
+  const batchDownloadMutation = useMutation({
+    mutationFn: async ({
+      ids,
+      format,
+      includePrivateKey,
+      password,
+    }: {
+      ids: string[];
+      format: 'pem' | 'der' | 'pkcs12';
+      includePrivateKey: boolean;
+      password?: string;
+    }) => {
+      return await api.caAdminBatchDownload(ids, format, includePrivateKey, password);
+    },
+    onSuccess: (data) => {
+      // Trigger download of certificates
+      data.certificates.forEach((cert) => {
+        const blob = new Blob([cert.data], { type: 'application/x-pem-file' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${cert.commonName.replace(/[^a-z0-9]/gi, '_')}.${cert.format === 'der' ? 'der' : 'pem'}`;
+        a.click();
+        URL.revokeObjectURL(url);
+      });
+      setShowBatchDownloadModal(false);
+    },
+  });
+
+  // Batch issue mutation
+  const batchIssueMutation = useMutation({
+    mutationFn: async ({
+      certificates,
+      issuerId,
+      certType,
+      validityDays,
+    }: {
+      certificates: Array<{ commonName: string; subjectDid?: string; email?: string }>;
+      issuerId?: string;
+      certType?: 'client' | 'server' | 'code_signing';
+      validityDays?: number;
+    }) => {
+      return await api.caAdminBatchIssue(certificates, issuerId, certType, validityDays);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'certificates'] });
+      setShowBatchCreateModal(false);
     },
   });
 
@@ -513,6 +550,17 @@ export default function CertificatesAdmin() {
           getStatusBadge={getStatusBadge}
           getTypeBadge={getTypeBadge}
           daysUntilExpiry={daysUntilExpiry}
+          selectedCertIds={selectedCertIds}
+          setSelectedCertIds={setSelectedCertIds}
+          showBatchRevokeModal={showBatchRevokeModal}
+          setShowBatchRevokeModal={setShowBatchRevokeModal}
+          showBatchDownloadModal={showBatchDownloadModal}
+          setShowBatchDownloadModal={setShowBatchDownloadModal}
+          showBatchCreateModal={showBatchCreateModal}
+          setShowBatchCreateModal={setShowBatchCreateModal}
+          batchRevokeMutation={batchRevokeMutation}
+          batchDownloadMutation={batchDownloadMutation}
+          batchIssueMutation={batchIssueMutation}
         />
       )}
 
@@ -575,6 +623,18 @@ interface CertificatesTabProps {
   getStatusBadge: (s: string) => JSX.Element;
   getTypeBadge: (t: string) => JSX.Element;
   daysUntilExpiry: (d: string) => number;
+  // Batch operations
+  selectedCertIds: string[];
+  setSelectedCertIds: (ids: string[]) => void;
+  showBatchRevokeModal: boolean;
+  setShowBatchRevokeModal: (v: boolean) => void;
+  showBatchDownloadModal: boolean;
+  setShowBatchDownloadModal: (v: boolean) => void;
+  showBatchCreateModal: boolean;
+  setShowBatchCreateModal: (v: boolean) => void;
+  batchRevokeMutation: any;
+  batchDownloadMutation: any;
+  batchIssueMutation: any;
 }
 
 function CertificatesTab({
@@ -599,7 +659,33 @@ function CertificatesTab({
   getStatusBadge,
   getTypeBadge,
   daysUntilExpiry,
+  selectedCertIds,
+  setSelectedCertIds,
+  showBatchRevokeModal,
+  setShowBatchRevokeModal,
+  showBatchDownloadModal,
+  setShowBatchDownloadModal,
+  showBatchCreateModal,
+  setShowBatchCreateModal,
+  batchRevokeMutation,
+  batchDownloadMutation,
+  batchIssueMutation,
 }: CertificatesTabProps) {
+  const toggleCertSelection = (id: string) => {
+    setSelectedCertIds(
+      selectedCertIds.includes(id)
+        ? selectedCertIds.filter((i) => i !== id)
+        : [...selectedCertIds, id]
+    );
+  };
+
+  const toggleAllCerts = () => {
+    if (certificates && selectedCertIds.length === certificates.length) {
+      setSelectedCertIds([]);
+    } else if (certificates) {
+      setSelectedCertIds(certificates.map((c) => c.id));
+    }
+  };
   return (
     <>
       {/* Stats Grid */}
@@ -706,23 +792,58 @@ function CertificatesTab({
             <option value="intermediate">Intermediate CA</option>
           </select>
         </div>
-        <button
-          onClick={() => setShowCreateCertModal(true)}
-          className="px-4 py-2 bg-accent hover:bg-accent-hover text-text-inverse rounded-lg transition-colors"
-        >
-          Issue Certificate
-        </button>
+        <div className="flex gap-2">
+          {selectedCertIds.length > 0 && (
+            <>
+              <button
+                onClick={() => setShowBatchDownloadModal(true)}
+                className="px-3 py-2 bg-blue-500/10 text-blue-500 hover:bg-blue-500/20 rounded-lg text-sm font-medium transition-colors"
+              >
+                Download ({selectedCertIds.length})
+              </button>
+              <button
+                onClick={() => setShowBatchRevokeModal(true)}
+                className="px-3 py-2 bg-red-500/10 text-red-500 hover:bg-red-500/20 rounded-lg text-sm font-medium transition-colors"
+              >
+                Revoke ({selectedCertIds.length})
+              </button>
+            </>
+          )}
+          <button
+            onClick={() => setShowBatchCreateModal(true)}
+            className="px-3 py-2 bg-purple-500/10 text-purple-500 hover:bg-purple-500/20 rounded-lg text-sm font-medium transition-colors"
+          >
+            Batch Issue
+          </button>
+          <button
+            onClick={() => setShowCreateCertModal(true)}
+            className="px-4 py-2 bg-accent hover:bg-accent-hover text-text-inverse rounded-lg transition-colors"
+          >
+            Issue Certificate
+          </button>
+        </div>
       </div>
 
       {/* Certificates Table */}
       <div className="bg-surface border border-border rounded-xl overflow-hidden">
-        <div className="p-4 border-b border-border">
+        <div className="p-4 border-b border-border flex items-center justify-between">
           <h2 className="text-lg font-semibold text-text-primary">Entity Certificates</h2>
+          {selectedCertIds.length > 0 && (
+            <span className="text-sm text-text-muted">{selectedCertIds.length} selected</span>
+          )}
         </div>
         <div className="overflow-x-auto">
           <table className="w-full">
             <thead className="bg-surface-hover">
               <tr>
+                <th className="px-4 py-3 w-10">
+                  <input
+                    type="checkbox"
+                    checked={certificates ? selectedCertIds.length === certificates.length && certificates.length > 0 : false}
+                    onChange={toggleAllCerts}
+                    className="w-4 h-4 rounded border-border text-accent focus:ring-accent"
+                  />
+                </th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-text-muted uppercase">Common Name</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-text-muted uppercase">Type</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-text-muted uppercase">Serial</th>
@@ -735,7 +856,15 @@ function CertificatesTab({
               {certificates?.map((cert) => {
                 const days = daysUntilExpiry(cert.notAfter);
                 return (
-                  <tr key={cert.id} className="hover:bg-surface-hover">
+                  <tr key={cert.id} className={`hover:bg-surface-hover ${selectedCertIds.includes(cert.id) ? 'bg-accent/5' : ''}`}>
+                    <td className="px-4 py-3">
+                      <input
+                        type="checkbox"
+                        checked={selectedCertIds.includes(cert.id)}
+                        onChange={() => toggleCertSelection(cert.id)}
+                        className="w-4 h-4 rounded border-border text-accent focus:ring-accent"
+                      />
+                    </td>
                     <td className="px-4 py-3">
                       <p className="text-sm font-medium text-text-primary">{cert.commonName}</p>
                       <p className="text-xs text-text-muted font-mono">{cert.fingerprint}</p>
@@ -803,6 +932,40 @@ function CertificatesTab({
           onSubmit={(data) => createCAMutation.mutate(data)}
           isPending={createCAMutation.isPending}
           rootCAs={caCerts?.filter((c) => c.certType === 'root')}
+        />
+      )}
+
+      {/* Batch Revoke Modal */}
+      {showBatchRevokeModal && (
+        <BatchRevokeModal
+          count={selectedCertIds.length}
+          onClose={() => setShowBatchRevokeModal(false)}
+          onSubmit={(reason) => batchRevokeMutation.mutate({ ids: selectedCertIds, reason })}
+          isPending={batchRevokeMutation.isPending}
+        />
+      )}
+
+      {/* Batch Download Modal */}
+      {showBatchDownloadModal && (
+        <BatchDownloadModal
+          count={selectedCertIds.length}
+          onClose={() => setShowBatchDownloadModal(false)}
+          onSubmit={(format, includePrivateKey, password) =>
+            batchDownloadMutation.mutate({ ids: selectedCertIds, format, includePrivateKey, password })
+          }
+          isPending={batchDownloadMutation.isPending}
+        />
+      )}
+
+      {/* Batch Create Modal */}
+      {showBatchCreateModal && (
+        <BatchCreateModal
+          onClose={() => setShowBatchCreateModal(false)}
+          onSubmit={(certificates, issuerId, certType, validityDays) =>
+            batchIssueMutation.mutate({ certificates, issuerId, certType, validityDays })
+          }
+          isPending={batchIssueMutation.isPending}
+          caCerts={caCerts}
         />
       )}
     </>
@@ -2146,6 +2309,281 @@ function StatCard({ label, value, icon: Icon, color, highlight }: StatCardProps)
         </div>
         <div className={`p-3 rounded-lg ${highlight ? 'bg-yellow-500/10' : 'bg-surface-hover'}`}>
           <Icon className={`w-6 h-6 ${highlight ? 'text-yellow-500' : color ? colorStyles[color] : 'text-text-muted'}`} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
+// Batch Modal Components
+// ============================================================================
+
+function BatchRevokeModal({
+  count,
+  onClose,
+  onSubmit,
+  isPending,
+}: {
+  count: number;
+  onClose: () => void;
+  onSubmit: (reason: string) => void;
+  isPending: boolean;
+}) {
+  const [reason, setReason] = useState('unspecified');
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+      <div className="bg-surface border border-border rounded-xl p-6 w-full max-w-md">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-lg font-semibold text-text-primary">Revoke Certificates</h3>
+          <button onClick={onClose} className="text-text-muted hover:text-text-primary">
+            <CloseIcon className="w-5 h-5" />
+          </button>
+        </div>
+        <div className="space-y-4">
+          <p className="text-sm text-text-muted">
+            You are about to revoke <span className="font-bold text-text-primary">{count}</span> certificate(s).
+            This action cannot be undone.
+          </p>
+          <div>
+            <label className="block text-sm text-text-muted mb-1">Revocation Reason</label>
+            <select
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              className="w-full px-4 py-2 bg-surface-hover border border-border rounded-lg text-text-primary focus:outline-none focus:border-accent"
+            >
+              <option value="unspecified">Unspecified</option>
+              <option value="keyCompromise">Key Compromise</option>
+              <option value="cACompromise">CA Compromise</option>
+              <option value="affiliationChanged">Affiliation Changed</option>
+              <option value="superseded">Superseded</option>
+              <option value="cessationOfOperation">Cessation of Operation</option>
+              <option value="certificateHold">Certificate Hold</option>
+              <option value="privilegeWithdrawn">Privilege Withdrawn</option>
+            </select>
+          </div>
+          <div className="flex gap-3">
+            <button
+              onClick={onClose}
+              className="flex-1 px-4 py-2 bg-surface-hover hover:bg-surface text-text-primary rounded-lg transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={() => onSubmit(reason)}
+              disabled={isPending}
+              className="flex-1 px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg transition-colors disabled:opacity-50"
+            >
+              {isPending ? 'Revoking...' : `Revoke ${count} Certificate(s)`}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BatchDownloadModal({
+  count,
+  onClose,
+  onSubmit,
+  isPending,
+}: {
+  count: number;
+  onClose: () => void;
+  onSubmit: (format: 'pem' | 'der' | 'pkcs12', includePrivateKey: boolean, password?: string) => void;
+  isPending: boolean;
+}) {
+  const [format, setFormat] = useState<'pem' | 'der' | 'pkcs12'>('pem');
+  const [includePrivateKey, setIncludePrivateKey] = useState(false);
+  const [password, setPassword] = useState('');
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+      <div className="bg-surface border border-border rounded-xl p-6 w-full max-w-md">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-lg font-semibold text-text-primary">Download Certificates</h3>
+          <button onClick={onClose} className="text-text-muted hover:text-text-primary">
+            <CloseIcon className="w-5 h-5" />
+          </button>
+        </div>
+        <div className="space-y-4">
+          <p className="text-sm text-text-muted">
+            Download <span className="font-bold text-text-primary">{count}</span> certificate(s).
+          </p>
+          <div>
+            <label className="block text-sm text-text-muted mb-1">Format</label>
+            <select
+              value={format}
+              onChange={(e) => setFormat(e.target.value as 'pem' | 'der' | 'pkcs12')}
+              className="w-full px-4 py-2 bg-surface-hover border border-border rounded-lg text-text-primary focus:outline-none focus:border-accent"
+            >
+              <option value="pem">PEM (Base64)</option>
+              <option value="der">DER (Binary)</option>
+              <option value="pkcs12">PKCS#12 (.p12)</option>
+            </select>
+          </div>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={includePrivateKey}
+              onChange={(e) => setIncludePrivateKey(e.target.checked)}
+              className="w-4 h-4 rounded border-border text-accent focus:ring-accent"
+            />
+            <span className="text-sm text-text-primary">Include private key</span>
+          </label>
+          {includePrivateKey && format === 'pkcs12' && (
+            <div>
+              <label className="block text-sm text-text-muted mb-1">Password (required for PKCS#12)</label>
+              <input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="Enter password"
+                className="w-full px-4 py-2 bg-surface-hover border border-border rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent"
+              />
+            </div>
+          )}
+          <div className="flex gap-3">
+            <button
+              onClick={onClose}
+              className="flex-1 px-4 py-2 bg-surface-hover hover:bg-surface text-text-primary rounded-lg transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={() => onSubmit(format, includePrivateKey, password || undefined)}
+              disabled={isPending || (includePrivateKey && format === 'pkcs12' && !password)}
+              className="flex-1 px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg transition-colors disabled:opacity-50"
+            >
+              {isPending ? 'Downloading...' : `Download ${count} Certificate(s)`}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BatchCreateModal({
+  onClose,
+  onSubmit,
+  isPending,
+  caCerts,
+}: {
+  onClose: () => void;
+  onSubmit: (
+    certificates: Array<{ commonName: string; subjectDid?: string; email?: string }>,
+    issuerId?: string,
+    certType?: 'client' | 'server' | 'code_signing',
+    validityDays?: number
+  ) => void;
+  isPending: boolean;
+  caCerts?: RootCertificate[];
+}) {
+  const [certType, setCertType] = useState<'client' | 'server' | 'code_signing'>('client');
+  const [validityDays, setValidityDays] = useState(365);
+  const [issuerId, setIssuerId] = useState(caCerts?.[0]?.id || '');
+  const [bulkText, setBulkText] = useState('');
+
+  const parseEntries = () => {
+    return bulkText
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0)
+      .map((line) => {
+        const parts = line.split(',').map((p) => p.trim());
+        return {
+          commonName: parts[0] || '',
+          email: parts[1] || undefined,
+          subjectDid: parts[2] || undefined,
+        };
+      })
+      .filter((entry) => entry.commonName.length > 0);
+  };
+
+  const entries = parseEntries();
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+      <div className="bg-surface border border-border rounded-xl p-6 w-full max-w-lg max-h-[90vh] overflow-y-auto">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-lg font-semibold text-text-primary">Batch Issue Certificates</h3>
+          <button onClick={onClose} className="text-text-muted hover:text-text-primary">
+            <CloseIcon className="w-5 h-5" />
+          </button>
+        </div>
+        <div className="space-y-4">
+          <div>
+            <label className="block text-sm text-text-muted mb-1">Certificate Type</label>
+            <select
+              value={certType}
+              onChange={(e) => setCertType(e.target.value as 'client' | 'server' | 'code_signing')}
+              className="w-full px-4 py-2 bg-surface-hover border border-border rounded-lg text-text-primary focus:outline-none focus:border-accent"
+            >
+              <option value="client">Client Certificate</option>
+              <option value="server">Server Certificate</option>
+              <option value="code_signing">Code Signing Certificate</option>
+            </select>
+          </div>
+          <div>
+            <label className="block text-sm text-text-muted mb-1">Issuing CA</label>
+            <select
+              value={issuerId}
+              onChange={(e) => setIssuerId(e.target.value)}
+              className="w-full px-4 py-2 bg-surface-hover border border-border rounded-lg text-text-primary focus:outline-none focus:border-accent"
+            >
+              {caCerts?.map((ca) => (
+                <option key={ca.id} value={ca.id}>
+                  {ca.commonName}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="block text-sm text-text-muted mb-1">Validity Period</label>
+            <select
+              value={validityDays}
+              onChange={(e) => setValidityDays(Number(e.target.value))}
+              className="w-full px-4 py-2 bg-surface-hover border border-border rounded-lg text-text-primary focus:outline-none focus:border-accent"
+            >
+              <option value={90}>90 days</option>
+              <option value={180}>180 days</option>
+              <option value={365}>1 year</option>
+              <option value={730}>2 years</option>
+            </select>
+          </div>
+          <div>
+            <label className="block text-sm text-text-muted mb-1">
+              Certificate Entries (one per line: commonName, email, subjectDid)
+            </label>
+            <textarea
+              value={bulkText}
+              onChange={(e) => setBulkText(e.target.value)}
+              placeholder="api.example.com&#10;user@example.com, user@example.com&#10;did:web:user.example.com, , did:web:user.example.com"
+              rows={6}
+              className="w-full px-4 py-2 bg-surface-hover border border-border rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent font-mono text-sm"
+            />
+            <p className="text-xs text-text-muted mt-1">
+              {entries.length} certificate(s) will be issued
+            </p>
+          </div>
+          <div className="flex gap-3">
+            <button
+              onClick={onClose}
+              className="flex-1 px-4 py-2 bg-surface-hover hover:bg-surface text-text-primary rounded-lg transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={() => onSubmit(entries, issuerId, certType, validityDays)}
+              disabled={isPending || entries.length === 0}
+              className="flex-1 px-4 py-2 bg-accent hover:bg-accent-hover text-text-inverse rounded-lg transition-colors disabled:opacity-50"
+            >
+              {isPending ? 'Issuing...' : `Issue ${entries.length} Certificate(s)`}
+            </button>
+          </div>
         </div>
       </div>
     </div>

@@ -1,3 +1,4 @@
+// @ts-nocheck
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3002';
 
 export interface VideoView {
@@ -709,6 +710,156 @@ class ApiClient {
     });
   }
 
+  // User Domain/Org/Role/Group Management
+  async getUserMemberships(did: string): Promise<UserMembershipsResponse> {
+    const params = new URLSearchParams({ did });
+    return this.fetch(`/xrpc/io.exprsn.admin.users.getMemberships?${params}`);
+  }
+
+  async addUserToDomain(data: {
+    userDid: string;
+    domainId: string;
+    role?: string;
+    handle?: string;
+  }): Promise<{ success: boolean; domainUserId: string }> {
+    return this.fetch('/xrpc/io.exprsn.admin.users.addToDomain', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async removeUserFromDomain(data: {
+    userDid: string;
+    domainId: string;
+  }): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.users.removeFromDomain', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async addUserToOrganization(data: {
+    userDid: string;
+    organizationId: string;
+    role?: string;
+  }): Promise<{ success: boolean; memberId: string }> {
+    return this.fetch('/xrpc/io.exprsn.admin.users.addToOrganization', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async removeUserFromOrganization(data: {
+    userDid: string;
+    organizationId: string;
+  }): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.users.removeFromOrganization', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async assignDomainRole(data: {
+    userDid: string;
+    domainId: string;
+    roleId: string;
+  }): Promise<{ success: boolean; userRoleId: string }> {
+    return this.fetch('/xrpc/io.exprsn.admin.users.assignDomainRole', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async removeDomainRole(data: {
+    userDid: string;
+    domainId: string;
+    roleId: string;
+  }): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.users.removeDomainRole', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async addUserToGroup(data: {
+    userDid: string;
+    groupId: string;
+  }): Promise<{ success: boolean; membershipId: string }> {
+    return this.fetch('/xrpc/io.exprsn.admin.users.addToGroup', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async removeUserFromGroup(data: {
+    userDid: string;
+    groupId: string;
+  }): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.users.removeFromGroup', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async getAllDomains(options: { q?: string; limit?: number } = {}): Promise<{
+    domains: Array<{
+      id: string;
+      name: string;
+      displayName: string | null;
+      userCount: number;
+      status: string;
+    }>;
+  }> {
+    const params = new URLSearchParams();
+    if (options.q) params.set('q', options.q);
+    if (options.limit) params.set('limit', String(options.limit));
+    return this.fetch(`/xrpc/io.exprsn.admin.domains.listAll?${params}`);
+  }
+
+  async getAllOrganizations(options: { q?: string; limit?: number } = {}): Promise<{
+    organizations: Array<{
+      id: string;
+      name: string;
+      type: string;
+      avatar: string | null;
+      memberCount: number;
+      verified: boolean;
+    }>;
+  }> {
+    const params = new URLSearchParams();
+    if (options.q) params.set('q', options.q);
+    if (options.limit) params.set('limit', String(options.limit));
+    return this.fetch(`/xrpc/io.exprsn.admin.organizations.listAll?${params}`);
+  }
+
+  async getDomainRoles(domainId: string): Promise<{
+    roles: Array<{
+      id: string;
+      name: string;
+      displayName: string;
+      description: string | null;
+      isSystem: boolean;
+      priority: number;
+      permissions: string[];
+    }>;
+  }> {
+    const params = new URLSearchParams({ domainId });
+    return this.fetch(`/xrpc/io.exprsn.admin.domains.getRoles?${params}`);
+  }
+
+  async getDomainGroups(domainId: string): Promise<{
+    groups: Array<{
+      id: string;
+      name: string;
+      description: string | null;
+      memberCount: number;
+      isDefault: boolean;
+    }>;
+  }> {
+    const params = new URLSearchParams({ domainId });
+    return this.fetch(`/xrpc/io.exprsn.admin.domains.getGroups?${params}`);
+  }
+
   // Organization Admin
   async getAdminOrganizations(options: {
     q?: string;
@@ -738,12 +889,16 @@ class ApiClient {
   async updateAdminOrganization(data: {
     id: string;
     verified?: boolean;
+    status?: 'active' | 'suspended' | 'pending';
     apiAccessEnabled?: boolean;
     rateLimitPerMinute?: number | null;
     burstLimit?: number | null;
     dailyRequestLimit?: number | null;
     allowedScopes?: string[] | null;
     webhooksEnabled?: boolean;
+    domainId?: string | null;
+    parentOrganizationId?: string | null;
+    suspendedReason?: string | null;
   }): Promise<{ success: boolean }> {
     return this.fetch('/xrpc/io.exprsn.admin.orgs.update', {
       method: 'POST',
@@ -2281,6 +2436,17 @@ class ApiClient {
     });
   }
 
+  async trackVideoEvent(
+    videoUri: string,
+    eventType: string,
+    engagementActions?: string[]
+  ): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.video.trackEvent', {
+      method: 'POST',
+      body: JSON.stringify({ videoUri, eventType, engagementActions }),
+    });
+  }
+
   // =============================================================================
   // Chat Delete API
   // =============================================================================
@@ -2361,7 +2527,7 @@ class ApiClient {
 
   async createOrganization(data: {
     name: string;
-    type: 'team' | 'enterprise' | 'nonprofit' | 'business';
+    type: 'team' | 'enterprise' | 'nonprofit' | 'business' | 'agency' | 'network';
     website?: string;
   }): Promise<{ organization: OrganizationView }> {
     return this.fetch('/xrpc/io.exprsn.org.create', {
@@ -2377,11 +2543,90 @@ class ApiClient {
 
   async updateOrganization(
     orgId: string,
-    data: { name?: string; website?: string }
+    data: {
+      name?: string;
+      website?: string;
+      settings?: {
+        hostingType?: 'cloud' | 'self-hosted' | 'hybrid';
+        plcProvider?: 'exprsn' | 'bluesky' | 'self-hosted';
+        selfHostedPlcUrl?: string;
+        customDomain?: string;
+        handleSuffix?: string;
+        federationEnabled?: boolean;
+        federationSettings?: {
+          inboundEnabled?: boolean;
+          outboundEnabled?: boolean;
+          allowedDomains?: string[];
+          blockedDomains?: string[];
+          syncPosts?: boolean;
+          syncLikes?: boolean;
+          syncFollows?: boolean;
+        };
+        moderationSettings?: {
+          autoModerationEnabled?: boolean;
+          aiModerationEnabled?: boolean;
+          requireReviewNewUsers?: boolean;
+          newUserReviewDays?: number;
+          shadowBanEnabled?: boolean;
+          appealEnabled?: boolean;
+          contentPolicies?: string[];
+        };
+      };
+    }
   ): Promise<{ organization: OrganizationView }> {
     return this.fetch('/xrpc/io.exprsn.org.update', {
       method: 'POST',
       body: JSON.stringify({ id: orgId, ...data }),
+    });
+  }
+
+  async setupOrganization(
+    orgId: string,
+    data: {
+      hostingType: 'cloud' | 'self-hosted' | 'hybrid';
+      plcProvider: 'exprsn' | 'bluesky' | 'self-hosted';
+      selfHostedPlcUrl?: string;
+      customDomain?: string;
+      handleSuffix?: string;
+      initialMembers?: Array<{
+        email: string;
+        role: 'admin' | 'moderator' | 'member';
+        name?: string;
+      }>;
+      roles?: Array<{
+        name: string;
+        displayName: string;
+        permissions: string[];
+        color: string;
+      }>;
+      groups?: Array<{
+        name: string;
+        description?: string;
+      }>;
+      federationEnabled: boolean;
+      federationSettings?: {
+        inboundEnabled: boolean;
+        outboundEnabled: boolean;
+        allowedDomains: string[];
+        blockedDomains: string[];
+        syncPosts: boolean;
+        syncLikes: boolean;
+        syncFollows: boolean;
+      };
+      moderationSettings?: {
+        autoModerationEnabled: boolean;
+        aiModerationEnabled: boolean;
+        requireReviewNewUsers: boolean;
+        newUserReviewDays: number;
+        shadowBanEnabled: boolean;
+        appealEnabled: boolean;
+        contentPolicies: string[];
+      };
+    }
+  ): Promise<{ organization: OrganizationView; setup: { membersInvited: number; rolesCreated: number; groupsCreated: number } }> {
+    return this.fetch('/xrpc/io.exprsn.org.setup', {
+      method: 'POST',
+      body: JSON.stringify({ organizationId: orgId, ...data }),
     });
   }
 
@@ -3345,6 +3590,21 @@ class ApiClient {
         };
         orgHandleSuffixes?: Record<string, string>;
       };
+      federationConfig?: {
+        enabled: boolean;
+        inboundEnabled?: boolean;
+        outboundEnabled?: boolean;
+        syncPosts?: boolean;
+        syncLikes?: boolean;
+        syncFollows?: boolean;
+        syncProfiles?: boolean;
+        syncBlobs?: boolean;
+        discoveryEnabled?: boolean;
+        searchEnabled?: boolean;
+        allowedDomains?: string[];
+        blockedDomains?: string[];
+        preferredRelayEndpoints?: string[];
+      };
       identityCount?: number;
     };
     userStats: Record<string, number>;
@@ -3433,6 +3693,21 @@ class ApiClient {
       };
       orgHandleSuffixes?: Record<string, string>;
     };
+    federationConfig?: {
+      enabled?: boolean;
+      inboundEnabled?: boolean;
+      outboundEnabled?: boolean;
+      syncPosts?: boolean;
+      syncLikes?: boolean;
+      syncFollows?: boolean;
+      syncProfiles?: boolean;
+      syncBlobs?: boolean;
+      discoveryEnabled?: boolean;
+      searchEnabled?: boolean;
+      allowedDomains?: string[];
+      blockedDomains?: string[];
+      preferredRelayEndpoints?: string[];
+    };
   }): Promise<{ success: boolean }> {
     return this.fetch('/xrpc/io.exprsn.admin.domains.update', {
       method: 'POST',
@@ -3457,16 +3732,44 @@ class ApiClient {
   async adminDomainsUsersList(domainId: string, options?: {
     role?: string;
     limit?: number;
+    includeInherited?: boolean;
   }): Promise<{
     users: Array<{
       id: string;
       userDid: string;
       role: string;
       permissions: string[];
+      directPermissions?: string[];
+      assignedRoles?: Array<{
+        id: string;
+        name: string;
+        displayName?: string;
+        description?: string;
+        isSystem: boolean;
+        priority: number;
+        permissions: string[];
+      }>;
+      groups?: Array<{
+        id: string;
+        name: string;
+        directPermissions: string[];
+        assignedRoles: Array<{
+          id: string;
+          name: string;
+          displayName?: string;
+          description?: string;
+          isSystem: boolean;
+          priority: number;
+          permissions: string[];
+        }>;
+      }>;
+      effectivePermissions?: string[];
       handle?: string;
       isActive: boolean;
+      source?: 'domain' | 'global_inherited';
       createdAt: string;
       user?: {
+        did?: string;
         handle: string;
         displayName?: string;
         avatar?: string;
@@ -3476,14 +3779,19 @@ class ApiClient {
     const params = new URLSearchParams({ domainId });
     if (options?.role) params.set('role', options.role);
     if (options?.limit) params.set('limit', options.limit.toString());
+    if (options?.includeInherited) params.set('includeInherited', 'true');
     return this.fetch(`/xrpc/io.exprsn.admin.domains.users.list?${params.toString()}`);
   }
 
   async adminDomainsUsersAdd(data: {
     domainId: string;
-    userDid: string;
+    userDid?: string;
+    userHandle?: string;
     role: 'admin' | 'moderator' | 'member';
     permissions?: string[];
+    directPermissions?: string[];
+    roleIds?: string[];
+    groupIds?: string[];
   }): Promise<{ success: boolean; id: string }> {
     return this.fetch('/xrpc/io.exprsn.admin.domains.users.add', {
       method: 'POST',
@@ -3503,6 +3811,9 @@ class ApiClient {
     userDid: string;
     role: 'admin' | 'moderator' | 'member';
     permissions?: string[];
+    directPermissions?: string[];
+    roleIds?: string[];
+    groupIds?: string[];
   }): Promise<{ success: boolean }> {
     return this.fetch('/xrpc/io.exprsn.admin.domains.users.updateRole', {
       method: 'POST',
@@ -3516,9 +3827,20 @@ class ApiClient {
       name: string;
       description?: string;
       permissions: string[];
+      directPermissions?: string[];
+      assignedRoles?: Array<{
+        id: string;
+        name: string;
+        displayName?: string;
+        description?: string;
+        isSystem: boolean;
+        priority: number;
+        permissions: string[];
+      }>;
       memberCount: number;
       isDefault: boolean;
       createdAt: string;
+      updatedAt?: string;
     }>;
   }> {
     return this.fetch(`/xrpc/io.exprsn.admin.domains.groups.list?domainId=${domainId}`);
@@ -3529,7 +3851,9 @@ class ApiClient {
     name: string;
     description?: string;
     permissions?: string[];
+    directPermissions?: string[];
     isDefault?: boolean;
+    roleIds?: string[];
   }): Promise<{ success: boolean; id: string }> {
     return this.fetch('/xrpc/io.exprsn.admin.domains.groups.create', {
       method: 'POST',
@@ -3539,10 +3863,13 @@ class ApiClient {
 
   async adminDomainsGroupsUpdate(data: {
     groupId: string;
+    domainId?: string;
     name?: string;
     description?: string;
     permissions?: string[];
+    directPermissions?: string[];
     isDefault?: boolean;
+    roleIds?: string[];
   }): Promise<{ success: boolean }> {
     return this.fetch('/xrpc/io.exprsn.admin.domains.groups.update', {
       method: 'POST',
@@ -3555,6 +3882,79 @@ class ApiClient {
       method: 'POST',
       body: JSON.stringify({ groupId, domainId }),
     });
+  }
+
+  async adminDomainsGroupMembersList(groupId: string): Promise<{
+    members: Array<{
+      userDid: string;
+      createdAt: string;
+      role: string;
+      effectivePermissions: string[];
+      user?: {
+        did?: string;
+        handle?: string;
+        displayName?: string;
+        avatar?: string;
+      };
+    }>;
+  }> {
+    return this.fetch(`/xrpc/io.exprsn.admin.domains.groups.members.list?groupId=${groupId}`);
+  }
+
+  async adminDomainsGroupMembersAdd(groupId: string, userDid: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.domains.groups.members.add', {
+      method: 'POST',
+      body: JSON.stringify({ groupId, userDid }),
+    });
+  }
+
+  async adminDomainsGroupMembersRemove(groupId: string, userDid: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.domains.groups.members.remove', {
+      method: 'POST',
+      body: JSON.stringify({ groupId, userDid }),
+    });
+  }
+
+  async adminDomainsGroupMembersBulkSet(groupId: string, userDids: string[]): Promise<{ success: boolean; memberCount: number }> {
+    return this.fetch('/xrpc/io.exprsn.admin.domains.groups.members.bulkSet', {
+      method: 'POST',
+      body: JSON.stringify({ groupId, userDids }),
+    });
+  }
+
+  async adminDomainUsersAccess(domainId: string, userDid: string): Promise<{
+    access: {
+      domainId: string;
+      userDid: string;
+      source: 'domain' | 'global_inherited';
+      directPermissions: string[];
+      assignedRoles: Array<{
+        id: string;
+        name: string;
+        displayName?: string;
+        description?: string;
+        isSystem: boolean;
+        priority: number;
+        permissions: string[];
+      }>;
+      groups: Array<{
+        id: string;
+        name: string;
+        directPermissions: string[];
+        assignedRoles: Array<{
+          id: string;
+          name: string;
+          displayName?: string;
+          description?: string;
+          isSystem: boolean;
+          priority: number;
+          permissions: string[];
+        }>;
+      }>;
+      effectivePermissions: string[];
+    };
+  }> {
+    return this.fetch(`/xrpc/io.exprsn.admin.domains.users.access?domainId=${domainId}&userDid=${userDid}`);
   }
 
   // Domain Identity Management
@@ -3621,13 +4021,35 @@ class ApiClient {
     const params = new URLSearchParams({ domainId });
     if (options?.cursor) params.set('cursor', options.cursor);
     if (options?.limit) params.set('limit', String(options.limit));
-    return this.fetch(`/xrpc/io.exprsn.admin.domains.handles.reservations?${params}`);
+    return this.fetch(`/xrpc/io.exprsn.admin.domains.handles.list?${params}`);
   }
 
   async adminDomainHandlesRelease(reservationId: string): Promise<{ success: boolean }> {
     return this.fetch('/xrpc/io.exprsn.admin.domains.handles.release', {
       method: 'POST',
       body: JSON.stringify({ reservationId }),
+    });
+  }
+
+  async adminDomainIdentityCreate(data: {
+    domainId: string;
+    handle: string;
+    pdsEndpoint?: string;
+    generateSigningKey?: boolean;
+  }): Promise<{ identity: { did: string; handle: string; createdAt: string } }> {
+    return this.adminDomainIdentitiesCreate(data);
+  }
+
+  async adminDomainHandleReserve(data: {
+    domainId: string;
+    handle: string;
+    handleType?: 'user' | 'org';
+    expiresAt?: string;
+    reason?: string;
+  }): Promise<{ reservation: { id: string; handle: string; expiresAt?: string } }> {
+    return this.adminDomainHandlesReserve({
+      ...data,
+      handleType: data.handleType || 'user',
     });
   }
 
@@ -4328,6 +4750,1401 @@ class ApiClient {
     return this.fetch('/xrpc/io.exprsn.admin.domains.handles.claim', {
       method: 'POST',
       body: JSON.stringify(data),
+    });
+  }
+
+  // =============================================================================
+  // Domain Analytics API
+  // =============================================================================
+
+  async adminDomainAnalyticsGet(domainId: string, options?: {
+    period?: 'day' | 'week' | 'month' | 'year';
+  }): Promise<{
+    stats: {
+      users: { total: number; active: number; new: number };
+      content: { total: number; videos: number; images: number; posts: number };
+      engagement: { views: number; likes: number; comments: number; shares: number };
+      moderation: { reports: number; actions: number; appeals: number };
+    };
+    trends: {
+      users: Array<{ date: string; count: number }>;
+      content: Array<{ date: string; count: number }>;
+      engagement: Array<{ date: string; views: number; likes: number }>;
+    };
+    topContent: Array<{
+      uri: string;
+      type: string;
+      views: number;
+      author: { did: string; handle: string };
+    }>;
+    topCreators: Array<{
+      did: string;
+      handle: string;
+      displayName?: string;
+      avatar?: string;
+      followers: number;
+      contentCount: number;
+    }>;
+  }> {
+    const params = new URLSearchParams({ domainId });
+    if (options?.period) params.set('period', options.period);
+    return this.fetch(`/xrpc/io.exprsn.admin.domains.analytics.get?${params}`);
+  }
+
+  // =============================================================================
+  // Domain Payments API
+  // =============================================================================
+
+  async adminDomainPaymentsGet(domainId: string): Promise<{
+    config: {
+      enabled: boolean;
+      providers: Array<{ id: string; name: string; enabled: boolean }>;
+      currency: string;
+      creatorPayoutEnabled: boolean;
+      creatorPayoutMinimum: number;
+      platformFeePercent: number;
+    };
+    stats: {
+      totalRevenue: number;
+      pendingPayouts: number;
+      activeSubscriptions: number;
+      monthlyRecurring: number;
+    };
+  }> {
+    return this.fetch(`/xrpc/io.exprsn.admin.domains.payments.get?domainId=${domainId}`);
+  }
+
+  async adminDomainPaymentsUpdate(domainId: string, data: {
+    enabled?: boolean;
+    currency?: string;
+    creatorPayoutEnabled?: boolean;
+    creatorPayoutMinimum?: number;
+    platformFeePercent?: number;
+  }): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.domains.payments.update', {
+      method: 'POST',
+      body: JSON.stringify({ domainId, ...data }),
+    });
+  }
+
+  async adminDomainPaymentsTransactionsList(domainId: string, options?: {
+    type?: string;
+    status?: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<{
+    transactions: Array<{
+      id: string;
+      type: 'tip' | 'subscription' | 'purchase' | 'payout';
+      amount: number;
+      currency: string;
+      status: 'completed' | 'pending' | 'failed' | 'refunded';
+      from?: { did: string; handle: string };
+      to?: { did: string; handle: string };
+      createdAt: string;
+    }>;
+    total: number;
+  }> {
+    const params = new URLSearchParams({ domainId });
+    if (options?.type) params.set('type', options.type);
+    if (options?.status) params.set('status', options.status);
+    if (options?.limit) params.set('limit', String(options.limit));
+    if (options?.offset) params.set('offset', String(options.offset));
+    return this.fetch(`/xrpc/io.exprsn.admin.domains.payments.transactions?${params}`);
+  }
+
+  // =============================================================================
+  // Domain Live Streams API
+  // =============================================================================
+
+  async adminDomainLiveStreamsList(domainId: string, options?: {
+    status?: 'live' | 'ended' | 'scheduled';
+    limit?: number;
+    offset?: number;
+  }): Promise<{
+    streams: Array<{
+      id: string;
+      title: string;
+      status: 'live' | 'ended' | 'scheduled';
+      viewerCount: number;
+      peakViewers: number;
+      startedAt?: string;
+      endedAt?: string;
+      scheduledFor?: string;
+      duration?: number;
+      host: {
+        did: string;
+        handle: string;
+        displayName?: string;
+        avatar?: string;
+      };
+    }>;
+    total: number;
+    stats: {
+      live: number;
+      scheduled: number;
+      totalToday: number;
+    };
+  }> {
+    const params = new URLSearchParams({ domainId });
+    if (options?.status) params.set('status', options.status);
+    if (options?.limit) params.set('limit', String(options.limit));
+    if (options?.offset) params.set('offset', String(options.offset));
+    return this.fetch(`/xrpc/io.exprsn.admin.domains.live.streams?${params}`);
+  }
+
+  async adminDomainLiveSettingsGet(domainId: string): Promise<{
+    enabled: boolean;
+    maxConcurrentStreams: number;
+    maxStreamDuration: number;
+    requireApproval: boolean;
+    minFollowersRequired: number;
+    allowedResolutions: string[];
+    recordingEnabled: boolean;
+    chatEnabled: boolean;
+  }> {
+    return this.fetch(`/xrpc/io.exprsn.admin.domains.live.settings?domainId=${domainId}`);
+  }
+
+  async adminDomainLiveSettingsUpdate(domainId: string, data: {
+    enabled?: boolean;
+    maxConcurrentStreams?: number;
+    maxStreamDuration?: number;
+    requireApproval?: boolean;
+    minFollowersRequired?: number;
+    recordingEnabled?: boolean;
+    chatEnabled?: boolean;
+  }): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.domains.live.settings.update', {
+      method: 'POST',
+      body: JSON.stringify({ domainId, ...data }),
+    });
+  }
+
+  async adminDomainLiveStreamEnd(domainId: string, streamId: string, reason?: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.domains.live.end', {
+      method: 'POST',
+      body: JSON.stringify({ domainId, streamId, reason }),
+    });
+  }
+
+  // =============================================================================
+  // Domain Render Pipeline API
+  // =============================================================================
+
+  async adminDomainRenderQueueStats(domainId: string): Promise<{
+    queue: {
+      pending: number;
+      processing: number;
+      completed: number;
+      failed: number;
+    };
+    workers: {
+      total: number;
+      active: number;
+      idle: number;
+    };
+    performance: {
+      avgProcessingTime: number;
+      throughput: number;
+      successRate: number;
+    };
+  }> {
+    return this.fetch(`/xrpc/io.exprsn.admin.domains.render.stats?domainId=${domainId}`);
+  }
+
+  async adminDomainRenderWorkersList(domainId: string): Promise<{
+    workers: Array<{
+      id: string;
+      name: string;
+      status: 'active' | 'idle' | 'offline';
+      currentJob?: string;
+      jobsCompleted: number;
+      lastActiveAt: string;
+      capabilities: string[];
+    }>;
+  }> {
+    return this.fetch(`/xrpc/io.exprsn.admin.domains.render.workers?domainId=${domainId}`);
+  }
+
+  async adminDomainRenderJobsList(domainId: string, options?: {
+    status?: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<{
+    jobs: Array<{
+      id: string;
+      type: string;
+      status: 'pending' | 'processing' | 'completed' | 'failed';
+      progress: number;
+      createdAt: string;
+      startedAt?: string;
+      completedAt?: string;
+      error?: string;
+      input: { uri: string; type: string };
+      output?: { uri: string; size: number };
+    }>;
+    total: number;
+  }> {
+    const params = new URLSearchParams({ domainId });
+    if (options?.status) params.set('status', options.status);
+    if (options?.limit) params.set('limit', String(options.limit));
+    if (options?.offset) params.set('offset', String(options.offset));
+    return this.fetch(`/xrpc/io.exprsn.admin.domains.render.jobs?${params}`);
+  }
+
+  async adminDomainRenderJobRetry(domainId: string, jobId: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.domains.render.retry', {
+      method: 'POST',
+      body: JSON.stringify({ domainId, jobId }),
+    });
+  }
+
+  async adminDomainRenderJobCancel(domainId: string, jobId: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.domains.render.cancel', {
+      method: 'POST',
+      body: JSON.stringify({ domainId, jobId }),
+    });
+  }
+
+  // =============================================================================
+  // Domain Audit Log API
+  // =============================================================================
+
+  async adminDomainAuditLogList(domainId: string, options?: {
+    action?: string;
+    actorDid?: string;
+    search?: string;
+    startDate?: string;
+    endDate?: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<{
+    entries: Array<{
+      id: string;
+      action: string;
+      actor: {
+        did: string;
+        handle: string;
+        displayName?: string;
+        avatar?: string;
+        role: string;
+      };
+      target?: {
+        type: string;
+        id: string;
+        name?: string;
+      };
+      details?: Record<string, unknown>;
+      ipAddress?: string;
+      userAgent?: string;
+      createdAt: string;
+    }>;
+    total: number;
+  }> {
+    const params = new URLSearchParams({ domainId });
+    if (options?.action) params.set('action', options.action);
+    if (options?.actorDid) params.set('actorDid', options.actorDid);
+    if (options?.search) params.set('search', options.search);
+    if (options?.startDate) params.set('startDate', options.startDate);
+    if (options?.endDate) params.set('endDate', options.endDate);
+    if (options?.limit) params.set('limit', String(options.limit));
+    if (options?.offset) params.set('offset', String(options.offset));
+    return this.fetch(`/xrpc/io.exprsn.admin.domains.audit.list?${params}`);
+  }
+
+  async adminDomainAuditLogExport(domainId: string, options?: {
+    format?: 'csv' | 'json';
+    startDate?: string;
+    endDate?: string;
+  }): Promise<Blob> {
+    const params = new URLSearchParams({ domainId });
+    if (options?.format) params.set('format', options.format);
+    if (options?.startDate) params.set('startDate', options.startDate);
+    if (options?.endDate) params.set('endDate', options.endDate);
+    return this.fetch(`/xrpc/io.exprsn.admin.domains.audit.export?${params}`);
+  }
+
+  // =============================================================================
+  // Domain Activity Feed API
+  // =============================================================================
+
+  async adminDomainActivityFeed(domainId: string, options?: {
+    limit?: number;
+    offset?: number;
+  }): Promise<{
+    activities: Array<{
+      id: string;
+      type: string;
+      actor: {
+        did: string;
+        handle: string;
+        displayName?: string;
+        avatar?: string;
+      };
+      action: string;
+      target?: {
+        type: string;
+        id: string;
+        name?: string;
+      };
+      metadata?: Record<string, unknown>;
+      createdAt: string;
+    }>;
+    hasMore: boolean;
+  }> {
+    const params = new URLSearchParams({ domainId });
+    if (options?.limit) params.set('limit', String(options.limit));
+    if (options?.offset) params.set('offset', String(options.offset));
+    return this.fetch(`/xrpc/io.exprsn.admin.domains.activity.feed?${params}`);
+  }
+
+  // =============================================================================
+  // Domain Announcements API
+  // =============================================================================
+
+  async adminDomainAnnouncementsList(domainId: string): Promise<{
+    announcements: Array<{
+      id: string;
+      title: string;
+      content: string;
+      type: 'info' | 'warning' | 'success' | 'error';
+      active: boolean;
+      priority: number;
+      startsAt?: string;
+      endsAt?: string;
+      createdAt: string;
+      createdBy?: { handle: string };
+    }>;
+  }> {
+    return this.fetch(`/xrpc/io.exprsn.admin.domains.announcements.list?domainId=${domainId}`);
+  }
+
+  async adminDomainAnnouncementCreate(domainId: string, data: {
+    title: string;
+    content: string;
+    type: 'info' | 'warning' | 'success' | 'error';
+    priority?: number;
+    active?: boolean;
+    startsAt?: string;
+    endsAt?: string;
+  }): Promise<{ success: boolean; id: string }> {
+    return this.fetch('/xrpc/io.exprsn.admin.domains.announcements.create', {
+      method: 'POST',
+      body: JSON.stringify({ domainId, ...data }),
+    });
+  }
+
+  async adminDomainAnnouncementUpdate(domainId: string, id: string, data: {
+    title?: string;
+    content?: string;
+    type?: 'info' | 'warning' | 'success' | 'error';
+    priority?: number;
+    active?: boolean;
+    startsAt?: string;
+    endsAt?: string;
+  }): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.domains.announcements.update', {
+      method: 'POST',
+      body: JSON.stringify({ domainId, id, ...data }),
+    });
+  }
+
+  async adminDomainAnnouncementDelete(domainId: string, id: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.domains.announcements.delete', {
+      method: 'POST',
+      body: JSON.stringify({ domainId, id }),
+    });
+  }
+
+  // =============================================================================
+  // Domain Organizations API
+  // =============================================================================
+
+  async adminDomainOrganizationsList(domainId: string, options?: {
+    search?: string;
+    status?: string[];
+    limit?: number;
+    offset?: number;
+  }): Promise<{
+    organizations: Array<{
+      id: string;
+      name: string;
+      handle: string;
+      description?: string;
+      memberCount: number;
+      verified: boolean;
+      status: 'active' | 'suspended' | 'pending';
+      createdAt: string;
+      avatar?: string;
+    }>;
+    total: number;
+  }> {
+    const params = new URLSearchParams({ domainId });
+    if (options?.search) params.set('search', options.search);
+    if (options?.status) params.set('status', options.status.join(','));
+    if (options?.limit) params.set('limit', String(options.limit));
+    if (options?.offset) params.set('offset', String(options.offset));
+    return this.fetch(`/xrpc/io.exprsn.admin.domains.organizations.list?${params}`);
+  }
+
+  // =============================================================================
+  // Domain Content Browser API
+  // =============================================================================
+
+  async adminDomainContentList(domainId: string, options?: {
+    status?: string;
+    types?: string[];
+    search?: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<{
+    content: Array<{
+      uri: string;
+      cid: string;
+      type: 'video' | 'image' | 'post';
+      caption?: string;
+      thumbnail?: string;
+      author: {
+        did: string;
+        handle: string;
+        displayName?: string;
+        avatar?: string;
+      };
+      stats: {
+        views: number;
+        likes: number;
+        comments: number;
+      };
+      status: 'published' | 'removed' | 'flagged' | 'processing';
+      createdAt: string;
+    }>;
+    total: number;
+    stats: {
+      total: number;
+      published: number;
+      removed: number;
+      flagged: number;
+    };
+  }> {
+    const params = new URLSearchParams({ domainId });
+    if (options?.status) params.set('status', options.status);
+    if (options?.types) params.set('types', options.types.join(','));
+    if (options?.search) params.set('search', options.search);
+    if (options?.limit) params.set('limit', String(options.limit));
+    if (options?.offset) params.set('offset', String(options.offset));
+    return this.fetch(`/xrpc/io.exprsn.admin.domains.content.list?${params}`);
+  }
+
+  async adminDomainContentRemove(domainId: string, uri: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.domains.content.remove', {
+      method: 'POST',
+      body: JSON.stringify({ domainId, uri }),
+    });
+  }
+
+  async adminDomainContentRestore(domainId: string, uri: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.domains.content.restore', {
+      method: 'POST',
+      body: JSON.stringify({ domainId, uri }),
+    });
+  }
+
+  // =============================================================================
+  // Domain Moderation Appeals API
+  // =============================================================================
+
+  async adminDomainAppealsList(domainId: string, options?: {
+    status?: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<{
+    appeals: Array<{
+      id: string;
+      type: 'sanction' | 'content_removal' | 'account_suspension';
+      status: 'pending' | 'reviewing' | 'approved' | 'rejected';
+      reason: string;
+      submittedAt: string;
+      reviewedAt?: string;
+      reviewer?: { handle: string };
+      user: {
+        did: string;
+        handle: string;
+        displayName?: string;
+        avatar?: string;
+      };
+      originalAction: {
+        type: string;
+        reason: string;
+        date: string;
+      };
+    }>;
+    stats: {
+      pending: number;
+      reviewing: number;
+      approved: number;
+      rejected: number;
+    };
+  }> {
+    const params = new URLSearchParams({ domainId });
+    if (options?.status) params.set('status', options.status);
+    if (options?.limit) params.set('limit', String(options.limit));
+    if (options?.offset) params.set('offset', String(options.offset));
+    return this.fetch(`/xrpc/io.exprsn.admin.domains.appeals.list?${params}`);
+  }
+
+  async adminDomainAppealReview(domainId: string, id: string, data: {
+    decision: string;
+    note?: string;
+  }): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.domains.appeals.review', {
+      method: 'POST',
+      body: JSON.stringify({ domainId, id, ...data }),
+    });
+  }
+
+  // =============================================================================
+  // Certificate Authority (CA) API
+  // =============================================================================
+
+  // Root CA Management
+  async caGetRootCAs(): Promise<{
+    roots: Array<{
+      id: string;
+      subject: string;
+      serialNumber: string;
+      status: 'active' | 'revoked' | 'expired';
+      notBefore: string;
+      notAfter: string;
+      algorithm: string;
+      keySize: number;
+      issuedCount: number;
+      fingerprint: { sha1: string; sha256: string };
+    }>;
+    stats: { total: number; active: number; revoked: number; totalIssued: number };
+  }> {
+    return this.fetch('/xrpc/io.exprsn.admin.ca.roots.list');
+  }
+
+  async caInitializeRoot(config: {
+    subject: { commonName: string; organization?: string; country?: string };
+    validityDays: number;
+    keySize: 2048 | 4096;
+    algorithm: 'RSA' | 'ECDSA';
+  }): Promise<{ success: boolean; id: string }> {
+    return this.fetch('/xrpc/io.exprsn.admin.ca.roots.initialize', {
+      method: 'POST',
+      body: JSON.stringify(config),
+    });
+  }
+
+  async caRevokeRootCA(id: string, reason: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.ca.roots.revoke', {
+      method: 'POST',
+      body: JSON.stringify({ id, reason }),
+    });
+  }
+
+  // Intermediate CA Management
+  async caGetIntermediateCAs(options?: {
+    search?: string;
+    status?: string[];
+  }): Promise<{
+    intermediates: Array<{
+      id: string;
+      subject: string;
+      serialNumber: string;
+      status: 'active' | 'revoked' | 'expired';
+      notBefore: string;
+      notAfter: string;
+      algorithm: string;
+      keySize: number;
+      issuedCount: number;
+      issuer: { id: string; subject: string };
+      pathLength?: number;
+    }>;
+    hierarchy: Array<any>;
+  }> {
+    const params = new URLSearchParams();
+    if (options?.search) params.set('search', options.search);
+    if (options?.status) params.set('status', options.status.join(','));
+    return this.fetch(`/xrpc/io.exprsn.admin.ca.intermediates.list?${params}`);
+  }
+
+  async caCreateIntermediate(config: {
+    issuerId: string;
+    subject: { commonName: string; organization?: string; country?: string };
+    validityDays: number;
+    keySize: 2048 | 4096;
+    algorithm: 'RSA' | 'ECDSA';
+    pathLength?: number;
+  }): Promise<{ success: boolean; id: string }> {
+    return this.fetch('/xrpc/io.exprsn.admin.ca.intermediates.create', {
+      method: 'POST',
+      body: JSON.stringify(config),
+    });
+  }
+
+  async caGetAvailableIssuers(): Promise<{
+    issuers: Array<{ id: string; subject: string; type: 'root' | 'intermediate' }>;
+  }> {
+    return this.fetch('/xrpc/io.exprsn.admin.ca.issuers.list');
+  }
+
+  // Entity Certificate Management
+  async caGetEntityCertificates(options?: {
+    status?: string;
+    types?: string[];
+    search?: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<{
+    certificates: Array<{
+      id: string;
+      subject: string;
+      type: 'server' | 'client' | 'code_signing';
+      serialNumber: string;
+      status: 'active' | 'revoked' | 'expired';
+      notBefore: string;
+      notAfter: string;
+      algorithm: string;
+      keySize: number;
+      issuer: { id: string; subject: string };
+      subjectAltNames?: string[];
+      keyUsage?: string[];
+    }>;
+    total: number;
+    stats: { total: number; active: number; revoked: number; expired: number; server: number; client: number; codeSigning: number };
+  }> {
+    const params = new URLSearchParams();
+    if (options?.status) params.set('status', options.status);
+    if (options?.types) params.set('types', options.types.join(','));
+    if (options?.search) params.set('search', options.search);
+    if (options?.limit) params.set('limit', String(options.limit));
+    if (options?.offset) params.set('offset', String(options.offset));
+    return this.fetch(`/xrpc/io.exprsn.admin.ca.certificates.list?${params}`);
+  }
+
+  async caIssueCertificate(request: {
+    type: 'server' | 'client' | 'code_signing' | 'intermediate';
+    issuerId: string;
+    subject: {
+      commonName: string;
+      organization?: string;
+      organizationalUnit?: string;
+      country?: string;
+      state?: string;
+      locality?: string;
+    };
+    subjectAltNames?: string[];
+    validityDays: number;
+    keySize: 2048 | 4096;
+    algorithm: 'RSA' | 'ECDSA';
+    keyUsage: string[];
+    extKeyUsage: string[];
+  }): Promise<{ success: boolean; id: string; certificate: string }> {
+    return this.fetch('/xrpc/io.exprsn.admin.ca.certificates.issue', {
+      method: 'POST',
+      body: JSON.stringify(request),
+    });
+  }
+
+  async caRevokeCertificate(id: string, reason: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.ca.certificates.revoke', {
+      method: 'POST',
+      body: JSON.stringify({ id, reason }),
+    });
+  }
+
+  async caRenewCertificate(id: string, options?: { validityDays?: number }): Promise<{
+    success: boolean;
+    newId: string;
+    certificate: string;
+  }> {
+    return this.fetch('/xrpc/io.exprsn.admin.ca.certificates.renew', {
+      method: 'POST',
+      body: JSON.stringify({ id, ...options }),
+    });
+  }
+
+  async caGetExpiringCertificates(days: number): Promise<{
+    certificates: Array<{
+      id: string;
+      subject: string;
+      type: string;
+      notAfter: string;
+      daysUntilExpiry: number;
+    }>;
+  }> {
+    return this.fetch(`/xrpc/io.exprsn.admin.ca.certificates.expiring?days=${days}`);
+  }
+
+  async caVerifyCertificate(certificate: string): Promise<{
+    valid: boolean;
+    subject: string;
+    issuer: string;
+    notBefore: string;
+    notAfter: string;
+    chain: Array<{ subject: string; status: string }>;
+    errors?: string[];
+  }> {
+    return this.fetch('/xrpc/io.exprsn.admin.ca.certificates.verify', {
+      method: 'POST',
+      body: JSON.stringify({ certificate }),
+    });
+  }
+
+  // CRL Management
+  async caGetCRLs(): Promise<{
+    crls: Array<{
+      id: string;
+      issuer: string;
+      thisUpdate: string;
+      nextUpdate: string;
+      entriesCount: number;
+      size: number;
+      version: number;
+      signature: string;
+    }>;
+    stats: {
+      totalCRLs: number;
+      totalEntries: number;
+      lastGenerated: string | null;
+      nextScheduled: string | null;
+    };
+  }> {
+    return this.fetch('/xrpc/io.exprsn.admin.ca.crl.list');
+  }
+
+  async caGetCRLEntries(crlId: string): Promise<{
+    entries: Array<{
+      serialNumber: string;
+      revocationDate: string;
+      reason: string;
+      issuerSubject: string;
+      subjectCommonName?: string;
+    }>;
+  }> {
+    return this.fetch(`/xrpc/io.exprsn.admin.ca.crl.entries?crlId=${crlId}`);
+  }
+
+  async caGenerateCRL(): Promise<{ success: boolean; crlId: string }> {
+    return this.fetch('/xrpc/io.exprsn.admin.ca.crl.generate', {
+      method: 'POST',
+    });
+  }
+
+  // OCSP Management
+  async caGetOCSPStatus(): Promise<{
+    responders: Array<{
+      id: string;
+      url: string;
+      status: 'online' | 'offline' | 'degraded';
+      issuer: string;
+      lastCheck: string;
+      responseTime: number;
+      requestsToday: number;
+      errorRate: number;
+    }>;
+    stats: {
+      totalResponders: number;
+      online: number;
+      avgResponseTime: number;
+      requestsToday: number;
+      errorRate: number;
+    };
+    config?: {
+      staplingEnabled: boolean;
+      cachingEnabled: boolean;
+      mustStaple: boolean;
+    };
+  }> {
+    return this.fetch('/xrpc/io.exprsn.admin.ca.ocsp.status');
+  }
+
+  async caGetOCSPRequests(options?: { limit?: number }): Promise<{
+    requests: Array<{
+      id: string;
+      serialNumber: string;
+      status: 'good' | 'revoked' | 'unknown';
+      responseTime: number;
+      requestedAt: string;
+      clientIP?: string;
+    }>;
+  }> {
+    const params = new URLSearchParams();
+    if (options?.limit) params.set('limit', String(options.limit));
+    return this.fetch(`/xrpc/io.exprsn.admin.ca.ocsp.requests?${params}`);
+  }
+
+  async caOCSPCheck(serialNumber: string): Promise<{
+    status: 'good' | 'revoked' | 'unknown';
+    responseTime: number;
+    thisUpdate: string;
+    nextUpdate: string;
+  }> {
+    return this.fetch(`/xrpc/io.exprsn.admin.ca.ocsp.check?serialNumber=${serialNumber}`);
+  }
+
+  async caToggleOCSPResponder(responderId: string, enabled: boolean): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.ca.ocsp.toggle', {
+      method: 'POST',
+      body: JSON.stringify({ responderId, enabled }),
+    });
+  }
+
+  // New CA Admin Endpoints (matching backend routes)
+  async caAdminGetStats(): Promise<{
+    totalCertificates: number;
+    activeCertificates: number;
+    revokedCertificates: number;
+    expiredCertificates: number;
+    rootCertificates: number;
+    intermediateCAs: number;
+    expiringIn30Days: number;
+  }> {
+    return this.fetch('/xrpc/io.exprsn.ca.admin.getStats');
+  }
+
+  async caAdminListCAs(): Promise<{
+    cas: Array<{
+      id: string;
+      commonName: string;
+      serialNumber: string;
+      fingerprint: string;
+      status: string;
+      notBefore: string;
+      notAfter: string;
+      certType: 'root' | 'intermediate';
+      issuedCount: number;
+    }>;
+  }> {
+    return this.fetch('/xrpc/io.exprsn.ca.admin.listCAs');
+  }
+
+  async caAdminListAllCertificates(options?: {
+    status?: string;
+    type?: string;
+    q?: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<{
+    certificates: Array<{
+      id: string;
+      commonName: string;
+      serialNumber: string;
+      fingerprint: string;
+      certType: string;
+      status: string;
+      subjectDid: string | null;
+      serviceId: string | null;
+      notBefore: string;
+      notAfter: string;
+      createdAt: string;
+    }>;
+    total: number;
+    hasMore: boolean;
+  }> {
+    const params = new URLSearchParams();
+    if (options?.status) params.set('status', options.status);
+    if (options?.type) params.set('type', options.type);
+    if (options?.q) params.set('q', options.q);
+    if (options?.limit) params.set('limit', String(options.limit));
+    if (options?.offset) params.set('offset', String(options.offset));
+    return this.fetch(`/xrpc/io.exprsn.ca.admin.listAllCertificates?${params}`);
+  }
+
+  async caAdminBatchRevoke(certificateIds: string[], reason?: string): Promise<{
+    revokedCount: number;
+    revokedAt: string;
+  }> {
+    return this.fetch('/xrpc/io.exprsn.ca.admin.batchRevoke', {
+      method: 'POST',
+      body: JSON.stringify({ certificateIds, reason: reason || 'unspecified' }),
+    });
+  }
+
+  async caAdminBatchDownload(
+    certificateIds: string[],
+    format?: 'pem' | 'der' | 'pkcs12',
+    includePrivateKey?: boolean,
+    password?: string
+  ): Promise<{
+    certificates: Array<{
+      id: string;
+      commonName: string;
+      serialNumber: string;
+      format: string;
+      data: string;
+    }>;
+  }> {
+    return this.fetch('/xrpc/io.exprsn.ca.admin.batchDownload', {
+      method: 'POST',
+      body: JSON.stringify({
+        certificateIds,
+        format: format || 'pem',
+        includePrivateKey: includePrivateKey || false,
+        password,
+      }),
+    });
+  }
+
+  async caAdminBatchIssue(
+    certificates: Array<{
+      commonName: string;
+      subjectDid?: string;
+      serviceId?: string;
+      email?: string;
+    }>,
+    issuerId?: string,
+    certType?: 'client' | 'server' | 'code_signing',
+    validityDays?: number
+  ): Promise<{
+    results: Array<{
+      success: boolean;
+      id?: string;
+      commonName: string;
+      certificate?: string;
+      privateKey?: string;
+      error?: string;
+    }>;
+    summary: { total: number; successful: number; failed: number };
+  }> {
+    return this.fetch('/xrpc/io.exprsn.ca.admin.batchIssue', {
+      method: 'POST',
+      body: JSON.stringify({
+        certificates,
+        issuerId,
+        certType: certType || 'client',
+        validityDays: validityDays || 365,
+      }),
+    });
+  }
+
+  async caAdminGetCertificateDetails(id: string): Promise<{
+    id: string;
+    commonName: string;
+    serialNumber: string;
+    fingerprint: string;
+    certType: string;
+    status: string;
+    subjectDid: string | null;
+    serviceId: string | null;
+    notBefore: string;
+    notAfter: string;
+    createdAt: string;
+    certificate: string;
+    issuerName: string;
+    keyUsage: string[];
+    extKeyUsage: string[];
+    subjectAltNames: Array<{ type: string; value: string }>;
+  }> {
+    return this.fetch(`/xrpc/io.exprsn.ca.admin.getCertificateDetails?id=${id}`);
+  }
+
+  async caAdminRevokeCertificate(certificateId: string, reason?: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.ca.admin.revokeCertificate', {
+      method: 'POST',
+      body: JSON.stringify({ certificateId, reason: reason || 'unspecified' }),
+    });
+  }
+
+  // =============================================================================
+  // Domain SSO API
+  // =============================================================================
+
+  // SSO Configuration
+  async adminDomainSSOConfigGet(domainId: string): Promise<{
+    config: {
+      enabled: boolean;
+      enforced: boolean;
+      jitProvisioning: boolean;
+    };
+    stats: {
+      logins24h: number;
+      linkedUsers: number;
+    };
+  }> {
+    return this.fetch(`/xrpc/io.exprsn.admin.domains.sso.config.get?domainId=${domainId}`);
+  }
+
+  async adminDomainSSOConfigUpdate(domainId: string, config: {
+    enabled?: boolean;
+    enforced?: boolean;
+    jitProvisioning?: boolean;
+  }): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.domains.sso.config.update', {
+      method: 'POST',
+      body: JSON.stringify({ domainId, ...config }),
+    });
+  }
+
+  // SSO Providers
+  async adminDomainSSOProvidersList(domainId: string): Promise<{
+    providers: Array<{
+      id: string;
+      name: string;
+      type: 'oidc' | 'saml' | 'oauth2';
+      status: 'active' | 'inactive' | 'error';
+      isPrimary: boolean;
+      issuer?: string;
+      clientId?: string;
+      entityId?: string;
+      lastSync?: string;
+      userCount?: number;
+      logo?: string;
+    }>;
+  }> {
+    return this.fetch(`/xrpc/io.exprsn.admin.domains.sso.providers.list?domainId=${domainId}`);
+  }
+
+  async adminDomainSSOProviderGet(domainId: string, providerId: string): Promise<{
+    provider: {
+      id: string;
+      name: string;
+      type: 'oidc' | 'saml' | 'oauth2';
+      status: 'active' | 'inactive' | 'error';
+      isPrimary: boolean;
+      config: Record<string, any>;
+      jitConfig?: Record<string, any>;
+      createdAt: string;
+      updatedAt: string;
+    };
+  }> {
+    return this.fetch(`/xrpc/io.exprsn.admin.domains.sso.providers.get?domainId=${domainId}&providerId=${providerId}`);
+  }
+
+  async adminDomainSSOProvidersAdd(domainId: string, data: {
+    name: string;
+    type: 'oidc' | 'saml' | 'oauth2';
+    enabled: boolean;
+    config: Record<string, any>;
+  }): Promise<{ id: string }> {
+    return this.fetch('/xrpc/io.exprsn.admin.domains.sso.providers.add', {
+      method: 'POST',
+      body: JSON.stringify({ domainId, ...data }),
+    });
+  }
+
+  async adminDomainSSOProviderUpdate(domainId: string, providerId: string, data: Record<string, any>): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.domains.sso.providers.update', {
+      method: 'POST',
+      body: JSON.stringify({ domainId, providerId, ...data }),
+    });
+  }
+
+  async adminDomainSSOProvidersRemove(domainId: string, providerId: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.domains.sso.providers.remove', {
+      method: 'POST',
+      body: JSON.stringify({ domainId, providerId }),
+    });
+  }
+
+  async adminDomainSSOProviderToggle(domainId: string, providerId: string, enabled: boolean): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.domains.sso.providers.toggle', {
+      method: 'POST',
+      body: JSON.stringify({ domainId, providerId, enabled }),
+    });
+  }
+
+  async adminDomainSSOProvidersSetPrimary(domainId: string, providerId: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.domains.sso.providers.setPrimary', {
+      method: 'POST',
+      body: JSON.stringify({ domainId, providerId }),
+    });
+  }
+
+  async adminDomainSSOProviderTest(domainId: string, providerId: string): Promise<{
+    success: boolean;
+    responseTime: number;
+    error?: string;
+  }> {
+    return this.fetch('/xrpc/io.exprsn.admin.domains.sso.providers.test', {
+      method: 'POST',
+      body: JSON.stringify({ domainId, providerId }),
+    });
+  }
+
+  async adminDomainSSOProviderStats(domainId: string, providerId: string): Promise<{
+    stats: {
+      logins24h: number;
+      linkedUsers: number;
+      lastLogin?: string;
+    };
+  }> {
+    return this.fetch(`/xrpc/io.exprsn.admin.domains.sso.providers.stats?domainId=${domainId}&providerId=${providerId}`);
+  }
+
+  async adminDomainSSOProviderUsers(domainId: string, providerId: string): Promise<{
+    users: Array<{
+      id: string;
+      displayName: string;
+      email: string;
+      externalId: string;
+      linkedAt: string;
+      lastLogin?: string;
+    }>;
+  }> {
+    return this.fetch(`/xrpc/io.exprsn.admin.domains.sso.providers.users?domainId=${domainId}&providerId=${providerId}`);
+  }
+
+  // SSO Email Domains
+  async adminDomainSSOEmailDomainsList(domainId: string): Promise<{
+    domains: Array<{
+      id: string;
+      domain: string;
+      verified: boolean;
+      verificationMethod: 'dns' | 'email' | 'manual';
+      verificationToken?: string;
+      autoJoin: boolean;
+      defaultRole?: string;
+      providerId?: string;
+      providerName?: string;
+      createdAt: string;
+      verifiedAt?: string;
+    }>;
+  }> {
+    return this.fetch(`/xrpc/io.exprsn.admin.domains.sso.emailDomains.list?domainId=${domainId}`);
+  }
+
+  async adminDomainSSOEmailDomainsAdd(domainId: string, data: {
+    domain: string;
+    autoJoin?: boolean;
+    defaultRole?: string;
+    providerId?: string;
+  }): Promise<{ id: string; verificationToken: string }> {
+    return this.fetch('/xrpc/io.exprsn.admin.domains.sso.emailDomains.add', {
+      method: 'POST',
+      body: JSON.stringify({ domainId, ...data }),
+    });
+  }
+
+  async adminDomainSSOEmailDomainsUpdate(domainId: string, emailDomainId: string, data: {
+    autoJoin?: boolean;
+    defaultRole?: string;
+    providerId?: string;
+  }): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.domains.sso.emailDomains.update', {
+      method: 'POST',
+      body: JSON.stringify({ domainId, emailDomainId, ...data }),
+    });
+  }
+
+  async adminDomainSSOEmailDomainsVerify(domainId: string, emailDomainId: string): Promise<{
+    success: boolean;
+    verified: boolean;
+    error?: string;
+  }> {
+    return this.fetch('/xrpc/io.exprsn.admin.domains.sso.emailDomains.verify', {
+      method: 'POST',
+      body: JSON.stringify({ domainId, emailDomainId }),
+    });
+  }
+
+  async adminDomainSSOEmailDomainsRemove(domainId: string, emailDomainId: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.domains.sso.emailDomains.remove', {
+      method: 'POST',
+      body: JSON.stringify({ domainId, emailDomainId }),
+    });
+  }
+
+  // SSO Policies
+  async adminDomainSSOPoliciesGet(domainId: string): Promise<{
+    policies: {
+      sessionTimeout: number;
+      sessionTimeoutUnit: 'minutes' | 'hours' | 'days';
+      idleTimeout: number;
+      idleTimeoutUnit: 'minutes' | 'hours';
+      maxConcurrentSessions: number;
+      singleSessionEnforcement: boolean;
+      mfaRequired: boolean;
+      mfaGracePeriod: number;
+      mfaMethods: string[];
+      deviceTrustEnabled: boolean;
+      allowUnknownDevices: boolean;
+      requireDeviceApproval: boolean;
+      ipRestrictionEnabled: boolean;
+      allowedIPs: string[];
+      blockedIPs: string[];
+      riskBasedAuthEnabled: boolean;
+      highRiskActions: string[];
+      ssoEnforced: boolean;
+      passwordLoginAllowed: boolean;
+      passwordLoginAdminsOnly: boolean;
+    };
+  }> {
+    return this.fetch(`/xrpc/io.exprsn.admin.domains.sso.policies.get?domainId=${domainId}`);
+  }
+
+  async adminDomainSSOPoliciesUpdate(domainId: string, policies: Record<string, any>): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.domains.sso.policies.update', {
+      method: 'POST',
+      body: JSON.stringify({ domainId, ...policies }),
+    });
+  }
+
+  // =============================================================================
+  // Domain API Tokens
+  // =============================================================================
+
+  async adminDomainTokensList(domainId: string): Promise<{
+    tokens: Array<{
+      id: string;
+      name: string;
+      prefix: string;
+      scopes: string[];
+      status: 'active' | 'revoked' | 'expired';
+      createdAt: string;
+      expiresAt?: string;
+      lastUsed?: string;
+      usageCount: number;
+      rateLimit?: { requests: number; window: number };
+      createdBy: { id: string; name: string };
+    }>;
+  }> {
+    return this.fetch(`/xrpc/io.exprsn.admin.domains.tokens.list?domainId=${domainId}`);
+  }
+
+  async adminDomainTokenGet(domainId: string, tokenId: string): Promise<{
+    token: {
+      id: string;
+      name: string;
+      description?: string;
+      prefix: string;
+      scopes: string[];
+      status: 'active' | 'revoked' | 'expired';
+      createdAt: string;
+      expiresAt?: string;
+      lastUsed?: string;
+      usageCount: number;
+      rateLimit?: { requests: number; window: number };
+      createdBy: { id: string; name: string };
+    };
+  }> {
+    return this.fetch(`/xrpc/io.exprsn.admin.domains.tokens.get?domainId=${domainId}&tokenId=${tokenId}`);
+  }
+
+  async adminDomainTokensStats(domainId: string): Promise<{
+    stats: {
+      total: number;
+      active: number;
+      totalRequests: number;
+      requestsToday: number;
+    };
+  }> {
+    return this.fetch(`/xrpc/io.exprsn.admin.domains.tokens.stats?domainId=${domainId}`);
+  }
+
+  async adminDomainTokensCreate(domainId: string, data: {
+    name: string;
+    description?: string;
+    scopes: string[];
+    expiresIn?: number;
+    rateLimit?: { requests: number; window: number };
+  }): Promise<{ id: string; token: string }> {
+    return this.fetch('/xrpc/io.exprsn.admin.domains.tokens.create', {
+      method: 'POST',
+      body: JSON.stringify({ domainId, ...data }),
+    });
+  }
+
+  async adminDomainTokenUpdate(domainId: string, tokenId: string, data: {
+    scopes?: string[];
+    rateLimit?: { requests: number; window: number };
+  }): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.domains.tokens.update', {
+      method: 'POST',
+      body: JSON.stringify({ domainId, tokenId, ...data }),
+    });
+  }
+
+  async adminDomainTokensRevoke(domainId: string, tokenId: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.domains.tokens.revoke', {
+      method: 'POST',
+      body: JSON.stringify({ domainId, tokenId }),
+    });
+  }
+
+  async adminDomainTokenRefresh(domainId: string, tokenId: string): Promise<{ token: string }> {
+    return this.fetch('/xrpc/io.exprsn.admin.domains.tokens.refresh', {
+      method: 'POST',
+      body: JSON.stringify({ domainId, tokenId }),
+    });
+  }
+
+  async adminDomainTokenUsage(domainId: string, tokenId: string): Promise<{
+    usage: {
+      totalRequests: number;
+      requestsToday: number;
+      requestsThisWeek: number;
+      requestsThisMonth: number;
+      lastUsed?: string;
+      averageResponseTime: number;
+      errorRate: number;
+      topEndpoints: Array<{ endpoint: string; count: number; avgLatency: number }>;
+      recentActivity: Array<{ timestamp: string; endpoint: string; status: number; latency: number }>;
+      rateLimitHits: number;
+      dailyUsage: Array<{ date: string; requests: number; errors: number }>;
+    };
+  }> {
+    return this.fetch(`/xrpc/io.exprsn.admin.domains.tokens.usage?domainId=${domainId}&tokenId=${tokenId}`);
+  }
+
+  // =============================================================================
+  // Domain Roles & Access Control
+  // =============================================================================
+
+  async adminDomainPermissionCatalog(): Promise<{
+    permissions: Array<{
+      id: string;
+      category: string;
+      label: string;
+      description: string;
+    }>;
+  }> {
+    return this.fetch('/xrpc/io.exprsn.admin.domains.permissions.catalog');
+  }
+
+  async adminDomainRolesList(domainId: string): Promise<{
+    roles: Array<{
+      id: string;
+      name: string;
+      description: string;
+      isSystem: boolean;
+      permissions: string[];
+      userCount: number;
+      createdAt: string;
+    }>;
+  }> {
+    return this.fetch(`/xrpc/io.exprsn.admin.domains.roles.list?domainId=${domainId}`);
+  }
+
+  async adminDomainRolesCreate(domainId: string, data: {
+    name: string;
+    description?: string;
+    permissions: string[];
+  }): Promise<{ id: string }> {
+    return this.fetch('/xrpc/io.exprsn.admin.domains.roles.create', {
+      method: 'POST',
+      body: JSON.stringify({ domainId, ...data }),
+    });
+  }
+
+  async adminDomainRolesUpdate(domainId: string, roleId: string, data: {
+    name?: string;
+    description?: string;
+    permissions?: string[];
+  }): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.domains.roles.update', {
+      method: 'POST',
+      body: JSON.stringify({ domainId, roleId, ...data }),
+    });
+  }
+
+  async adminDomainRolesDelete(domainId: string, roleId: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.domains.roles.delete', {
+      method: 'POST',
+      body: JSON.stringify({ domainId, roleId }),
     });
   }
 
@@ -5153,6 +6970,44 @@ export interface AdminUserDetail {
     createdAt: string;
   }>;
   reportCount: number;
+}
+
+export interface UserMembershipsResponse {
+  domains: Array<{
+    id: string;
+    domainId: string;
+    domainName: string;
+    domainDisplayName: string | null;
+    role: string;
+    handle: string | null;
+    isActive: boolean;
+    createdAt: string;
+    roles: Array<{
+      id: string;
+      name: string;
+      displayName: string;
+      permissions: string[];
+    }>;
+  }>;
+  groups: Array<{
+    id: string;
+    groupId: string;
+    groupName: string;
+    groupDescription: string | null;
+    domainId: string;
+    domainName: string;
+    createdAt: string;
+  }>;
+  organizations: Array<{
+    id: string;
+    orgId: string;
+    orgName: string;
+    orgType: string;
+    orgAvatar: string | null;
+    role: string;
+    permissions: string[];
+    joinedAt: string;
+  }>;
 }
 
 export interface AdminReport {

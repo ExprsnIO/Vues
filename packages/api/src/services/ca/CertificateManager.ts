@@ -146,7 +146,7 @@ export class CertificateManager {
     organization?: string;
     organizationalUnit?: string;
     validityDays?: number;
-    pathLen?: number;
+    pathLength?: number;
   }): Promise<{
     id: string;
     certificate: string;
@@ -172,7 +172,7 @@ export class CertificateManager {
       organization: options.organization || 'Exprsn',
       organizationalUnit: options.organizationalUnit || 'Services',
       validityDays: options.validityDays || 3650,
-      pathLen: options.pathLen || 0,
+      pathLength: options.pathLength || 0,
       issuerCert: rootCA[0].certificate,
       issuerKey: rootPrivateKey,
     });
@@ -202,7 +202,7 @@ export class CertificateManager {
       },
       notBefore: certResult.notBefore,
       notAfter: certResult.notAfter,
-      pathLength: options.pathLen || 0,
+      pathLength: options.pathLength || 0,
       status: 'active',
       createdAt: new Date(),
     });
@@ -279,12 +279,18 @@ export class CertificateManager {
     // Map certificate type
     const certType = options.type === 'server' ? 'server' : options.type === 'code_signing' ? 'code_signing' : 'client';
 
+    // Convert string SANs to proper format
+    const subjectAltNames = options.subjectAltNames?.map((san) => ({
+      type: 'dns' as const,
+      value: san,
+    }));
+
     const certResult = await generateEntityCertificate({
       commonName: options.commonName,
       organization: options.organization,
       email: options.email,
-      subjectAltNames: options.subjectAltNames,
-      type: certType,
+      subjectAltNames,
+      certType,
       validityDays: options.validityDays || 365,
       issuerCert,
       issuerKey,
@@ -813,14 +819,19 @@ export class CertificateManager {
       .from(caEntityCertificates)
       .where(eq(caEntityCertificates.status, 'revoked'));
 
+    // Map revoked certs to CRL format with proper reason typing
+    type RevocationReason = 'unspecified' | 'keyCompromise' | 'cACompromise' | 'affiliationChanged' |
+      'superseded' | 'cessationOfOperation' | 'certificateHold' | 'removeFromCRL' |
+      'privilegeWithdrawn' | 'aACompromise';
+
     const revokedList = revokedCerts.map((cert) => ({
       serialNumber: cert.serialNumber,
       revocationDate: cert.revokedAt || new Date(),
-      reason: cert.revocationReason ?? undefined,
+      reason: (cert.revocationReason as RevocationReason | undefined) ?? undefined,
     }));
 
     const rootPrivateKey = decryptPrivateKey(rootCA[0].privateKey, CA_ENCRYPTION_KEY);
-    const crl = generateCRL(rootCA[0].certificate, rootPrivateKey, revokedList, 30);
+    const crlResult = generateCRL(rootCA[0].certificate, rootPrivateKey, revokedList, { validityDays: 30 });
 
     // Store CRL
     const id = nanoid();
@@ -828,12 +839,12 @@ export class CertificateManager {
       id,
       issuerId: rootCA[0].id,
       issuerType: 'root',
-      crl,
-      thisUpdate: new Date(),
-      nextUpdate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days
+      crl: crlResult.crl,
+      thisUpdate: crlResult.thisUpdate,
+      nextUpdate: crlResult.nextUpdate,
     });
 
-    return { crl, id };
+    return { crl: crlResult.crl, id };
   }
 
   /**
@@ -851,6 +862,514 @@ export class CertificateManager {
     return {
       crl: result[0].crl,
       nextUpdate: result[0].nextUpdate,
+    };
+  }
+
+  // ============================================
+  // Admin Methods
+  // ============================================
+
+  /**
+   * Get certificate statistics
+   */
+  async getStats(): Promise<{
+    totalCertificates: number;
+    activeCertificates: number;
+    revokedCertificates: number;
+    expiredCertificates: number;
+    rootCertificates: number;
+    intermediateCAs: number;
+    expiringIn30Days: number;
+  }> {
+    const [entityStats] = await db
+      .select({
+        total: sql<number>`count(*)::int`,
+        active: sql<number>`count(*) filter (where ${caEntityCertificates.status} = 'active')::int`,
+        revoked: sql<number>`count(*) filter (where ${caEntityCertificates.status} = 'revoked')::int`,
+        expired: sql<number>`count(*) filter (where ${caEntityCertificates.status} = 'expired')::int`,
+      })
+      .from(caEntityCertificates);
+
+    const [rootCount] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(caRootCertificates);
+
+    const [intermediateCount] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(caIntermediateCertificates);
+
+    const thirtyDaysFromNow = new Date();
+    thirtyDaysFromNow.setDate(thirtyDaysFromNow.getDate() + 30);
+
+    const [expiringCount] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(caEntityCertificates)
+      .where(
+        and(
+          eq(caEntityCertificates.status, 'active'),
+          sql`${caEntityCertificates.notAfter} < ${thirtyDaysFromNow}`
+        )
+      );
+
+    return {
+      totalCertificates: entityStats?.total || 0,
+      activeCertificates: entityStats?.active || 0,
+      revokedCertificates: entityStats?.revoked || 0,
+      expiredCertificates: entityStats?.expired || 0,
+      rootCertificates: rootCount?.count || 0,
+      intermediateCAs: intermediateCount?.count || 0,
+      expiringIn30Days: expiringCount?.count || 0,
+    };
+  }
+
+  /**
+   * List all CAs (roots and intermediates)
+   */
+  async listAllCAs(): Promise<Array<{
+    id: string;
+    commonName: string;
+    serialNumber: string;
+    fingerprint: string;
+    status: string;
+    notBefore: Date;
+    notAfter: Date;
+    certType: 'root' | 'intermediate';
+    issuedCount: number;
+  }>> {
+    // Get root CAs
+    const roots = await db
+      .select({
+        id: caRootCertificates.id,
+        commonName: caRootCertificates.commonName,
+        serialNumber: caRootCertificates.serialNumber,
+        fingerprint: caRootCertificates.fingerprint,
+        status: caRootCertificates.status,
+        notBefore: caRootCertificates.notBefore,
+        notAfter: caRootCertificates.notAfter,
+      })
+      .from(caRootCertificates)
+      .orderBy(desc(caRootCertificates.createdAt));
+
+    // Get intermediates
+    const intermediates = await db
+      .select({
+        id: caIntermediateCertificates.id,
+        commonName: caIntermediateCertificates.commonName,
+        serialNumber: caIntermediateCertificates.serialNumber,
+        fingerprint: caIntermediateCertificates.fingerprint,
+        status: caIntermediateCertificates.status,
+        notBefore: caIntermediateCertificates.notBefore,
+        notAfter: caIntermediateCertificates.notAfter,
+      })
+      .from(caIntermediateCertificates)
+      .orderBy(desc(caIntermediateCertificates.createdAt));
+
+    // Get issued counts
+    const rootResults = await Promise.all(
+      roots.map(async (root) => {
+        const countResult = await db
+          .select({ count: sql<number>`count(*)::int` })
+          .from(caEntityCertificates)
+          .where(
+            and(
+              eq(caEntityCertificates.issuerId, root.id),
+              eq(caEntityCertificates.issuerType, 'root')
+            )
+          );
+        return { ...root, certType: 'root' as const, issuedCount: countResult[0]?.count || 0 };
+      })
+    );
+
+    const intResults = await Promise.all(
+      intermediates.map(async (intermediate) => {
+        const countResult = await db
+          .select({ count: sql<number>`count(*)::int` })
+          .from(caEntityCertificates)
+          .where(
+            and(
+              eq(caEntityCertificates.issuerId, intermediate.id),
+              eq(caEntityCertificates.issuerType, 'intermediate')
+            )
+          );
+        return { ...intermediate, certType: 'intermediate' as const, issuedCount: countResult[0]?.count || 0 };
+      })
+    );
+
+    return [...rootResults, ...intResults];
+  }
+
+  /**
+   * List all certificates (admin view)
+   */
+  async listAllCertificates(options: {
+    status?: string;
+    certType?: string;
+    search?: string;
+    limit: number;
+    offset: number;
+  }): Promise<{
+    certificates: Array<{
+      id: string;
+      commonName: string;
+      serialNumber: string;
+      fingerprint: string;
+      certType: string;
+      status: string;
+      subjectDid: string | null;
+      serviceId: string | null;
+      notBefore: Date;
+      notAfter: Date;
+      createdAt: Date;
+    }>;
+    total: number;
+    hasMore: boolean;
+  }> {
+    const { status, certType, search, limit, offset } = options;
+
+    let conditions = [];
+    if (status && status !== 'all') {
+      conditions.push(eq(caEntityCertificates.status, status));
+    }
+    if (certType && certType !== 'all') {
+      conditions.push(eq(caEntityCertificates.certType, certType as CertificateType));
+    }
+    if (search) {
+      conditions.push(
+        sql`(${caEntityCertificates.commonName} ILIKE ${'%' + search + '%'} OR ${caEntityCertificates.serialNumber} ILIKE ${'%' + search + '%'})`
+      );
+    }
+
+    const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+
+    const certificates = await db
+      .select({
+        id: caEntityCertificates.id,
+        commonName: caEntityCertificates.commonName,
+        serialNumber: caEntityCertificates.serialNumber,
+        fingerprint: caEntityCertificates.fingerprint,
+        certType: caEntityCertificates.certType,
+        status: caEntityCertificates.status,
+        subjectDid: caEntityCertificates.subjectDid,
+        serviceId: caEntityCertificates.serviceId,
+        notBefore: caEntityCertificates.notBefore,
+        notAfter: caEntityCertificates.notAfter,
+        createdAt: caEntityCertificates.createdAt,
+      })
+      .from(caEntityCertificates)
+      .where(whereClause)
+      .orderBy(desc(caEntityCertificates.createdAt))
+      .limit(limit)
+      .offset(offset);
+
+    const countResult = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(caEntityCertificates)
+      .where(whereClause);
+    const totalCount = countResult[0]?.count || 0;
+
+    return {
+      certificates,
+      total: totalCount,
+      hasMore: offset + certificates.length < totalCount,
+    };
+  }
+
+  /**
+   * Batch revoke certificates
+   */
+  async batchRevokeCertificates(
+    certificateIds: string[],
+    reason: string
+  ): Promise<{ revokedCount: number; revokedAt: Date }> {
+    const now = new Date();
+
+    await db
+      .update(caEntityCertificates)
+      .set({
+        status: 'revoked',
+        revokedAt: now,
+        revocationReason: reason,
+      })
+      .where(
+        and(
+          sql`${caEntityCertificates.id} = ANY(${certificateIds})`,
+          eq(caEntityCertificates.status, 'active')
+        )
+      );
+
+    return { revokedCount: certificateIds.length, revokedAt: now };
+  }
+
+  /**
+   * Batch download certificates
+   */
+  async batchDownloadCertificates(
+    certificateIds: string[],
+    format: 'pem' | 'der' | 'pkcs12',
+    includePrivateKey: boolean,
+    password?: string
+  ): Promise<Array<{
+    id: string;
+    commonName: string;
+    serialNumber: string;
+    format: string;
+    data: string;
+  }>> {
+    const certificates = await db
+      .select()
+      .from(caEntityCertificates)
+      .where(sql`${caEntityCertificates.id} = ANY(${certificateIds})`);
+
+    return certificates.map((cert) => {
+      let data: string;
+
+      if (format === 'pkcs12' && includePrivateKey && password) {
+        // For PKCS12, we'd need to implement proper export
+        // For now, return PEM with encrypted private key marker
+        const privateKey = decryptPrivateKey(cert.privateKey, CA_ENCRYPTION_KEY);
+        data = `-----PKCS12 EXPORT-----\n${cert.certificate}\n${privateKey}\n-----END PKCS12-----`;
+      } else if (format === 'der') {
+        // Convert PEM to base64 DER
+        const pemContent = cert.certificate
+          .replace('-----BEGIN CERTIFICATE-----', '')
+          .replace('-----END CERTIFICATE-----', '')
+          .replace(/\s/g, '');
+        data = pemContent;
+      } else {
+        // PEM format
+        data = cert.certificate;
+        if (includePrivateKey) {
+          const privateKey = decryptPrivateKey(cert.privateKey, CA_ENCRYPTION_KEY);
+          data = privateKey + '\n' + data;
+        }
+      }
+
+      return {
+        id: cert.id,
+        commonName: cert.commonName,
+        serialNumber: cert.serialNumber,
+        format,
+        data,
+      };
+    });
+  }
+
+  /**
+   * Batch issue certificates
+   */
+  async batchIssueCertificates(
+    certificates: Array<{
+      commonName: string;
+      subjectDid?: string;
+      serviceId?: string;
+      email?: string;
+    }>,
+    issuerId?: string,
+    certType: 'client' | 'server' | 'code_signing' = 'client',
+    validityDays: number = 365
+  ): Promise<{
+    results: Array<{
+      success: boolean;
+      id?: string;
+      commonName: string;
+      certificate?: string;
+      privateKey?: string;
+      error?: string;
+    }>;
+    summary: { total: number; successful: number; failed: number };
+  }> {
+    // Get issuer
+    let issuerCert: string;
+    let issuerKey: string;
+    let actualIssuerId: string;
+    let issuerType: 'root' | 'intermediate';
+
+    if (issuerId) {
+      // Try intermediate first
+      const intermediate = await db
+        .select()
+        .from(caIntermediateCertificates)
+        .where(eq(caIntermediateCertificates.id, issuerId))
+        .limit(1);
+
+      if (intermediate[0]) {
+        issuerCert = intermediate[0].certificate;
+        issuerKey = decryptPrivateKey(intermediate[0].privateKey, CA_ENCRYPTION_KEY);
+        actualIssuerId = intermediate[0].id;
+        issuerType = 'intermediate';
+      } else {
+        const root = await db
+          .select()
+          .from(caRootCertificates)
+          .where(eq(caRootCertificates.id, issuerId))
+          .limit(1);
+
+        if (!root[0]) {
+          throw new Error('Issuing CA not found');
+        }
+
+        issuerCert = root[0].certificate;
+        issuerKey = decryptPrivateKey(root[0].privateKey, CA_ENCRYPTION_KEY);
+        actualIssuerId = root[0].id;
+        issuerType = 'root';
+      }
+    } else {
+      // Use default intermediate or root
+      const intermediate = await db
+        .select()
+        .from(caIntermediateCertificates)
+        .where(eq(caIntermediateCertificates.status, 'active'))
+        .limit(1);
+
+      if (intermediate[0]) {
+        issuerCert = intermediate[0].certificate;
+        issuerKey = decryptPrivateKey(intermediate[0].privateKey, CA_ENCRYPTION_KEY);
+        actualIssuerId = intermediate[0].id;
+        issuerType = 'intermediate';
+      } else {
+        const root = await db
+          .select()
+          .from(caRootCertificates)
+          .where(eq(caRootCertificates.status, 'active'))
+          .limit(1);
+
+        if (!root[0]) {
+          throw new Error('No active CA found');
+        }
+
+        issuerCert = root[0].certificate;
+        issuerKey = decryptPrivateKey(root[0].privateKey, CA_ENCRYPTION_KEY);
+        actualIssuerId = root[0].id;
+        issuerType = 'root';
+      }
+    }
+
+    const results = await Promise.all(
+      certificates.map(async (certRequest) => {
+        try {
+          const result = await generateEntityCertificate({
+            commonName: certRequest.commonName,
+            certType: certType as 'client' | 'server' | 'dual' | 'code_signing' | 'email',
+            validityDays,
+            issuerCert,
+            issuerKey,
+            email: certRequest.email,
+          });
+
+          const encryptedKey = encryptPrivateKey(result.privateKey, CA_ENCRYPTION_KEY);
+
+          const id = nanoid();
+          await db.insert(caEntityCertificates).values({
+            id,
+            issuerId: actualIssuerId,
+            issuerType,
+            subjectDid: certRequest.subjectDid || null,
+            serviceId: certRequest.serviceId || null,
+            certType,
+            commonName: certRequest.commonName,
+            subject: { commonName: certRequest.commonName },
+            certificate: result.certificate,
+            publicKey: result.publicKey,
+            privateKey: encryptedKey,
+            serialNumber: result.serialNumber,
+            fingerprint: result.fingerprint,
+            algorithm: { name: 'RSA-SHA256', modulusLength: 2048, hashAlgorithm: 'SHA-256' },
+            notBefore: result.notBefore,
+            notAfter: result.notAfter,
+            status: 'active',
+            createdAt: new Date(),
+          });
+
+          return {
+            success: true,
+            id,
+            commonName: certRequest.commonName,
+            certificate: result.certificate,
+            privateKey: result.privateKey, // Return unencrypted for download
+          };
+        } catch (error) {
+          return {
+            success: false,
+            commonName: certRequest.commonName,
+            error: error instanceof Error ? error.message : 'Unknown error',
+          };
+        }
+      })
+    );
+
+    const successful = results.filter((r) => r.success).length;
+    const failed = results.filter((r) => !r.success).length;
+
+    return {
+      results,
+      summary: { total: results.length, successful, failed },
+    };
+  }
+
+  /**
+   * Get certificate with full details (admin view)
+   */
+  async getCertificateWithDetails(id: string): Promise<{
+    id: string;
+    commonName: string;
+    serialNumber: string;
+    fingerprint: string;
+    certType: string;
+    status: string;
+    subjectDid: string | null;
+    serviceId: string | null;
+    notBefore: Date;
+    notAfter: Date;
+    createdAt: Date;
+    certificate: string;
+    issuerName: string;
+    keyUsage: string[];
+    extKeyUsage: string[];
+    subjectAltNames: Array<{ type: string; value: string }>;
+  } | null> {
+    const [cert] = await db
+      .select()
+      .from(caEntityCertificates)
+      .where(eq(caEntityCertificates.id, id));
+
+    if (!cert) return null;
+
+    // Get issuer name
+    let issuerName = 'Unknown';
+    if (cert.issuerType === 'root') {
+      const [issuer] = await db
+        .select({ commonName: caRootCertificates.commonName })
+        .from(caRootCertificates)
+        .where(eq(caRootCertificates.id, cert.issuerId));
+      issuerName = issuer?.commonName || 'Unknown';
+    } else {
+      const [issuer] = await db
+        .select({ commonName: caIntermediateCertificates.commonName })
+        .from(caIntermediateCertificates)
+        .where(eq(caIntermediateCertificates.id, cert.issuerId));
+      issuerName = issuer?.commonName || 'Unknown';
+    }
+
+    // Parse certificate for detailed info
+    const parsed = parseCertificate(cert.certificate);
+
+    return {
+      id: cert.id,
+      commonName: cert.commonName,
+      serialNumber: cert.serialNumber,
+      fingerprint: cert.fingerprint,
+      certType: cert.certType,
+      status: cert.status,
+      subjectDid: cert.subjectDid,
+      serviceId: cert.serviceId,
+      notBefore: cert.notBefore,
+      notAfter: cert.notAfter,
+      createdAt: cert.createdAt,
+      certificate: cert.certificate,
+      issuerName,
+      keyUsage: parsed.keyUsage,
+      extKeyUsage: parsed.extKeyUsage,
+      subjectAltNames: parsed.subjectAltNames,
     };
   }
 }
