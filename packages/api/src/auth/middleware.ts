@@ -4,6 +4,8 @@ import { eq } from 'drizzle-orm';
 import { getOAuthClient, OAuthSession } from './oauth-client.js';
 import { db, sessions } from '../db/index.js';
 import { adminUsers, type AdminUser } from '../db/schema.js';
+import { getEffectiveDomainAccess } from '../services/domain-access.js';
+import type { DomainPermission, EffectiveDomainAccess } from '@exprsn/shared';
 
 // Admin role types
 export type AdminRole = 'super_admin' | 'admin' | 'moderator' | 'support';
@@ -80,6 +82,7 @@ declare module 'hono' {
     userDid: string;
     adminUser: AdminUser;
     adminPermissions: string[];
+    domainAccess: EffectiveDomainAccess;
   }
 }
 
@@ -420,4 +423,146 @@ export async function superAdminMiddleware(c: Context, next: Next) {
   }
 
   await next();
+}
+
+// ==================== DOMAIN PERMISSION MIDDLEWARE ====================
+
+/**
+ * Domain permission middleware factory
+ * Checks if the authenticated user has the required permission(s) for a specific domain.
+ *
+ * The domainId is extracted from the route parameter (default: 'domainId').
+ * Global admins (super_admin, admin) automatically have all domain permissions.
+ *
+ * @param requiredPermissions - One or more domain permissions required
+ * @param options - Configuration options
+ * @returns Middleware function
+ *
+ * @example
+ * // Single permission
+ * router.put('/domains/:domainId/sso/config', authMiddleware, requireDomainPermission('domain.sso.manage'), handler);
+ *
+ * // Multiple permissions (all required)
+ * router.delete('/domains/:domainId', authMiddleware, requireDomainPermission('domain.sso.manage', 'domain.users.manage'), handler);
+ */
+export function requireDomainPermission(
+  ...requiredPermissions: DomainPermission[]
+) {
+  return async (c: Context, next: Next) => {
+    const userDid = c.get('did');
+
+    if (!userDid) {
+      throw new HTTPException(401, { message: 'Authentication required' });
+    }
+
+    // Extract domainId from route params
+    const domainId = c.req.param('domainId');
+
+    if (!domainId) {
+      throw new HTTPException(400, { message: 'Domain ID is required' });
+    }
+
+    // Get effective access for this user on this domain
+    const access = await getEffectiveDomainAccess(domainId, userDid);
+
+    if (!access) {
+      throw new HTTPException(403, {
+        message: 'You do not have access to this domain'
+      });
+    }
+
+    // Check all required permissions
+    const hasAllPermissions = requiredPermissions.every(
+      (perm) => access.effectivePermissions.includes(perm)
+    );
+
+    if (!hasAllPermissions) {
+      const missing = requiredPermissions.filter(
+        (perm) => !access.effectivePermissions.includes(perm)
+      );
+      throw new HTTPException(403, {
+        message: `Insufficient domain permissions. Missing: ${missing.join(', ')}`,
+      });
+    }
+
+    // Store domain access on context for route handlers
+    c.set('domainAccess', access);
+
+    await next();
+  };
+}
+
+/**
+ * Require any one of the specified domain permissions (OR logic)
+ */
+export function requireAnyDomainPermission(
+  ...anyOfPermissions: DomainPermission[]
+) {
+  return async (c: Context, next: Next) => {
+    const userDid = c.get('did');
+
+    if (!userDid) {
+      throw new HTTPException(401, { message: 'Authentication required' });
+    }
+
+    const domainId = c.req.param('domainId');
+
+    if (!domainId) {
+      throw new HTTPException(400, { message: 'Domain ID is required' });
+    }
+
+    const access = await getEffectiveDomainAccess(domainId, userDid);
+
+    if (!access) {
+      throw new HTTPException(403, {
+        message: 'You do not have access to this domain'
+      });
+    }
+
+    const hasAnyPermission = anyOfPermissions.some(
+      (perm) => access.effectivePermissions.includes(perm)
+    );
+
+    if (!hasAnyPermission) {
+      throw new HTTPException(403, {
+        message: `Requires one of: ${anyOfPermissions.join(', ')}`,
+      });
+    }
+
+    c.set('domainAccess', access);
+
+    await next();
+  };
+}
+
+/**
+ * Check if user has any access to the domain (no specific permission required)
+ * Useful for read-only endpoints where any domain member should have access
+ */
+export function requireDomainAccess() {
+  return async (c: Context, next: Next) => {
+    const userDid = c.get('did');
+
+    if (!userDid) {
+      throw new HTTPException(401, { message: 'Authentication required' });
+    }
+
+    const domainId = c.req.param('domainId');
+
+    if (!domainId) {
+      throw new HTTPException(400, { message: 'Domain ID is required' });
+    }
+
+    const access = await getEffectiveDomainAccess(domainId, userDid);
+
+    if (!access) {
+      throw new HTTPException(403, {
+        message: 'You do not have access to this domain'
+      });
+    }
+
+    c.set('domainAccess', access);
+
+    await next();
+  };
 }
