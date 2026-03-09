@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { authMiddleware, optionalAuthMiddleware } from '../auth/middleware.js';
+import { uploadRateLimiter, recordUpload, getUploadQuota, sanitizeText, sanitizeInput, isSuspiciousInput, logSuspiciousActivity } from '../auth/security-middleware.js';
 import { db, videos, users, likes, comments, commentReactions, sounds, follows, trendingVideos, userInteractions, blocks, mutes, userContentFeedback, uploadJobs } from '../db/index.js';
 import { createUserPreferenceModel } from '../services/preferences/index.js';
 import { createForYouAlgorithm } from '../services/feed/index.js';
@@ -519,20 +520,39 @@ xrpcRouter.get('/io.exprsn.video.search', optionalAuthMiddleware, async (c) => {
 /**
  * Get upload URL
  * POST /xrpc/io.exprsn.video.uploadVideo
+ * Rate limited: per-user daily/hourly quotas
  */
-xrpcRouter.post('/io.exprsn.video.uploadVideo', authMiddleware, async (c) => {
-  const { contentType } = await c.req.json<{ contentType: string; size?: number }>();
+xrpcRouter.post('/io.exprsn.video.uploadVideo', authMiddleware, uploadRateLimiter(), async (c) => {
+  const { contentType, size } = await c.req.json<{ contentType: string; size?: number }>();
   const userDid = c.get('did');
 
   if (!contentType || !contentType.startsWith('video/')) {
     throw new HTTPException(400, { message: 'Invalid content type' });
   }
 
+  // Check file size against user quota
+  const quota = await getUploadQuota(userDid);
+  const maxSizeBytes = quota.maxFileSizeMB * 1024 * 1024;
+  if (size && size > maxSizeBytes) {
+    throw new HTTPException(400, {
+      message: `File too large. Maximum size: ${quota.maxFileSizeMB}MB`,
+    });
+  }
+
   // Import upload service dynamically to avoid circular deps
   const { uploadService } = await import('../services/upload.js');
   const result = await uploadService.getUploadUrl(userDid, contentType);
 
-  return c.json(result);
+  // Record the upload against user's quota
+  await recordUpload(userDid);
+
+  return c.json({
+    ...result,
+    quota: {
+      dailyRemaining: quota.dailyUploads - quota.dailyUsed - 1,
+      hourlyRemaining: quota.hourlyUploads - quota.hourlyUsed - 1,
+    },
+  });
 });
 
 /**
@@ -581,6 +601,18 @@ xrpcRouter.post('/io.exprsn.video.createPost', authMiddleware, async (c) => {
   const userDid = c.get('did');
   const data = await c.req.json();
 
+  // Sanitize user-provided content
+  const caption = data.caption ? sanitizeText(data.caption) : null;
+  const tags = Array.isArray(data.tags)
+    ? data.tags.map((t: string) => sanitizeInput(String(t).slice(0, 50)))
+    : [];
+
+  // Log suspicious input attempts
+  if (data.caption && isSuspiciousInput(data.caption)) {
+    const clientIP = c.req.header('x-forwarded-for')?.split(',')[0].trim() || 'unknown';
+    logSuspiciousActivity(clientIP, '/io.exprsn.video.createPost', 'Suspicious caption', data.caption);
+  }
+
   // Get upload job from database to check status and get URLs
   const uploadJob = await db.query.uploadJobs.findFirst({
     where: eq(uploadJobs.id, data.uploadId),
@@ -616,8 +648,8 @@ xrpcRouter.post('/io.exprsn.video.createPost', authMiddleware, async (c) => {
     uri: videoUri,
     cid: videoCid,
     authorDid: userDid,
-    caption: data.caption || null,
-    tags: data.tags || [],
+    caption,
+    tags,
     soundUri: data.soundUri || null,
     cdnUrl: uploadJob.cdnUrl,
     hlsPlaylist: uploadJob.hlsPlaylist,
@@ -991,18 +1023,33 @@ xrpcRouter.post('/io.exprsn.video.removeFeedback', authMiddleware, async (c) => 
  */
 xrpcRouter.post('/io.exprsn.video.createComment', authMiddleware, async (c) => {
   const userDid = c.get('did');
-  const { videoUri, text, parentUri } = await c.req.json<{
+  const body = await c.req.json<{
     videoUri: string;
     text: string;
     parentUri?: string;
   }>();
 
-  if (!videoUri || !text) {
+  if (!body.videoUri || !body.text) {
     throw new HTTPException(400, { message: 'Video URI and text are required' });
+  }
+
+  // Sanitize user input
+  const text = sanitizeText(body.text);
+  const videoUri = sanitizeInput(body.videoUri);
+  const parentUri = body.parentUri ? sanitizeInput(body.parentUri) : undefined;
+
+  // Log suspicious input attempts
+  if (isSuspiciousInput(body.text)) {
+    const clientIP = c.req.header('x-forwarded-for')?.split(',')[0].trim() || 'unknown';
+    logSuspiciousActivity(clientIP, '/io.exprsn.video.createComment', 'Suspicious comment text', body.text);
   }
 
   if (text.length > 500) {
     throw new HTTPException(400, { message: 'Comment text must be 500 characters or less' });
+  }
+
+  if (text.length === 0) {
+    throw new HTTPException(400, { message: 'Comment cannot be empty' });
   }
 
   // Verify video exists

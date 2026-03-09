@@ -3,6 +3,7 @@ import { HTTPException } from 'hono/http-exception';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { authMiddleware, optionalAuthMiddleware } from '../auth/middleware.js';
+import { sanitizeText, isSuspiciousInput, logSuspiciousActivity } from '../auth/security-middleware.js';
 import { db, users, follows, blocks, mutes, videos, userPreferences } from '../db/index.js';
 import { eq, desc, and, or, sql, like, ne } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
@@ -116,24 +117,35 @@ actorRouter.get('/io.exprsn.actor.getProfile', optionalAuthMiddleware, async (c)
  */
 actorRouter.post('/io.exprsn.actor.updateProfile', authMiddleware, async (c) => {
   const userDid = c.get('did');
-  const { displayName, bio } = await c.req.json();
+  const body = await c.req.json();
+
+  // Log suspicious input attempts
+  const clientIP = c.req.header('x-forwarded-for')?.split(',')[0].trim() || 'unknown';
+  if (body.displayName && isSuspiciousInput(body.displayName)) {
+    logSuspiciousActivity(clientIP, '/io.exprsn.actor.updateProfile', 'Suspicious displayName', body.displayName);
+  }
+  if (body.bio && isSuspiciousInput(body.bio)) {
+    logSuspiciousActivity(clientIP, '/io.exprsn.actor.updateProfile', 'Suspicious bio', body.bio);
+  }
 
   const updateData: Partial<{ displayName: string; bio: string; updatedAt: Date }> = {
     updatedAt: new Date(),
   };
 
-  if (displayName !== undefined) {
-    if (displayName.length > 64) {
+  if (body.displayName !== undefined) {
+    const sanitizedName = sanitizeText(body.displayName);
+    if (sanitizedName.length > 64) {
       throw new HTTPException(400, { message: 'Display name too long (max 64 characters)' });
     }
-    updateData.displayName = displayName;
+    updateData.displayName = sanitizedName;
   }
 
-  if (bio !== undefined) {
-    if (bio.length > 256) {
+  if (body.bio !== undefined) {
+    const sanitizedBio = sanitizeText(body.bio);
+    if (sanitizedBio.length > 256) {
       throw new HTTPException(400, { message: 'Bio too long (max 256 characters)' });
     }
-    updateData.bio = bio;
+    updateData.bio = sanitizedBio;
   }
 
   await db.update(users).set(updateData).where(eq(users.did, userDid));

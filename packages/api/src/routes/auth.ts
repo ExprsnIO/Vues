@@ -8,6 +8,13 @@ import { db, actorRepos, users, sessions } from '../db/index.js';
 import { PlcService, getPlcConfig, type DidMethod } from '../services/plc/index.js';
 import { ExprsnDidService } from '../services/did/index.js';
 import type { OrganizationType } from '@exprsn/shared';
+import {
+  authRateLimiter,
+  trackFailedAuth,
+  clearFailedAuth,
+  getAuthDelay,
+  sanitizeInput,
+} from '../auth/security-middleware.js';
 
 export const authRouter = new Hono();
 
@@ -138,8 +145,9 @@ function determineDefaultDidMethod(accountType?: AccountType): DidMethod {
 /**
  * Create a new account
  * POST /xrpc/io.exprsn.auth.createAccount
+ * Rate limited: 3 signups per hour per IP
  */
-authRouter.post('/io.exprsn.auth.createAccount', async (c) => {
+authRouter.post('/io.exprsn.auth.createAccount', authRateLimiter('signup'), async (c) => {
   const body = await c.req.json<{
     handle: string;
     email: string;
@@ -356,8 +364,9 @@ authRouter.post('/io.exprsn.auth.createAccount', async (c) => {
 /**
  * Login with existing account
  * POST /xrpc/io.exprsn.auth.createSession
+ * Rate limited: 5 attempts per 15 minutes per IP
  */
-authRouter.post('/io.exprsn.auth.createSession', async (c) => {
+authRouter.post('/io.exprsn.auth.createSession', authRateLimiter('login'), async (c) => {
   const body = await c.req.json<{
     identifier: string; // handle or email
     password: string;
@@ -369,7 +378,15 @@ authRouter.post('/io.exprsn.auth.createSession', async (c) => {
     });
   }
 
-  const identifier = body.identifier.toLowerCase().trim();
+  const identifier = sanitizeInput(body.identifier.toLowerCase().trim());
+  const clientIP = c.req.header('x-forwarded-for')?.split(',')[0].trim() ||
+    c.req.header('x-real-ip') || 'unknown';
+
+  // Apply progressive delay based on failed attempts
+  const delay = await getAuthDelay(clientIP, identifier);
+  if (delay > 0) {
+    await new Promise((resolve) => setTimeout(resolve, delay));
+  }
 
   // Find account by handle or email
   let account = await db.query.actorRepos.findFirst({
@@ -383,14 +400,21 @@ authRouter.post('/io.exprsn.auth.createSession', async (c) => {
   }
 
   if (!account) {
+    // Track failed attempt but don't reveal if account exists
+    await trackFailedAuth(clientIP, identifier);
     throw new HTTPException(401, { message: 'Invalid credentials' });
   }
 
   // Verify password
   const valid = await bcrypt.compare(body.password, account.passwordHash || '');
   if (!valid) {
+    // Track failed attempt
+    await trackFailedAuth(clientIP, identifier);
     throw new HTTPException(401, { message: 'Invalid credentials' });
   }
+
+  // Clear failed auth tracking on successful login
+  await clearFailedAuth(clientIP, identifier);
 
   // Check account status
   if (account.status !== 'active') {
@@ -494,8 +518,9 @@ authRouter.get('/io.exprsn.auth.getSession', async (c) => {
 /**
  * Refresh access token
  * POST /xrpc/io.exprsn.auth.refreshSession
+ * Rate limited: 30 per minute per user
  */
-authRouter.post('/io.exprsn.auth.refreshSession', async (c) => {
+authRouter.post('/io.exprsn.auth.refreshSession', authRateLimiter('refresh'), async (c) => {
   const auth = c.req.header('Authorization');
   if (!auth?.startsWith('Bearer ')) {
     throw new HTTPException(401, { message: 'Missing refresh token' });
