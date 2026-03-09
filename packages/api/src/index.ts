@@ -28,6 +28,7 @@ import { orgFeaturesRoutes } from './routes/organization-features.js';
 import { liveRoutes } from './routes/live.js';
 import { paymentRoutes } from './routes/payments.js';
 import { caRoutes } from './routes/ca.js';
+import { certificatesDidRoutes } from './routes/certificates-did.js';
 import { audioRouter } from './routes/audio.js';
 import configRoutes from './routes/config.js';
 import { createPdsApp, getPdsConfig, OnCommitCallback } from './pds/index.js';
@@ -232,6 +233,7 @@ app.route('/xrpc', orgFeaturesRoutes);
 app.route('/xrpc', liveRoutes);
 app.route('/xrpc', paymentRoutes);
 app.route('/xrpc', caRoutes);
+app.route('/xrpc', certificatesDidRoutes);
 app.route('/xrpc', audioRouter);
 app.route('/xrpc', soundsRouter);
 app.route('/xrpc', challengesRouter);
@@ -336,9 +338,14 @@ async function main() {
   // Mount setup wizard first (before any catch-all routes)
   // This must happen before PDS and other '/' mounted routes
   try {
-    const { setupRouter } = await import('@exprsn/setup');
-    app.route('/first-run', setupRouter);
-    console.log('Setup wizard mounted at /first-run');
+    const optionalSetupPackage: string = '@exprsn/setup';
+    const setupModule = (await import(optionalSetupPackage)) as {
+      setupRouter?: Parameters<typeof app.route>[1];
+    };
+    if (setupModule.setupRouter) {
+      app.route('/first-run', setupModule.setupRouter);
+      console.log('Setup wizard mounted at /first-run');
+    }
   } catch {
     // @exprsn/setup not installed - skip
   }

@@ -29,9 +29,23 @@ export interface LocalSession {
   user?: LocalUser;
 }
 
+export interface CertificateData {
+  pem: string;
+  privateKey: string;
+  fingerprint: string;
+  validUntil: string;
+}
+
+export interface CreateAccountResult extends LocalSession {
+  didMethod?: string;
+  certificate?: CertificateData;
+}
+
 // =============================================================================
 // Local Auth Functions
 // =============================================================================
+
+export type AccountType = 'personal' | 'creator' | 'business' | 'organization';
 
 /**
  * Create a new local account
@@ -41,7 +55,8 @@ export async function createAccount(data: {
   email: string;
   password: string;
   displayName?: string;
-}): Promise<LocalSession> {
+  accountType?: AccountType;
+}): Promise<CreateAccountResult> {
   const response = await fetch(`${API_BASE}/xrpc/io.exprsn.auth.createAccount`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -68,7 +83,12 @@ export async function createAccount(data: {
     localStorage.setItem(USER_KEY, JSON.stringify(result.user));
   }
 
-  return session;
+  // Return result including certificate if present
+  return {
+    ...session,
+    didMethod: result.didMethod,
+    certificate: result.certificate,
+  };
 }
 
 /**

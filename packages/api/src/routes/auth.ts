@@ -6,6 +6,8 @@ import { nanoid } from 'nanoid';
 import crypto from 'crypto';
 import { db, actorRepos, users, sessions } from '../db/index.js';
 import { PlcService, getPlcConfig, type DidMethod } from '../services/plc/index.js';
+import { ExprsnDidService } from '../services/did/index.js';
+import type { OrganizationType } from '@exprsn/shared';
 
 export const authRouter = new Hono();
 
@@ -121,6 +123,19 @@ function validateEmail(email: string): boolean {
 // =============================================================================
 
 /**
+ * Account types that should use did:exprsn by default
+ */
+type AccountType = 'personal' | 'creator' | 'business' | 'organization';
+
+function determineDefaultDidMethod(accountType?: AccountType): DidMethod {
+  // Creator/org/business accounts → did:exprsn
+  if (['creator', 'organization', 'business'].includes(accountType || '')) {
+    return 'exprn';
+  }
+  return 'plc';
+}
+
+/**
  * Create a new account
  * POST /xrpc/io.exprsn.auth.createAccount
  */
@@ -130,6 +145,9 @@ authRouter.post('/io.exprsn.auth.createAccount', async (c) => {
     email: string;
     password: string;
     displayName?: string;
+    accountType?: AccountType;
+    organizationType?: OrganizationType;
+    didMethod?: DidMethod;
   }>();
 
   // Validate required fields
@@ -175,8 +193,88 @@ authRouter.post('/io.exprsn.auth.createAccount', async (c) => {
     throw new HTTPException(400, { message: 'Email already registered' });
   }
 
-  // Generate DID and keys
-  const did = await generateDid(handle);
+  // Determine DID method based on account type
+  const didMethod = body.didMethod || determineDefaultDidMethod(body.accountType);
+
+  // Handle did:exprsn creation for creator/business accounts
+  if (didMethod === 'exprn') {
+    try {
+      // Create did:exprsn with certificate
+      const result = await ExprsnDidService.createCreatorDid({
+        handle,
+        email: body.email,
+        displayName: body.displayName,
+      });
+
+      const passwordHash = await bcrypt.hash(body.password, 10);
+
+      // Generate session tokens
+      const { accessToken, refreshToken } = generateTokens();
+      const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+
+      // Create account in actor_repos with certificate reference
+      await db.insert(actorRepos).values({
+        did: result.did,
+        handle: result.handle,
+        email: body.email.toLowerCase(),
+        passwordHash,
+        signingKeyPublic: result.publicKeyMultibase,
+        signingKeyPrivate: '', // Private key not stored for did:exprsn
+        didMethod: 'exprn',
+        certificateId: result.certificate.id,
+        status: 'active',
+      });
+
+      // Create in users table
+      await db.insert(users).values({
+        did: result.did,
+        handle: result.handle,
+        displayName: body.displayName || handle,
+        avatar: null,
+        bio: null,
+      });
+
+      // Create session
+      await db.insert(sessions).values({
+        id: nanoid(),
+        did: result.did,
+        accessJwt: accessToken,
+        refreshJwt: refreshToken,
+        expiresAt,
+      });
+
+      // Return response with certificate (one-time)
+      return c.json({
+        success: true,
+        accessJwt: accessToken,
+        refreshJwt: refreshToken,
+        handle: result.handle,
+        did: result.did,
+        didMethod: 'exprn',
+        user: {
+          did: result.did,
+          handle: result.handle,
+          displayName: body.displayName || handle,
+          avatar: null,
+        },
+        // Certificate info for download
+        certificate: {
+          pem: result.certificate.pem,
+          privateKey: result.privateKey,
+          fingerprint: result.certificate.fingerprint,
+          validUntil: result.certificate.validUntil.toISOString(),
+        },
+      });
+    } catch (error) {
+      console.error('Failed to create did:exprsn account:', error);
+      throw new HTTPException(500, {
+        message: error instanceof Error ? error.message : 'Failed to create certificate-backed account',
+      });
+    }
+  }
+
+  // Standard did:plc or did:web flow
+  const did = await generateDid(handle, didMethod);
   const { publicKey, privateKey } = await generateKeyPair();
   const passwordHash = await bcrypt.hash(body.password, 10);
 
@@ -213,6 +311,7 @@ authRouter.post('/io.exprsn.auth.createAccount', async (c) => {
     passwordHash,
     signingKeyPublic: publicKey,
     signingKeyPrivate: privateKey,
+    didMethod: didMethod,
     status: 'active',
   });
 
@@ -240,6 +339,7 @@ authRouter.post('/io.exprsn.auth.createAccount', async (c) => {
     refreshJwt: refreshToken,
     handle,
     did,
+    didMethod,
     user: {
       did,
       handle,

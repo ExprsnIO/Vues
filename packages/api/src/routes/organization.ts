@@ -25,6 +25,7 @@ import {
   SYSTEM_ROLE_PERMISSIONS,
   type SystemRoleName,
   type OrgPermission,
+  type OrganizationType,
 } from '@exprsn/shared';
 import { eq, and, desc, asc, sql, gte, count } from 'drizzle-orm';
 import {
@@ -35,6 +36,7 @@ import {
 import { authMiddleware, optionalAuthMiddleware } from '../auth/middleware.js';
 import bcrypt from 'bcryptjs';
 import * as XLSX from 'xlsx';
+import { ExprsnDidService } from '../services/did/index.js';
 
 // Middleware type for authenticated requests
 type AuthContext = {
@@ -46,15 +48,30 @@ type AuthContext = {
 export const organizationRoutes = new Hono<AuthContext>();
 
 // Helper to check if user has permission in organization
+type OrgPermissionResult = {
+  member: typeof organizationMembers.$inferSelect;
+  org: {
+    id: string;
+    ownerDid: string;
+    name: string;
+    type: string;
+  };
+};
+
 async function checkOrgPermission(
   userDid: string,
   organizationId: string,
   requiredPermission?: string
-): Promise<{ member: typeof organizationMembers.$inferSelect; org: typeof organizations.$inferSelect } | null> {
+): Promise<OrgPermissionResult | null> {
   const result = await db
     .select({
       member: organizationMembers,
-      org: organizations,
+      org: {
+        id: organizations.id,
+        ownerDid: organizations.ownerDid,
+        name: organizations.name,
+        type: organizations.type,
+      },
     })
     .from(organizationMembers)
     .innerJoin(organizations, eq(organizations.id, organizationMembers.organizationId))
@@ -98,7 +115,7 @@ organizationRoutes.post('/io.exprsn.org.create', authMiddleware, async (c) => {
 
   const body = await c.req.json<{
     name: string;
-    type: 'team' | 'enterprise' | 'nonprofit' | 'business';
+    type: 'team' | 'enterprise' | 'nonprofit' | 'business' | 'company' | 'network' | 'label' | 'brand' | 'channel';
     description?: string;
     website?: string;
   }>();
@@ -107,7 +124,8 @@ organizationRoutes.post('/io.exprsn.org.create', authMiddleware, async (c) => {
     throw new HTTPException(400, { message: 'Organization name must be 2-100 characters' });
   }
 
-  if (!['team', 'enterprise', 'nonprofit', 'business'].includes(body.type)) {
+  const validTypes = ['team', 'enterprise', 'nonprofit', 'business', 'company', 'network', 'label', 'brand', 'channel'];
+  if (!validTypes.includes(body.type)) {
     throw new HTTPException(400, { message: 'Invalid organization type' });
   }
 
@@ -137,10 +155,52 @@ organizationRoutes.post('/io.exprsn.org.create', authMiddleware, async (c) => {
     joinedAt: now,
   });
 
+  // Create intermediate CA for qualifying organization types
+  // Enterprise, agency, network, label, and brand orgs get their own CA
+  let intermediateCaCreated = false;
+  if (ExprsnDidService.shouldCreateIntermediateCA(body.type as OrganizationType)) {
+    try {
+      await ExprsnDidService.createOrganizationCA({
+        organizationId: orgId,
+        organizationName: body.name,
+        organizationType: body.type as OrganizationType,
+      });
+      intermediateCaCreated = true;
+    } catch (error) {
+      // Log but don't fail - CA can be created later
+      console.error('Failed to create organization intermediate CA:', error);
+    }
+  }
+
+  // If owner has a did:exprsn, link them to this organization
+  try {
+    const ownerAccount = await db
+      .select()
+      .from(actorRepos)
+      .where(eq(actorRepos.did, userDid))
+      .limit(1);
+
+    if (ownerAccount[0]?.didMethod === 'exprn') {
+      await ExprsnDidService.upgradeToOrgCertificate(userDid, orgId);
+    }
+  } catch (error) {
+    // Non-fatal - owner certificate upgrade can happen later
+    console.error('Failed to upgrade owner to org certificate:', error);
+  }
+
   return c.json({
-    id: orgId,
-    name: body.name,
-    type: body.type,
+    organization: {
+      id: orgId,
+      name: body.name,
+      type: body.type,
+      description: body.description || null,
+      website: body.website || null,
+      avatar: null,
+      memberCount: 1,
+      role: 'owner',
+      createdAt: now.toISOString(),
+      hasIntermediateCA: intermediateCaCreated,
+    },
   });
 });
 
@@ -153,8 +213,20 @@ organizationRoutes.get('/io.exprsn.org.get', optionalAuthMiddleware, async (c) =
     throw new HTTPException(400, { message: 'Organization ID required' });
   }
 
+  // Select only columns that exist in the database
   const result = await db
-    .select()
+    .select({
+      id: organizations.id,
+      ownerDid: organizations.ownerDid,
+      name: organizations.name,
+      type: organizations.type,
+      description: organizations.description,
+      website: organizations.website,
+      avatar: organizations.avatar,
+      verified: organizations.verified,
+      memberCount: organizations.memberCount,
+      createdAt: organizations.createdAt,
+    })
     .from(organizations)
     .where(eq(organizations.id, orgId))
     .limit(1);
@@ -263,6 +335,205 @@ organizationRoutes.post('/io.exprsn.org.update', authMiddleware, async (c) => {
   return c.json({ success: true });
 });
 
+// Complete organization setup (onboarding wizard)
+organizationRoutes.post('/io.exprsn.org.setup', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const body = await c.req.json<{
+    organizationId: string;
+    hostingType: 'cloud' | 'self-hosted' | 'hybrid';
+    plcProvider: 'exprsn' | 'bluesky' | 'self-hosted';
+    selfHostedPlcUrl?: string;
+    customDomain?: string;
+    handleSuffix?: string;
+    initialMembers?: Array<{
+      email: string;
+      role: 'admin' | 'moderator' | 'member';
+      name?: string;
+    }>;
+    roles?: Array<{
+      name: string;
+      displayName: string;
+      permissions: string[];
+      color: string;
+    }>;
+    groups?: Array<{
+      name: string;
+      description?: string;
+    }>;
+    federationEnabled: boolean;
+    federationSettings?: {
+      inboundEnabled: boolean;
+      outboundEnabled: boolean;
+      allowedDomains: string[];
+      blockedDomains: string[];
+      syncPosts: boolean;
+      syncLikes: boolean;
+      syncFollows: boolean;
+    };
+    moderationSettings?: {
+      autoModerationEnabled: boolean;
+      aiModerationEnabled: boolean;
+      requireReviewNewUsers: boolean;
+      newUserReviewDays: number;
+      shadowBanEnabled: boolean;
+      appealEnabled: boolean;
+      contentPolicies: string[];
+    };
+  }>();
+
+  const orgId = body.organizationId;
+  if (!orgId) {
+    throw new HTTPException(400, { message: 'Organization ID required' });
+  }
+
+  // Check admin permission
+  const access = await checkOrgPermission(userDid, orgId, 'admin');
+  if (!access) {
+    throw new HTTPException(403, { message: 'Admin permission required' });
+  }
+
+  let membersInvited = 0;
+  let rolesCreated = 0;
+  let groupsCreated = 0;
+
+  // Update organization settings
+  const settingsUpdate: Record<string, unknown> = {
+    updatedAt: new Date(),
+    hostingType: body.hostingType,
+    plcProvider: body.plcProvider,
+    federationEnabled: body.federationEnabled,
+  };
+
+  if (body.selfHostedPlcUrl) {
+    settingsUpdate.selfHostedPlcUrl = body.selfHostedPlcUrl;
+  }
+  if (body.customDomain) {
+    settingsUpdate.customDomain = body.customDomain;
+  }
+  if (body.handleSuffix) {
+    settingsUpdate.handleSuffix = body.handleSuffix;
+  }
+  if (body.federationSettings) {
+    settingsUpdate.federationConfig = JSON.stringify(body.federationSettings);
+  }
+  if (body.moderationSettings) {
+    settingsUpdate.moderationConfig = JSON.stringify(body.moderationSettings);
+  }
+
+  await db
+    .update(organizations)
+    .set(settingsUpdate)
+    .where(eq(organizations.id, orgId));
+
+  // Create custom roles
+  if (body.roles && body.roles.length > 0) {
+    for (const role of body.roles) {
+      try {
+        await db.insert(organizationRoles).values({
+          id: nanoid(),
+          organizationId: orgId,
+          name: role.name,
+          displayName: role.displayName,
+          permissions: role.permissions as OrgPermission[],
+          color: role.color,
+          isSystem: false,
+          sortOrder: rolesCreated + 10, // After system roles
+        });
+        rolesCreated++;
+      } catch (e) {
+        console.warn('Failed to create role:', role.name, e);
+      }
+    }
+  }
+
+  // Create groups - store in customFields for now until organization_tags table is created
+  if (body.groups && body.groups.length > 0) {
+    try {
+      // Store groups in organization custom fields
+      await db
+        .update(organizations)
+        .set({
+          customFields: sql`COALESCE(custom_fields, '{}'::jsonb) || ${JSON.stringify({ groups: body.groups })}::jsonb`,
+        })
+        .where(eq(organizations.id, orgId));
+      groupsCreated = body.groups.length;
+    } catch (e) {
+      console.warn('Failed to save groups:', e);
+    }
+  }
+
+  // Invite initial members
+  if (body.initialMembers && body.initialMembers.length > 0) {
+    for (const member of body.initialMembers) {
+      try {
+        // Create invite
+        const inviteId = nanoid();
+        const inviteCode = nanoid(12);
+        const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
+
+        await db.insert(organizationInvites).values({
+          id: inviteId,
+          organizationId: orgId,
+          email: member.email.toLowerCase(),
+          role: member.role === 'moderator' ? 'moderator' : member.role,
+          invitedBy: userDid,
+          code: inviteCode,
+          expiresAt,
+          status: 'pending',
+        });
+
+        // TODO: Send invite email via email service
+        // await sendInviteEmail(member.email, inviteCode, orgName);
+
+        membersInvited++;
+      } catch (e) {
+        console.warn('Failed to invite member:', member.email, e);
+      }
+    }
+  }
+
+  // Log activity
+  await db.insert(organizationActivity).values({
+    id: nanoid(),
+    organizationId: orgId,
+    actorDid: userDid,
+    type: 'organization_setup',
+    metadata: JSON.stringify({
+      hostingType: body.hostingType,
+      plcProvider: body.plcProvider,
+      federationEnabled: body.federationEnabled,
+      membersInvited,
+      rolesCreated,
+      groupsCreated,
+    }),
+    createdAt: new Date(),
+  });
+
+  // Get updated organization
+  const org = await db.query.organizations.findFirst({
+    where: eq(organizations.id, orgId),
+  });
+
+  return c.json({
+    organization: org ? {
+      id: org.id,
+      name: org.name,
+      type: org.type,
+      avatar: org.avatar,
+      memberCount: org.memberCount,
+    } : null,
+    setup: {
+      membersInvited,
+      rolesCreated,
+      groupsCreated,
+    },
+  });
+});
+
 // List user's organizations
 organizationRoutes.get('/io.exprsn.org.list', authMiddleware, async (c) => {
   const userDid = c.get('did');
@@ -272,7 +543,16 @@ organizationRoutes.get('/io.exprsn.org.list', authMiddleware, async (c) => {
 
   const result = await db
     .select({
-      org: organizations,
+      // Select only columns that exist in the database
+      org: {
+        id: organizations.id,
+        name: organizations.name,
+        type: organizations.type,
+        description: organizations.description,
+        avatar: organizations.avatar,
+        memberCount: organizations.memberCount,
+        verified: organizations.verified,
+      },
       member: organizationMembers,
     })
     .from(organizationMembers)
@@ -285,10 +565,16 @@ organizationRoutes.get('/io.exprsn.org.list', authMiddleware, async (c) => {
       id: org.id,
       name: org.name,
       type: org.type,
+      description: org.description,
       avatar: org.avatar,
       memberCount: org.memberCount,
+      verified: org.verified,
       role: member.role,
       joinedAt: member.joinedAt.toISOString(),
+      viewer: {
+        role: member.role,
+        permissions: member.permissions,
+      },
     })),
   });
 });
@@ -3079,48 +3365,88 @@ organizationRoutes.get('/io.exprsn.org.getUserOrganizations', authMiddleware, as
     throw new HTTPException(401, { message: 'Authentication required' });
   }
 
-  const results = await db
-    .select({
-      org: organizations,
-      member: organizationMembers,
-      role: organizationRoles,
-    })
-    .from(organizationMembers)
-    .innerJoin(organizations, eq(organizations.id, organizationMembers.organizationId))
-    .leftJoin(organizationRoles, eq(organizationRoles.id, organizationMembers.roleId))
-    .where(eq(organizationMembers.userDid, userDid))
-    .orderBy(desc(organizationMembers.joinedAt));
+  try {
+    // Try query with role join first
+    const results = await db
+      .select({
+        org: organizations,
+        member: organizationMembers,
+        role: organizationRoles,
+      })
+      .from(organizationMembers)
+      .innerJoin(organizations, eq(organizations.id, organizationMembers.organizationId))
+      .leftJoin(organizationRoles, eq(organizationRoles.id, organizationMembers.roleId))
+      .where(eq(organizationMembers.userDid, userDid))
+      .orderBy(desc(organizationMembers.joinedAt));
 
-  return c.json({
-    organizations: results.map(({ org, member, role }) => ({
-      id: org.id,
-      name: org.name,
-      handle: org.handle,
-      displayName: org.displayName,
-      type: org.type,
-      avatar: org.avatar,
-      verified: org.verified,
-      membership: {
-        id: member.id,
-        role: role
-          ? {
-              id: role.id,
-              name: role.name,
-              displayName: role.displayName,
-              permissions: role.permissions,
-              color: role.color,
-            }
-          : {
-              name: member.role,
-              displayName: member.role.charAt(0).toUpperCase() + member.role.slice(1),
-              permissions: member.permissions,
-            },
-        title: member.title,
-        canPublishOnBehalf: member.canPublishOnBehalf,
-        joinedAt: member.joinedAt.toISOString(),
-      },
-    })),
-  });
+    return c.json({
+      organizations: results.map(({ org, member, role }) => ({
+        id: org.id,
+        name: org.name,
+        handle: org.handle,
+        displayName: org.displayName,
+        type: org.type,
+        avatar: org.avatar,
+        verified: org.verified,
+        membership: {
+          id: member.id,
+          role: role
+            ? {
+                id: role.id,
+                name: role.name,
+                displayName: role.displayName,
+                permissions: role.permissions,
+                color: role.color,
+              }
+            : {
+                name: member.role,
+                displayName: member.role.charAt(0).toUpperCase() + member.role.slice(1),
+                permissions: member.permissions,
+              },
+          title: member.title,
+          canPublishOnBehalf: member.canPublishOnBehalf,
+          joinedAt: member.joinedAt.toISOString(),
+        },
+      })),
+    });
+  } catch (error) {
+    // If the query fails (e.g., organization_roles table doesn't exist),
+    // fall back to a simpler query without the role join
+    console.error('[getUserOrganizations] Error with role join, trying without:', error);
+
+    const results = await db
+      .select({
+        org: organizations,
+        member: organizationMembers,
+      })
+      .from(organizationMembers)
+      .innerJoin(organizations, eq(organizations.id, organizationMembers.organizationId))
+      .where(eq(organizationMembers.userDid, userDid))
+      .orderBy(desc(organizationMembers.joinedAt));
+
+    return c.json({
+      organizations: results.map(({ org, member }) => ({
+        id: org.id,
+        name: org.name,
+        handle: org.handle,
+        displayName: org.displayName,
+        type: org.type,
+        avatar: org.avatar,
+        verified: org.verified,
+        membership: {
+          id: member.id,
+          role: {
+            name: member.role,
+            displayName: member.role.charAt(0).toUpperCase() + member.role.slice(1),
+            permissions: member.permissions,
+          },
+          title: member.title,
+          canPublishOnBehalf: member.canPublishOnBehalf,
+          joinedAt: member.joinedAt.toISOString(),
+        },
+      })),
+    });
+  }
 });
 
 // ============================================

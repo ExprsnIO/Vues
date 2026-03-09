@@ -416,6 +416,9 @@ export const actorRepos = pgTable(
     rootCid: text('root_cid'),
     rev: text('rev'),
     status: text('status').default('active').notNull(), // active, suspended, deleted
+    // DID method and certificate integration
+    didMethod: text('did_method').default('plc'), // 'plc' | 'web' | 'exprn'
+    certificateId: text('certificate_id').references(() => caEntityCertificates.id, { onDelete: 'set null' }),
     createdAt: timestamp('created_at').defaultNow().notNull(),
     updatedAt: timestamp('updated_at').defaultNow().notNull(),
   },
@@ -423,6 +426,7 @@ export const actorRepos = pgTable(
     handleIdx: uniqueIndex('actor_repos_handle_idx').on(table.handle),
     emailIdx: index('actor_repos_email_idx').on(table.email),
     statusIdx: index('actor_repos_status_idx').on(table.status),
+    didMethodIdx: index('actor_repos_did_method_idx').on(table.didMethod),
   })
 );
 
@@ -1336,6 +1340,33 @@ export const organizations = pgTable(
     webhooksEnabled: boolean('webhooks_enabled').default(false).notNull(),
     // Custom fields for type-specific data
     customFields: jsonb('custom_fields').$type<Record<string, unknown>>(),
+    // Infrastructure & Identity settings
+    hostingType: text('hosting_type').$type<'cloud' | 'self-hosted' | 'hybrid'>().default('cloud'),
+    plcProvider: text('plc_provider').$type<'exprsn' | 'bluesky' | 'self-hosted'>().default('exprsn'),
+    selfHostedPlcUrl: text('self_hosted_plc_url'),
+    customDomain: text('custom_domain'),
+    handleSuffix: text('handle_suffix'),
+    // Federation settings
+    federationEnabled: boolean('federation_enabled').default(true).notNull(),
+    federationConfig: jsonb('federation_config').$type<{
+      inboundEnabled?: boolean;
+      outboundEnabled?: boolean;
+      allowedDomains?: string[];
+      blockedDomains?: string[];
+      syncPosts?: boolean;
+      syncLikes?: boolean;
+      syncFollows?: boolean;
+    }>(),
+    // Moderation settings
+    moderationConfig: jsonb('moderation_config').$type<{
+      autoModerationEnabled?: boolean;
+      aiModerationEnabled?: boolean;
+      requireReviewNewUsers?: boolean;
+      newUserReviewDays?: number;
+      shadowBanEnabled?: boolean;
+      appealEnabled?: boolean;
+      contentPolicies?: string[];
+    }>(),
     // Verification workflow
     verificationStatus: text('verification_status').default('none').notNull(), // 'none' | 'pending' | 'verified' | 'rejected'
     verificationSubmittedAt: timestamp('verification_submitted_at'),
@@ -1437,6 +1468,7 @@ export const organizationTags = pgTable(
     name: text('name').notNull(),
     color: text('color').default('#6366f1').notNull(), // Hex color
     description: text('description'),
+    type: text('type').default('tag').notNull(), // 'tag' | 'group' | 'team'
     createdBy: text('created_by').references(() => users.did),
     createdAt: timestamp('created_at').defaultNow().notNull(),
     updatedAt: timestamp('updated_at').defaultNow().notNull(),
@@ -2321,6 +2353,65 @@ export const caCertificateRevocationLists = pgTable(
   })
 );
 
+// ============================================
+// did:exprsn Certificate Integration
+// ============================================
+
+// Links did:exprsn DIDs to their X.509 certificates
+export const exprsnDidCertificates = pgTable(
+  'exprsn_did_certificates',
+  {
+    id: text('id').primaryKey(),
+    did: text('did').notNull().unique(), // The did:exprsn identifier
+    certificateId: text('certificate_id')
+      .notNull()
+      .references(() => caEntityCertificates.id, { onDelete: 'cascade' }),
+    issuerIntermediateId: text('issuer_intermediate_id')
+      .references(() => caIntermediateCertificates.id, { onDelete: 'set null' }),
+    organizationId: text('organization_id')
+      .references(() => organizations.id, { onDelete: 'set null' }),
+    certificateType: text('certificate_type').notNull(), // 'platform' | 'organization'
+    publicKeyMultibase: text('public_key_multibase').notNull(), // Multibase-encoded public key for DID doc
+    status: text('status').default('active').notNull(), // 'active' | 'revoked' | 'expired'
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    revokedAt: timestamp('revoked_at'),
+    revokedBy: text('revoked_by'),
+    revocationReason: text('revocation_reason'),
+  },
+  (table) => ({
+    didIdx: uniqueIndex('exprsn_did_certs_did_idx').on(table.did),
+    certIdx: index('exprsn_did_certs_cert_idx').on(table.certificateId),
+    orgIdx: index('exprsn_did_certs_org_idx').on(table.organizationId),
+    statusIdx: index('exprsn_did_certs_status_idx').on(table.status),
+  })
+);
+
+// Links organizations to their intermediate CA for issuing member certificates
+export const organizationIntermediateCAs = pgTable(
+  'organization_intermediate_cas',
+  {
+    id: text('id').primaryKey(),
+    organizationId: text('organization_id')
+      .notNull()
+      .unique()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    intermediateCertId: text('intermediate_cert_id')
+      .notNull()
+      .references(() => caIntermediateCertificates.id, { onDelete: 'cascade' }),
+    commonName: text('common_name').notNull(), // e.g., "Acme Corp CA"
+    maxPathLength: integer('max_path_length').default(0).notNull(),
+    status: text('status').default('active').notNull(), // 'active' | 'revoked' | 'expired'
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    revokedAt: timestamp('revoked_at'),
+    revokedBy: text('revoked_by'),
+  },
+  (table) => ({
+    orgIdx: uniqueIndex('org_intermediate_ca_org_idx').on(table.organizationId),
+    certIdx: index('org_intermediate_ca_cert_idx').on(table.intermediateCertId),
+    statusIdx: index('org_intermediate_ca_status_idx').on(table.status),
+  })
+);
+
 // Organization type exports
 export type Organization = typeof organizations.$inferSelect;
 export type NewOrganization = typeof organizations.$inferInsert;
@@ -2376,6 +2467,12 @@ export type CAEntityCertificate = typeof caEntityCertificates.$inferSelect;
 export type NewCAEntityCertificate = typeof caEntityCertificates.$inferInsert;
 export type CACRL = typeof caCertificateRevocationLists.$inferSelect;
 export type NewCACRL = typeof caCertificateRevocationLists.$inferInsert;
+
+// did:exprsn Certificate type exports
+export type ExprsnDidCertificate = typeof exprsnDidCertificates.$inferSelect;
+export type NewExprsnDidCertificate = typeof exprsnDidCertificates.$inferInsert;
+export type OrganizationIntermediateCA = typeof organizationIntermediateCAs.$inferSelect;
+export type NewOrganizationIntermediateCA = typeof organizationIntermediateCAs.$inferInsert;
 
 // ============================================
 // Editor Collaboration Tables
@@ -3143,6 +3240,9 @@ export const plcIdentities = pgTable(
     tombstonedAt: timestamp('tombstoned_at'),
     tombstonedBy: text('tombstoned_by'), // Admin/user who performed the tombstone
     tombstoneReason: text('tombstone_reason'),
+    // Certificate integration for did:exprsn
+    certificateId: text('certificate_id').references(() => caEntityCertificates.id, { onDelete: 'set null' }),
+    certificateFingerprint: text('certificate_fingerprint'), // SHA-256 fingerprint for quick lookup
     createdAt: timestamp('created_at').defaultNow().notNull(),
     updatedAt: timestamp('updated_at').defaultNow().notNull(),
   },
@@ -3150,6 +3250,7 @@ export const plcIdentities = pgTable(
     handleIdx: uniqueIndex('plc_identities_handle_idx').on(table.handle),
     pdsIdx: index('plc_identities_pds_idx').on(table.pdsEndpoint),
     statusIdx: index('plc_identities_status_idx').on(table.status),
+    certFingerprintIdx: index('plc_identities_cert_fingerprint_idx').on(table.certificateFingerprint),
   })
 );
 

@@ -21,6 +21,9 @@ import {
   refreshLocalSession,
   type LocalSession,
   type LocalUser,
+  type CertificateData,
+  type AccountType,
+  type CreateAccountResult,
 } from './auth';
 import { api } from './api';
 
@@ -47,6 +50,12 @@ export interface User {
   verified?: boolean;
 }
 
+interface SignUpResult {
+  did: string;
+  handle: string;
+  certificate?: CertificateData;
+}
+
 interface AuthContextType {
   user: User | null;
   token: string | null;
@@ -58,7 +67,8 @@ interface AuthContextType {
     email: string;
     password: string;
     displayName?: string;
-  }) => Promise<void>;
+    accountType?: AccountType;
+  }) => Promise<SignUpResult>;
   signIn: (identifier: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
   // OAuth methods
@@ -146,16 +156,23 @@ export const AuthProvider: FC<PropsWithChildren> = ({ children }) => {
     email: string;
     password: string;
     displayName?: string;
-  }) => {
-    const session = await createAccount(data);
-    api.setSession(session.accessJwt);
-    setToken(session.accessJwt);
+    accountType?: AccountType;
+  }): Promise<SignUpResult> => {
+    const result = await createAccount(data);
+    api.setSession(result.accessJwt);
+    setToken(result.accessJwt);
     setUser({
-      did: session.did,
-      handle: session.handle,
-      displayName: session.user?.displayName,
-      avatar: session.user?.avatar,
+      did: result.did,
+      handle: result.handle,
+      displayName: result.user?.displayName,
+      avatar: result.user?.avatar,
     });
+
+    return {
+      did: result.did,
+      handle: result.handle,
+      certificate: result.certificate,
+    };
   }, []);
 
   const signIn = useCallback(async (identifier: string, password: string) => {
