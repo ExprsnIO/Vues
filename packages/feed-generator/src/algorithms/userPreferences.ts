@@ -103,14 +103,16 @@ export class UserPreferencesCalculator {
           jsonb_agg(
             jsonb_build_object(
               'tag', tag,
-              'score', LEAST(1.0, score / NULLIF(MAX(score) OVER (PARTITION BY user_did), 0)),
+              'score', normalized_score,
               'interactions', interactions,
               'lastUpdated', NOW()
             )
             ORDER BY score DESC
           ) FILTER (WHERE score > 0) AS tag_affinities
         FROM (
-          SELECT *, ROW_NUMBER() OVER (PARTITION BY user_did ORDER BY score DESC) AS rn
+          SELECT *,
+            ROW_NUMBER() OVER (PARTITION BY user_did ORDER BY score DESC) AS rn,
+            LEAST(1.0, score / NULLIF(MAX(score) OVER (PARTITION BY user_did), 0)) AS normalized_score
           FROM tag_scores
         ) ranked
         WHERE rn <= 100
@@ -133,7 +135,7 @@ export class UserPreferencesCalculator {
           jsonb_agg(
             jsonb_build_object(
               'did', a.author_did,
-              'score', LEAST(1.0, a.score / NULLIF(MAX(a.score) OVER (PARTITION BY a.user_did), 0)),
+              'score', a.normalized_score,
               'interactions', a.interactions,
               'isFollowing', COALESCE(f.uri IS NOT NULL, false),
               'lastUpdated', NOW()
@@ -141,7 +143,9 @@ export class UserPreferencesCalculator {
             ORDER BY a.score DESC
           ) FILTER (WHERE a.score > 0) AS author_affinities
         FROM (
-          SELECT *, ROW_NUMBER() OVER (PARTITION BY user_did ORDER BY score DESC) AS rn
+          SELECT *,
+            ROW_NUMBER() OVER (PARTITION BY user_did ORDER BY score DESC) AS rn,
+            LEAST(1.0, score / NULLIF(MAX(score) OVER (PARTITION BY user_did), 0)) AS normalized_score
           FROM author_scores
         ) a
         LEFT JOIN follows f ON f.follower_did = a.user_did AND f.followee_did = a.author_did
@@ -165,14 +169,16 @@ export class UserPreferencesCalculator {
           jsonb_agg(
             jsonb_build_object(
               'soundId', sound_id,
-              'score', LEAST(1.0, score / NULLIF(MAX(score) OVER (PARTITION BY user_did), 0)),
+              'score', normalized_score,
               'interactions', interactions,
               'lastUpdated', NOW()
             )
             ORDER BY score DESC
           ) FILTER (WHERE score > 0) AS sound_affinities
         FROM (
-          SELECT *, ROW_NUMBER() OVER (PARTITION BY user_did ORDER BY score DESC) AS rn
+          SELECT *,
+            ROW_NUMBER() OVER (PARTITION BY user_did ORDER BY score DESC) AS rn,
+            LEAST(1.0, score / NULLIF(MAX(score) OVER (PARTITION BY user_did), 0)) AS normalized_score
           FROM sound_scores
         ) ranked
         WHERE rn <= 100
