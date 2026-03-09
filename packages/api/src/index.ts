@@ -64,6 +64,7 @@ import ssoRoutes from './routes/sso/index.js';
 import { videoDeletionRouter } from './routes/video-deletion.js';
 import { videoModerationRouter } from './routes/video-moderation.js';
 import { userModerationRouter } from './routes/user-moderation.js';
+import { searchRouter } from './routes/search.js';
 import { initializeIdentityService } from './services/identity/index.js';
 import { cronService } from './services/cron/index.js';
 import { oauthAgent } from './services/oauth/OAuthAgent.js';
@@ -276,6 +277,7 @@ app.route('/xrpc', analyticsRoutes); // Creator analytics
 app.route('/xrpc', videoDeletionRouter); // Video deletion and upload retry
 app.route('/xrpc', videoModerationRouter); // Content moderation gate and queue
 app.route('/xrpc', userModerationRouter); // User-facing moderation (reports, sanctions, appeals)
+app.route('/xrpc', searchRouter); // Search across videos, users, sounds
 // PLC routes - standard directory at /plc, XRPC routes already have /xrpc prefix
 app.route('/plc', plcRouter); // Standard PLC directory endpoints (did:plc resolution)
 // NOTE: plcRouter at '/' is mounted in main() after setup wizard to avoid /:did catching /first-run
