@@ -1,4 +1,5 @@
 import { serve } from '@hono/node-server';
+import { compress } from '@hono/node-server/compress';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
@@ -105,6 +106,9 @@ app.use('*', secureHeaders({
   crossOriginResourcePolicy: false, // Disable CORP to allow cross-origin video loading
 }));
 
+// Response compression (gzip/deflate)
+app.use('*', compress());
+
 // OAuth scope extraction middleware for /xrpc routes
 app.use('/xrpc/*', scopeExtractMiddleware);
 
@@ -114,13 +118,25 @@ app.use('/xrpc/*', domainContextMiddleware);
 // Config-based rate limiting for /xrpc routes (uses domain context for domain-specific limits)
 app.use('/xrpc/*', configBasedRateLimit());
 
-// Health check
-app.get('/health', (c) => {
-  return c.json({
-    status: 'ok',
-    timestamp: new Date().toISOString(),
-    version: '0.1.0',
-  });
+// Health check endpoints
+import { performHealthCheck, checkLiveness, checkReadiness } from './services/health/index.js';
+
+// Full health check with component status
+app.get('/health', async (c) => {
+  const health = await performHealthCheck();
+  const statusCode = health.status === 'healthy' ? 200 : health.status === 'degraded' ? 200 : 503;
+  return c.json(health, statusCode);
+});
+
+// Kubernetes liveness probe - is the process alive?
+app.get('/health/live', (c) => {
+  return c.json(checkLiveness());
+});
+
+// Kubernetes readiness probe - can accept traffic?
+app.get('/health/ready', async (c) => {
+  const readiness = await checkReadiness();
+  return c.json(readiness, readiness.ready ? 200 : 503);
 });
 
 // Client metadata for OAuth
@@ -644,6 +660,79 @@ async function main() {
   console.log('SSO endpoints: /sso/oauth/authorize, /sso/oauth/token, /sso/oauth/userinfo, /sso/oauth/jwks');
   console.log('SAML endpoints: /sso/saml/metadata, /sso/saml/sso, /sso/saml/slo');
   console.log('Social login: /sso/auth/providers, /sso/auth/:providerId/login, /sso/auth/callback');
+
+  // Graceful shutdown handling
+  let isShuttingDown = false;
+
+  async function gracefulShutdown(signal: string) {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+
+    console.log(`\n${signal} received. Starting graceful shutdown...`);
+
+    // Stop accepting new connections
+    server.close(() => {
+      console.log('HTTP server closed');
+    });
+
+    // Close WebSocket connections
+    io.close(() => {
+      console.log('WebSocket server closed');
+    });
+
+    // Give ongoing requests time to complete (max 30 seconds)
+    const shutdownTimeout = setTimeout(() => {
+      console.warn('Shutdown timeout reached, forcing exit');
+      process.exit(1);
+    }, 30000);
+
+    try {
+      // Stop cron jobs if running
+      if (cronEnabled) {
+        cronService.stop();
+        console.log('Cron service stopped');
+      }
+
+      // Close Redis connection if using Redis
+      if (redis && typeof (redis as any).quit === 'function') {
+        await (redis as any).quit();
+        console.log('Redis connection closed');
+      }
+
+      // Wait for server to fully close
+      await new Promise<void>((resolve) => {
+        const checkClosed = setInterval(() => {
+          // @ts-expect-error - connections is internal
+          if (!server.connections || server.connections === 0) {
+            clearInterval(checkClosed);
+            resolve();
+          }
+        }, 100);
+      });
+
+      clearTimeout(shutdownTimeout);
+      console.log('Graceful shutdown complete');
+      process.exit(0);
+    } catch (err) {
+      console.error('Error during shutdown:', err);
+      clearTimeout(shutdownTimeout);
+      process.exit(1);
+    }
+  }
+
+  // Register signal handlers
+  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+  // Handle uncaught exceptions gracefully
+  process.on('uncaughtException', (err) => {
+    console.error('Uncaught exception:', err);
+    gracefulShutdown('uncaughtException');
+  });
+
+  process.on('unhandledRejection', (reason) => {
+    console.error('Unhandled rejection:', reason);
+  });
 }
 
 main().catch((err) => {
