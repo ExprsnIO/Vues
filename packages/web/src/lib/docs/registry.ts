@@ -773,6 +773,91 @@ const docsSections: DocsSection[] = validateSections([
       '/Users/rickholland/Projects/Vues/packages/api/drizzle/0028_sso_infrastructure.sql',
     ],
   },
+  {
+    id: 'docs-changelog',
+    slug: 'changelog',
+    title: 'Platform Updates',
+    summary:
+      'Recent fixes, improvements, and changes to the platform infrastructure and services.',
+    visibility: 'public',
+    audience: 'all users',
+    status: 'available',
+    toc: [
+      { id: 'recent-fixes', label: 'Recent fixes' },
+      { id: 'infrastructure', label: 'Infrastructure updates' },
+    ],
+    blocks: [
+      {
+        type: 'lead',
+        body: [
+          'This section tracks recent platform updates, bug fixes, and infrastructure improvements. Check here for details on resolved issues and new capabilities.',
+        ],
+      },
+      {
+        type: 'section-divider',
+        id: 'recent-fixes',
+        title: 'Recent fixes',
+        body: [
+          'The following issues have been resolved in recent updates.',
+        ],
+      },
+      {
+        type: 'definition-list',
+        title: 'March 2026 fixes',
+        items: [
+          {
+            term: 'Redis subscriber mode error',
+            definition:
+              'Fixed an error where Redis connections in subscriber mode would fail due to INFO commands being sent after subscribing. The PresenceService now disables ready checks on duplicated connections used for pub/sub.',
+          },
+          {
+            term: 'Database Date serialization errors',
+            definition:
+              'Resolved postgres.js errors where JavaScript Date objects were passed directly to SQL queries. All timestamp comparisons and inserts now convert Date objects to ISO strings for proper serialization.',
+          },
+          {
+            term: 'Setup certificates TypeScript error',
+            definition:
+              'Fixed a TypeScript error in the setup wizard certificates step where pathLen was incorrectly named instead of pathLength.',
+          },
+        ],
+      },
+      {
+        type: 'section-divider',
+        id: 'infrastructure',
+        title: 'Infrastructure updates',
+        body: [
+          'Recent infrastructure and schema changes to support platform operations.',
+        ],
+      },
+      {
+        type: 'table',
+        title: 'Database schema updates',
+        columns: ['Table', 'Change'],
+        rows: [
+          ['actor_repos', 'Added did_method column to support multiple DID methods (plc, web, exprn).'],
+          ['actor_repos', 'Added certificate_id column for certificate integration.'],
+          ['actor_repos', 'Added is_service boolean flag for service accounts.'],
+        ],
+      },
+      {
+        type: 'callout',
+        title: 'Migration note',
+        tone: 'info',
+        body: [
+          'If you encounter "column does not exist" errors after updating, run pnpm db:push or apply the schema changes manually using ALTER TABLE statements.',
+        ],
+      },
+    ],
+    sourcePaths: [
+      '/Users/rickholland/Projects/Vues/packages/api/src/services/presence/PresenceService.ts',
+      '/Users/rickholland/Projects/Vues/packages/api/src/websocket/chat.ts',
+      '/Users/rickholland/Projects/Vues/packages/api/src/websocket/admin.ts',
+      '/Users/rickholland/Projects/Vues/packages/feed-generator/src/algorithms/challengeLeaderboard.ts',
+      '/Users/rickholland/Projects/Vues/packages/setup/src/steps/certificates.ts',
+      '/Users/rickholland/Projects/Vues/packages/api/src/db/schema.ts',
+    ],
+  },
 ]);
 
 export function getDocsSections(): DocsSection[] {

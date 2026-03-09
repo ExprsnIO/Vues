@@ -84,7 +84,7 @@ export type DocsBlock =
 
 export interface DocsSection {
   id: string;
-  slug: 'setup' | 'administration' | 'user-experience' | 'moderation' | 'backend';
+  slug: 'setup' | 'administration' | 'user-experience' | 'moderation' | 'backend' | 'changelog';
   title: string;
   summary: string;
   visibility: DocsVisibility;
