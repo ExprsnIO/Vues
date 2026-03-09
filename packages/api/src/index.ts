@@ -39,7 +39,11 @@ import { initializeRenderProgressWebSocket } from './websocket/renderProgress.js
 import { initializeAdminWebSocket } from './websocket/admin.js';
 import { initializeWatchPartyWebSocket } from './websocket/watchParty.js';
 import { initializeLiveChatWebSocket } from './websocket/liveChat.js';
-import { createWellKnownRouterFromEnv } from './routes/well-known.js';
+import { createWellKnownRouterFromEnv, createOCSPRouter } from './routes/well-known.js';
+import { tokenRouter } from './routes/tokens.js';
+import { certAuthRouter } from './routes/auth-certificate.js';
+import { certExportRouter } from './routes/certificates-export.js';
+import { pinningRouter } from './routes/pinning.js';
 import { identityRouter } from './routes/identity.js';
 import { registryRouter, initializeServiceRegistry } from './routes/registry.js';
 import { federationRouter } from './routes/federation.js';
@@ -253,6 +257,10 @@ app.route('/xrpc', liveRoutes);
 app.route('/xrpc', paymentRoutes);
 app.route('/xrpc', caRoutes);
 app.route('/xrpc', certificatesDidRoutes);
+app.route('/xrpc', tokenRouter);
+app.route('/xrpc', certAuthRouter);
+app.route('/xrpc', certExportRouter);
+app.route('/', pinningRouter);
 app.route('/xrpc', audioRouter);
 app.route('/xrpc', soundsRouter);
 app.route('/xrpc', challengesRouter);
@@ -296,6 +304,10 @@ const pdsConfig = getPdsConfig();
 // Mount well-known routes for AT Protocol and federation discovery
 const wellKnownRouter = createWellKnownRouterFromEnv();
 app.route('/.well-known', wellKnownRouter);
+
+// Mount OCSP responder for certificate status checking
+const ocspRouter = createOCSPRouter();
+app.route('/ocsp', ocspRouter);
 
 // Error handling
 app.onError((err, c) => {
@@ -662,7 +674,8 @@ async function main() {
 
   console.log(`Server running at http://${host}:${port}`);
   console.log('WebSocket namespaces: /chat, /editor-collab, /render-progress, /admin, /watch-party' + (relayEnabled ? ', /xrpc/com.atproto.sync.subscribeRepos' : ''));
-  console.log('Well-known endpoints: /.well-known/atproto-did, /.well-known/did.json, /.well-known/openid-configuration, /.well-known/exprsn-services');
+  console.log('Well-known endpoints: /.well-known/atproto-did, /.well-known/did.json, /.well-known/openid-configuration, /.well-known/exprsn-services, /.well-known/crl.pem');
+  console.log('CA/Token endpoints: /ocsp, /xrpc/io.exprsn.token.*, /xrpc/io.exprsn.auth.*, /xrpc/io.exprsn.cert.*, /xrpc/io.exprsn.security.*');
   console.log('SSO endpoints: /sso/oauth/authorize, /sso/oauth/token, /sso/oauth/userinfo, /sso/oauth/jwks');
   console.log('SAML endpoints: /sso/saml/metadata, /sso/saml/sso, /sso/saml/slo');
   console.log('Social login: /sso/auth/providers, /sso/auth/:providerId/login, /sso/auth/callback');

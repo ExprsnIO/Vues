@@ -1,5 +1,7 @@
 import { Hono } from 'hono';
 import { JWTService } from '../services/sso/JWTService.js';
+import { CRLService } from '../services/ca/CRLService.js';
+import { OCSPResponder } from '../services/ca/OCSPResponder.js';
 
 /**
  * Well-known routes configuration
@@ -251,6 +253,168 @@ export function createWellKnownRouter(config: WellKnownConfig) {
     };
 
     return c.json(response);
+  });
+
+  /**
+   * /.well-known/crl.pem
+   * Certificate Revocation List (PEM format)
+   */
+  router.get('/crl.pem', async (c) => {
+    try {
+      const crl = await CRLService.getCurrentCRL('pem');
+      return new Response(crl as string, {
+        headers: {
+          'Content-Type': 'application/x-pem-file',
+          'Cache-Control': 'public, max-age=3600',
+        },
+      });
+    } catch (error) {
+      console.error('Failed to get CRL:', error);
+      return c.json({ error: 'CRL not available' }, 500);
+    }
+  });
+
+  /**
+   * /.well-known/crl.der
+   * Certificate Revocation List (DER format)
+   */
+  router.get('/crl.der', async (c) => {
+    try {
+      const crl = await CRLService.getCurrentCRL('der');
+      return new Response(crl as Buffer, {
+        headers: {
+          'Content-Type': 'application/pkix-crl',
+          'Cache-Control': 'public, max-age=3600',
+        },
+      });
+    } catch (error) {
+      console.error('Failed to get CRL:', error);
+      return c.json({ error: 'CRL not available' }, 500);
+    }
+  });
+
+  /**
+   * /.well-known/crl-delta.pem
+   * Delta CRL (certificates revoked in last 24 hours)
+   */
+  router.get('/crl-delta.pem', async (c) => {
+    try {
+      const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      const result = await CRLService.getDeltaCRL(since);
+      return new Response(result.crlPem, {
+        headers: {
+          'Content-Type': 'application/x-pem-file',
+          'Cache-Control': 'public, max-age=3600',
+          'X-Revoked-Count': result.revokedCount.toString(),
+        },
+      });
+    } catch (error) {
+      console.error('Failed to get delta CRL:', error);
+      return c.json({ error: 'Delta CRL not available' }, 500);
+    }
+  });
+
+  /**
+   * /.well-known/ca/cdp.json
+   * CRL Distribution Points information
+   */
+  router.get('/ca/cdp.json', (c) => {
+    const baseUrl = `https://${config.domain}`;
+    const cdp = CRLService.getCRLDistributionPoints(baseUrl);
+    return c.json(cdp);
+  });
+
+  /**
+   * /.well-known/ca/status.json
+   * CA status information
+   */
+  router.get('/ca/status.json', async (c) => {
+    try {
+      const status = await CRLService.getStatus();
+      return c.json({
+        crl: {
+          lastGenerated: status.lastGenerated?.toISOString() || null,
+          nextUpdate: status.nextUpdate?.toISOString() || null,
+          revokedCertificates: status.revokedCount,
+          crlNumber: status.crlNumber,
+        },
+        ocsp: {
+          enabled: true,
+          endpoint: `https://${config.domain}/ocsp`,
+        },
+      });
+    } catch (error) {
+      return c.json({ error: 'Status not available' }, 500);
+    }
+  });
+
+  return router;
+}
+
+/**
+ * Create OCSP router (separate due to binary content)
+ */
+export function createOCSPRouter() {
+  const router = new Hono();
+
+  /**
+   * POST /ocsp
+   * OCSP responder - binary request/response
+   */
+  router.post('/', async (c) => {
+    try {
+      const body = await c.req.arrayBuffer();
+      const request = OCSPResponder.parseOCSPRequest(Buffer.from(body));
+      const response = await OCSPResponder.buildSignedResponse(request);
+
+      return new Response(response, {
+        headers: {
+          'Content-Type': 'application/ocsp-response',
+          'Cache-Control': 'max-age=3600',
+        },
+      });
+    } catch (error) {
+      console.error('OCSP error:', error);
+      // Return internal error response
+      return new Response(Buffer.from([0x30, 0x03, 0x0a, 0x01, 0x02]), {
+        headers: { 'Content-Type': 'application/ocsp-response' },
+      });
+    }
+  });
+
+  /**
+   * GET /ocsp/{base64Request}
+   * OCSP responder - GET method with base64-encoded request
+   */
+  router.get('/:request', async (c) => {
+    try {
+      const encodedRequest = c.req.param('request');
+      const requestBuffer = Buffer.from(encodedRequest, 'base64url');
+      const request = OCSPResponder.parseOCSPRequest(requestBuffer);
+      const response = await OCSPResponder.buildSignedResponse(request);
+
+      return new Response(response, {
+        headers: {
+          'Content-Type': 'application/ocsp-response',
+          'Cache-Control': 'max-age=3600',
+        },
+      });
+    } catch (error) {
+      console.error('OCSP error:', error);
+      return new Response(Buffer.from([0x30, 0x03, 0x0a, 0x01, 0x02]), {
+        headers: { 'Content-Type': 'application/ocsp-response' },
+      });
+    }
+  });
+
+  /**
+   * GET /ocsp/status/{serialNumber}
+   * Simple JSON status check (not standard OCSP)
+   */
+  router.get('/status/:serialNumber', async (c) => {
+    const serialNumber = c.req.param('serialNumber');
+    const status = await OCSPResponder.checkStatus(serialNumber);
+    return c.json(status);
   });
 
   return router;

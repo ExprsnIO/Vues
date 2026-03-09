@@ -419,6 +419,8 @@ export const actorRepos = pgTable(
     // DID method and certificate integration
     didMethod: text('did_method').default('plc'), // 'plc' | 'web' | 'exprn'
     certificateId: text('certificate_id').references(() => caEntityCertificates.id, { onDelete: 'set null' }),
+    // Service account flag
+    isService: boolean('is_service').default(false),
     createdAt: timestamp('created_at').defaultNow().notNull(),
     updatedAt: timestamp('updated_at').defaultNow().notNull(),
   },
@@ -427,6 +429,7 @@ export const actorRepos = pgTable(
     emailIdx: index('actor_repos_email_idx').on(table.email),
     statusIdx: index('actor_repos_status_idx').on(table.status),
     didMethodIdx: index('actor_repos_did_method_idx').on(table.didMethod),
+    isServiceIdx: index('actor_repos_is_service_idx').on(table.isService),
   })
 );
 
@@ -5819,3 +5822,235 @@ export type VideoModerationQueueItem = typeof videoModerationQueue.$inferSelect;
 export type NewVideoModerationQueueItem = typeof videoModerationQueue.$inferInsert;
 export type DomainModerator = typeof domainModerators.$inferSelect;
 export type NewDomainModerator = typeof domainModerators.$inferInsert;
+
+// ============================================
+// Phase 8-10: Advanced CA, Auth & Token Infrastructure
+// ============================================
+
+// Certificate Templates - predefined templates for different cert types
+export const certificateTemplates = pgTable(
+  'certificate_templates',
+  {
+    id: text('id').primaryKey(),
+    name: text('name').notNull().unique(),
+    displayName: text('display_name').notNull(),
+    description: text('description'),
+    templateType: text('template_type').notNull(), // 'creator' | 'org_member' | 'service' | 'device'
+    keySize: integer('key_size').default(2048).notNull(),
+    signatureAlgorithm: text('signature_algorithm').default('sha256').notNull(),
+    validityDays: integer('validity_days').default(365).notNull(),
+    keyUsage: jsonb('key_usage').$type<string[]>().default(['digitalSignature', 'keyEncipherment']),
+    extendedKeyUsage: jsonb('extended_key_usage').$type<string[]>().default(['clientAuth']),
+    subjectAltNameTemplate: text('san_template'), // JSON template for SAN generation
+    policyOids: jsonb('policy_oids').$type<string[]>(),
+    isDefault: boolean('is_default').default(false),
+    isSystem: boolean('is_system').default(false), // System templates can't be deleted
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    nameIdx: uniqueIndex('cert_templates_name_idx').on(table.name),
+    typeIdx: index('cert_templates_type_idx').on(table.templateType),
+    defaultIdx: index('cert_templates_default_idx').on(table.isDefault),
+  })
+);
+
+// CA Audit Log - comprehensive audit trail for all CA operations
+export const caAuditLog = pgTable(
+  'ca_audit_log',
+  {
+    id: text('id').primaryKey(),
+    eventType: text('event_type').notNull(), // 'certificate.issued' | 'certificate.revoked' | etc
+    eventCategory: text('event_category').notNull(), // 'certificate' | 'ca' | 'auth' | 'token'
+    certificateId: text('certificate_id'),
+    certificateSerialNumber: text('certificate_serial_number'),
+    subjectDid: text('subject_did'),
+    performedBy: text('performed_by').notNull(), // DID of admin/user or 'system'
+    performedByIp: text('performed_by_ip'),
+    performedByUserAgent: text('performed_by_user_agent'),
+    details: jsonb('details').$type<Record<string, unknown>>(),
+    severity: text('severity').default('info').notNull(), // 'info' | 'warning' | 'error' | 'critical'
+    success: boolean('success').default(true).notNull(),
+    errorMessage: text('error_message'),
+    timestamp: timestamp('timestamp').defaultNow().notNull(),
+  },
+  (table) => ({
+    eventTypeIdx: index('ca_audit_event_type_idx').on(table.eventType),
+    categoryIdx: index('ca_audit_category_idx').on(table.eventCategory),
+    subjectDidIdx: index('ca_audit_subject_did_idx').on(table.subjectDid),
+    performedByIdx: index('ca_audit_performed_by_idx').on(table.performedBy),
+    timestampIdx: index('ca_audit_timestamp_idx').on(table.timestamp),
+    severityIdx: index('ca_audit_severity_idx').on(table.severity),
+  })
+);
+
+// API Tokens - secure API tokens for programmatic access
+export const apiTokens = pgTable(
+  'api_tokens',
+  {
+    id: text('id').primaryKey(),
+    tokenHash: text('token_hash').notNull().unique(), // SHA-256 of token
+    tokenPrefix: text('token_prefix').notNull(), // First 8 chars for identification
+    name: text('name').notNull(),
+    description: text('description'),
+    ownerDid: text('owner_did').notNull(),
+    certificateId: text('certificate_id').references(() => caEntityCertificates.id, { onDelete: 'set null' }),
+    tokenType: text('token_type').notNull(), // 'personal' | 'service' | 'organization'
+    scopes: jsonb('scopes').$type<string[]>().notNull(),
+    allowedIps: jsonb('allowed_ips').$type<string[]>(), // IP allowlist (CIDR notation)
+    allowedOrigins: jsonb('allowed_origins').$type<string[]>(), // CORS origins
+    rateLimit: integer('rate_limit'), // Requests per minute
+    expiresAt: timestamp('expires_at'),
+    lastUsedAt: timestamp('last_used_at'),
+    lastUsedIp: text('last_used_ip'),
+    usageCount: integer('usage_count').default(0).notNull(),
+    status: text('status').default('active').notNull(), // 'active' | 'revoked' | 'expired'
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    revokedAt: timestamp('revoked_at'),
+    revokedBy: text('revoked_by'),
+    revokedReason: text('revoked_reason'),
+  },
+  (table) => ({
+    tokenHashIdx: uniqueIndex('api_tokens_hash_idx').on(table.tokenHash),
+    ownerDidIdx: index('api_tokens_owner_did_idx').on(table.ownerDid),
+    tokenTypeIdx: index('api_tokens_type_idx').on(table.tokenType),
+    statusIdx: index('api_tokens_status_idx').on(table.status),
+    expiresAtIdx: index('api_tokens_expires_at_idx').on(table.expiresAt),
+  })
+);
+
+// API Token Scopes - available scopes for API tokens
+export const apiTokenScopes = pgTable(
+  'api_token_scopes',
+  {
+    id: text('id').primaryKey(),
+    scope: text('scope').notNull().unique(),
+    displayName: text('display_name').notNull(),
+    description: text('description'),
+    category: text('category').notNull(), // 'read' | 'write' | 'admin' | 'service'
+    permissions: jsonb('permissions').$type<string[]>().notNull(),
+    requiresCertificate: boolean('requires_certificate').default(false),
+    requiresOrganization: boolean('requires_organization').default(false),
+    isDeprecated: boolean('is_deprecated').default(false),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    scopeIdx: uniqueIndex('api_token_scopes_scope_idx').on(table.scope),
+    categoryIdx: index('api_token_scopes_category_idx').on(table.category),
+  })
+);
+
+// Session Certificate Bindings - bind sessions to certificates for enhanced security
+export const sessionCertificateBindings = pgTable(
+  'session_certificate_bindings',
+  {
+    id: text('id').primaryKey(),
+    sessionId: text('session_id').notNull(),
+    certificateFingerprint: text('certificate_fingerprint').notNull(),
+    did: text('did').notNull(),
+    boundAt: timestamp('bound_at').defaultNow().notNull(),
+    lastVerified: timestamp('last_verified'),
+    status: text('status').default('active').notNull(), // 'active' | 'revoked'
+  },
+  (table) => ({
+    sessionIdIdx: uniqueIndex('session_cert_session_id_idx').on(table.sessionId),
+    fingerprintIdx: index('session_cert_fingerprint_idx').on(table.certificateFingerprint),
+    didIdx: index('session_cert_did_idx').on(table.did),
+    statusIdx: index('session_cert_status_idx').on(table.status),
+  })
+);
+
+// Certificate Authentication Challenges - for challenge-response auth
+export const certAuthChallenges = pgTable(
+  'cert_auth_challenges',
+  {
+    id: text('id').primaryKey(),
+    certificateFingerprint: text('certificate_fingerprint').notNull(),
+    challenge: text('challenge').notNull(),
+    expiresAt: timestamp('expires_at').notNull(),
+    usedAt: timestamp('used_at'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    fingerprintIdx: index('cert_auth_challenges_fingerprint_idx').on(table.certificateFingerprint),
+    expiresAtIdx: index('cert_auth_challenges_expires_at_idx').on(table.expiresAt),
+  })
+);
+
+// CRL History - track CRL generations
+export const caCRLHistory = pgTable(
+  'ca_crl_history',
+  {
+    id: text('id').primaryKey(),
+    crlPem: text('crl_pem').notNull(),
+    certCount: integer('cert_count').notNull(),
+    crlNumber: integer('crl_number'),
+    generatedAt: timestamp('generated_at').defaultNow().notNull(),
+    expiresAt: timestamp('expires_at').notNull(),
+    generatedBy: text('generated_by'), // 'system' or admin DID
+  },
+  (table) => ({
+    generatedAtIdx: index('ca_crl_history_generated_at_idx').on(table.generatedAt),
+    expiresAtIdx: index('ca_crl_history_expires_at_idx').on(table.expiresAt),
+  })
+);
+
+// Certificate Pins - certificate pinning for mobile apps
+export const certificatePins = pgTable(
+  'certificate_pins',
+  {
+    id: text('id').primaryKey(),
+    pinType: text('pin_type').notNull(), // 'root' | 'intermediate' | 'leaf'
+    fingerprint: text('fingerprint').notNull().unique(), // sha256 fingerprint
+    certificateId: text('certificate_id'),
+    validFrom: timestamp('valid_from').defaultNow().notNull(),
+    validUntil: timestamp('valid_until').notNull(),
+    isBackup: boolean('is_backup').default(false),
+    status: text('status').default('active').notNull(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    fingerprintIdx: uniqueIndex('cert_pins_fingerprint_idx').on(table.fingerprint),
+    pinTypeIdx: index('cert_pins_type_idx').on(table.pinType),
+    statusIdx: index('cert_pins_status_idx').on(table.status),
+  })
+);
+
+// Pin Violation Reports - track certificate pinning violations
+export const pinViolationReports = pgTable(
+  'pin_violation_reports',
+  {
+    id: text('id').primaryKey(),
+    expectedPins: jsonb('expected_pins').$type<string[]>().notNull(),
+    receivedChain: jsonb('received_chain').$type<string[]>(),
+    hostname: text('hostname').notNull(),
+    userAgent: text('user_agent'),
+    clientIp: text('client_ip'),
+    reportedAt: timestamp('reported_at').defaultNow().notNull(),
+    details: jsonb('details').$type<Record<string, unknown>>(),
+  },
+  (table) => ({
+    hostnameIdx: index('pin_violation_hostname_idx').on(table.hostname),
+    reportedAtIdx: index('pin_violation_reported_at_idx').on(table.reportedAt),
+  })
+);
+
+// Type exports for new tables
+export type CertificateTemplate = typeof certificateTemplates.$inferSelect;
+export type NewCertificateTemplate = typeof certificateTemplates.$inferInsert;
+export type CAAuditLogEntry = typeof caAuditLog.$inferSelect;
+export type NewCAAuditLogEntry = typeof caAuditLog.$inferInsert;
+export type ApiToken = typeof apiTokens.$inferSelect;
+export type NewApiToken = typeof apiTokens.$inferInsert;
+export type ApiTokenScope = typeof apiTokenScopes.$inferSelect;
+export type NewApiTokenScope = typeof apiTokenScopes.$inferInsert;
+export type SessionCertificateBinding = typeof sessionCertificateBindings.$inferSelect;
+export type NewSessionCertificateBinding = typeof sessionCertificateBindings.$inferInsert;
+export type CertAuthChallenge = typeof certAuthChallenges.$inferSelect;
+export type NewCertAuthChallenge = typeof certAuthChallenges.$inferInsert;
+export type CACRLHistoryEntry = typeof caCRLHistory.$inferSelect;
+export type NewCACRLHistoryEntry = typeof caCRLHistory.$inferInsert;
+export type CertificatePin = typeof certificatePins.$inferSelect;
+export type NewCertificatePin = typeof certificatePins.$inferInsert;
+export type PinViolationReport = typeof pinViolationReports.$inferSelect;
+export type NewPinViolationReport = typeof pinViolationReports.$inferInsert;
