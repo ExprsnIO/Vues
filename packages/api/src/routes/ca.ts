@@ -2,6 +2,8 @@ import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { authMiddleware, adminAuthMiddleware, requirePermission, ADMIN_PERMISSIONS } from '../auth/middleware.js';
 import { certificateManager } from '../services/ca/index.js';
+import { CRLService } from '../services/ca/CRLService.js';
+import { OCSPResponder } from '../services/ca/OCSPResponder.js';
 import type { CertificateType } from '@exprsn/shared/types';
 
 type AuthContext = {
@@ -749,6 +751,303 @@ caRoutes.post(
 
     await certificateManager.revokeCertificate(body.certificateId, body.reason);
     return c.json({ success: true });
+  }
+);
+
+// ============================================
+// Admin CA Routes (io.exprsn.admin.ca.* naming)
+// These match the frontend API client expectations
+// ============================================
+
+// List root CAs
+caRoutes.get(
+  '/io.exprsn.admin.ca.roots.list',
+  adminAuthMiddleware,
+  async (c) => {
+    const cas = await certificateManager.listAllCAs();
+    const roots = cas.filter((ca: any) => ca.type === 'root');
+    return c.json({ roots });
+  }
+);
+
+// Initialize root CA
+caRoutes.post(
+  '/io.exprsn.admin.ca.roots.initialize',
+  adminAuthMiddleware,
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_EDIT),
+  async (c) => {
+    const body = await c.req.json<{
+      commonName: string;
+      organization?: string;
+      validityYears?: number;
+    }>();
+
+    const result = await certificateManager.initializeRootCA({
+      commonName: body.commonName,
+      organization: body.organization,
+      validityDays: (body.validityYears || 10) * 365,
+    });
+
+    return c.json(result);
+  }
+);
+
+// Revoke root CA
+caRoutes.post(
+  '/io.exprsn.admin.ca.roots.revoke',
+  adminAuthMiddleware,
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_EDIT),
+  async (c) => {
+    const body = await c.req.json<{ rootId: string; reason?: string }>();
+    await certificateManager.revokeCertificate(body.rootId, body.reason || 'unspecified');
+    return c.json({ success: true });
+  }
+);
+
+// List intermediate CAs
+caRoutes.get(
+  '/io.exprsn.admin.ca.intermediates.list',
+  adminAuthMiddleware,
+  async (c) => {
+    const cas = await certificateManager.listAllCAs();
+    const intermediates = cas.filter((ca: any) => ca.type === 'intermediate');
+    return c.json({ intermediates });
+  }
+);
+
+// Create intermediate CA
+caRoutes.post(
+  '/io.exprsn.admin.ca.intermediates.create',
+  adminAuthMiddleware,
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_EDIT),
+  async (c) => {
+    const body = await c.req.json<{
+      commonName: string;
+      organization?: string;
+      parentId?: string;
+      validityYears?: number;
+    }>();
+
+    const result = await certificateManager.createIntermediateCA({
+      commonName: body.commonName,
+      organization: body.organization,
+      validityDays: (body.validityYears || 5) * 365,
+    });
+
+    return c.json(result);
+  }
+);
+
+// List all issuers (CAs that can issue certificates)
+caRoutes.get(
+  '/io.exprsn.admin.ca.issuers.list',
+  adminAuthMiddleware,
+  async (c) => {
+    const cas = await certificateManager.listAllCAs();
+    const issuers = cas.filter((ca: any) => ca.status === 'active');
+    return c.json({ issuers });
+  }
+);
+
+// List certificates with filtering
+caRoutes.get(
+  '/io.exprsn.admin.ca.certificates.list',
+  adminAuthMiddleware,
+  async (c) => {
+    const status = c.req.query('status');
+    const certType = c.req.query('type');
+    const issuerId = c.req.query('issuerId');
+    const search = c.req.query('search');
+    const limit = Math.min(parseInt(c.req.query('limit') || '50'), 200);
+    const offset = parseInt(c.req.query('offset') || '0');
+
+    const result = await certificateManager.listAllCertificates({
+      status: status || undefined,
+      certType: certType || undefined,
+      search: search || undefined,
+      limit,
+      offset,
+    });
+
+    return c.json(result);
+  }
+);
+
+// Issue certificate
+caRoutes.post(
+  '/io.exprsn.admin.ca.certificates.issue',
+  adminAuthMiddleware,
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_EDIT),
+  async (c) => {
+    const body = await c.req.json<{
+      commonName: string;
+      issuerId?: string;
+      certType?: 'client' | 'server' | 'code_signing';
+      subjectDid?: string;
+      email?: string;
+      validityDays?: number;
+    }>();
+
+    const result = await certificateManager.issueCertificate({
+      commonName: body.commonName,
+      certType: body.certType || 'client',
+      subjectDid: body.subjectDid,
+      email: body.email,
+      validityDays: body.validityDays || 365,
+    });
+
+    return c.json(result);
+  }
+);
+
+// Revoke certificate
+caRoutes.post(
+  '/io.exprsn.admin.ca.certificates.revoke',
+  adminAuthMiddleware,
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_EDIT),
+  async (c) => {
+    const body = await c.req.json<{ certificateId: string; reason?: string }>();
+    await certificateManager.revokeCertificate(body.certificateId, body.reason || 'unspecified');
+    return c.json({ success: true });
+  }
+);
+
+// Renew certificate
+caRoutes.post(
+  '/io.exprsn.admin.ca.certificates.renew',
+  adminAuthMiddleware,
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_EDIT),
+  async (c) => {
+    const body = await c.req.json<{ certificateId: string; validityDays?: number }>();
+    const result = await certificateManager.renewCertificate(body.certificateId, body.validityDays);
+    return c.json(result);
+  }
+);
+
+// Get expiring certificates
+caRoutes.get(
+  '/io.exprsn.admin.ca.certificates.expiring',
+  adminAuthMiddleware,
+  async (c) => {
+    const days = parseInt(c.req.query('days') || '30');
+    const certificates = await certificateManager.getExpiringCertificates(days);
+    return c.json({ certificates });
+  }
+);
+
+// Verify certificate
+caRoutes.post(
+  '/io.exprsn.admin.ca.certificates.verify',
+  adminAuthMiddleware,
+  async (c) => {
+    const body = await c.req.json<{ certificatePem: string }>();
+    const result = await certificateManager.verifyCertificate(body.certificatePem);
+    return c.json(result);
+  }
+);
+
+// List CRLs
+caRoutes.get(
+  '/io.exprsn.admin.ca.crl.list',
+  adminAuthMiddleware,
+  async (c) => {
+    try {
+      const crls = await CRLService.listCRLs();
+      return c.json({ crls });
+    } catch {
+      return c.json({ crls: [] });
+    }
+  }
+);
+
+// Get CRL entries
+caRoutes.get(
+  '/io.exprsn.admin.ca.crl.entries',
+  adminAuthMiddleware,
+  async (c) => {
+    const crlId = c.req.query('crlId');
+    if (!crlId) {
+      return c.json({ entries: [] });
+    }
+    try {
+      const entries = await CRLService.getCRLEntries(crlId);
+      return c.json({ entries });
+    } catch {
+      return c.json({ entries: [] });
+    }
+  }
+);
+
+// Generate CRL
+caRoutes.post(
+  '/io.exprsn.admin.ca.crl.generate',
+  adminAuthMiddleware,
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_EDIT),
+  async (c) => {
+    const body = await c.req.json<{ issuerId?: string; isDelta?: boolean }>();
+    const result = await CRLService.generateCRL(body.issuerId, body.isDelta);
+    return c.json(result);
+  }
+);
+
+// OCSP status
+caRoutes.get(
+  '/io.exprsn.admin.ca.ocsp.status',
+  adminAuthMiddleware,
+  async (c) => {
+    try {
+      const status = await OCSPResponder.getStatus();
+      return c.json(status);
+    } catch {
+      return c.json({
+        enabled: false,
+        totalRequests: 0,
+        requestsToday: 0,
+        cacheHitRate: 0,
+      });
+    }
+  }
+);
+
+// OCSP requests log
+caRoutes.get(
+  '/io.exprsn.admin.ca.ocsp.requests',
+  adminAuthMiddleware,
+  async (c) => {
+    const limit = Math.min(parseInt(c.req.query('limit') || '50'), 200);
+    const offset = parseInt(c.req.query('offset') || '0');
+    try {
+      const requests = await OCSPResponder.getRequestLog(limit, offset);
+      return c.json({ requests });
+    } catch {
+      return c.json({ requests: [] });
+    }
+  }
+);
+
+// OCSP check certificate status
+caRoutes.get(
+  '/io.exprsn.admin.ca.ocsp.check',
+  adminAuthMiddleware,
+  async (c) => {
+    const serialNumber = c.req.query('serialNumber');
+    if (!serialNumber) {
+      throw new HTTPException(400, { message: 'Serial number required' });
+    }
+    const result = await OCSPResponder.checkCertificateStatus(serialNumber);
+    return c.json(result);
+  }
+);
+
+// Toggle OCSP responder
+caRoutes.post(
+  '/io.exprsn.admin.ca.ocsp.toggle',
+  adminAuthMiddleware,
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_EDIT),
+  async (c) => {
+    const body = await c.req.json<{ enabled: boolean }>();
+    await OCSPResponder.setEnabled(body.enabled);
+    return c.json({ success: true, enabled: body.enabled });
   }
 );
 
