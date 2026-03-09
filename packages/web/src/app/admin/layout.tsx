@@ -101,6 +101,7 @@ function getDomainNavGroups(domainId: string, stats?: QuickStats): NavGroup[] {
         { href: `/admin/d/${domainId}/settings/services`, label: 'Services', icon: PlatformIcon },
         { href: `/admin/d/${domainId}/settings/identity`, label: 'Identity (PLC)', icon: IdentityIcon },
         { href: `/admin/d/${domainId}/settings/certificates`, label: 'Certificates', icon: CertificatesIcon },
+        { href: `/admin/d/${domainId}/settings/tokens`, label: 'API Tokens', icon: TokensIcon },
         { href: `/admin/d/${domainId}/settings/branding`, label: 'Branding', icon: FeaturedIcon },
         { href: `/admin/d/${domainId}/settings/federation`, label: 'Federation', icon: DomainsIcon },
       ],
@@ -144,6 +145,7 @@ function getGlobalNavGroups(stats?: QuickStats): NavGroup[] {
         { href: '/admin/users', label: 'All Users', icon: UsersIcon, badge: stats?.newUsersToday },
         { href: '/admin/organizations', label: 'Organizations', icon: OrganizationsIcon },
         { href: '/admin/team', label: 'Platform Admin Team', icon: TeamIcon },
+        { href: '/admin/tokens', label: 'API Tokens', icon: TokensIcon },
       ],
     },
     {
@@ -171,11 +173,26 @@ function getGlobalNavGroups(stats?: QuickStats): NavGroup[] {
       ],
     },
     {
+      id: 'security',
+      label: 'Security & PKI',
+      icon: CertificatesIcon,
+      items: [
+        { href: '/admin/certificates', label: 'Certificates', icon: CertificatesIcon },
+        { href: '/admin/certificates/root', label: 'Root CA', icon: CertificatesIcon },
+        { href: '/admin/certificates/intermediate', label: 'Intermediate CA', icon: CertificatesIcon },
+        { href: '/admin/certificates/entities', label: 'Entity Certs', icon: CertificatesIcon },
+        { href: '/admin/certificates/crl', label: 'CRL Distribution', icon: CertificatesIcon },
+        { href: '/admin/certificates/ocsp', label: 'OCSP Responder', icon: CertificatesIcon },
+      ],
+    },
+    {
       id: 'infrastructure',
       label: 'Infrastructure',
       icon: InfraGroupIcon,
       items: [
         { href: '/admin/infrastructure', label: 'Clusters', icon: InfrastructureIcon },
+        { href: '/admin/federation', label: 'Federation', icon: DomainsIcon },
+        { href: '/admin/plc', label: 'PLC Directory', icon: IdentityIcon },
       ],
     },
     {
