@@ -1,4 +1,14 @@
-export type NotificationType = 'email' | 'webhook';
+export type NotificationType = 'email' | 'webhook' | 'push';
+
+export type PushPlatform = 'ios' | 'android' | 'web';
+
+export interface PushToken {
+  token: string;
+  platform: PushPlatform;
+  deviceId?: string;
+  deviceName?: string;
+  appVersion?: string;
+}
 
 export type NotificationEvent =
   | 'render.started'
@@ -151,4 +161,74 @@ export interface NotificationResult {
   success: boolean;
   error?: string;
   details?: Record<string, unknown>;
+}
+
+// Push notification types
+export interface PushNotificationOptions {
+  title: string;
+  body: string;
+  data?: Record<string, string>;
+  badge?: number;
+  sound?: string;
+  imageUrl?: string;
+  clickAction?: string;
+  // iOS-specific
+  subtitle?: string;
+  threadId?: string;
+  // Android-specific
+  channelId?: string;
+  priority?: 'default' | 'high';
+  ttl?: number; // Time to live in seconds
+}
+
+export interface PushDeliveryResult {
+  success: boolean;
+  successCount: number;
+  failureCount: number;
+  invalidTokens: string[];
+  error?: string;
+}
+
+export interface FCMMessage {
+  token?: string;
+  tokens?: string[];
+  notification: {
+    title: string;
+    body: string;
+    imageUrl?: string;
+  };
+  data?: Record<string, string>;
+  android?: {
+    priority: 'normal' | 'high';
+    ttl?: string;
+    notification?: {
+      channelId?: string;
+      sound?: string;
+      clickAction?: string;
+    };
+  };
+  apns?: {
+    payload: {
+      aps: {
+        alert?: {
+          title: string;
+          subtitle?: string;
+          body: string;
+        };
+        badge?: number;
+        sound?: string;
+        'thread-id'?: string;
+        'mutable-content'?: number;
+      };
+    };
+  };
+  webpush?: {
+    notification?: {
+      icon?: string;
+      badge?: string;
+    };
+    fcmOptions?: {
+      link?: string;
+    };
+  };
 }

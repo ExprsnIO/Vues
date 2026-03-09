@@ -1,9 +1,10 @@
 import { db } from '../../db/index.js';
-import { notificationSettings, notificationLog, users, renderJobs } from '../../db/schema.js';
+import { notificationSettings, notificationLog, users, renderJobs, pushTokens } from '../../db/schema.js';
 import { eq, and, desc } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import { EmailProvider } from './email.js';
 import { WebhookProvider } from './webhook.js';
+import { PushProvider, getPushProvider } from './push.js';
 import type {
   NotificationPayload,
   NotificationResult,
@@ -16,19 +17,167 @@ import type {
   VideoCommentPayload,
   PasswordResetPayload,
   OrgInvitePayload,
+  PushNotificationOptions,
+  PushPlatform,
+  PushDeliveryResult,
 } from './types.js';
 
 export * from './types.js';
 export { EmailProvider } from './email.js';
 export { WebhookProvider } from './webhook.js';
+export { PushProvider, getPushProvider } from './push.js';
 
 export class NotificationService {
   private email: EmailProvider;
   private webhook: WebhookProvider;
+  private push: PushProvider;
 
   constructor() {
     this.email = new EmailProvider();
     this.webhook = new WebhookProvider();
+    this.push = getPushProvider();
+  }
+
+  // ==================== PUSH TOKEN MANAGEMENT ====================
+
+  /**
+   * Register a push token for a user
+   */
+  async registerPushToken(
+    userDid: string,
+    token: string,
+    platform: PushPlatform,
+    options?: { deviceId?: string; deviceName?: string; appVersion?: string }
+  ): Promise<{ id: string }> {
+    const id = nanoid();
+
+    // Check if token already exists
+    const existing = await db
+      .select()
+      .from(pushTokens)
+      .where(eq(pushTokens.token, token))
+      .limit(1);
+
+    if (existing.length > 0) {
+      // Update existing token (may have changed user)
+      await db
+        .update(pushTokens)
+        .set({
+          userDid,
+          platform,
+          deviceId: options?.deviceId,
+          deviceName: options?.deviceName,
+          appVersion: options?.appVersion,
+          isActive: true,
+          lastUsedAt: new Date(),
+          invalidatedAt: null,
+        })
+        .where(eq(pushTokens.token, token));
+
+      return { id: existing[0].id };
+    }
+
+    // Insert new token
+    await db.insert(pushTokens).values({
+      id,
+      userDid,
+      token,
+      platform,
+      deviceId: options?.deviceId,
+      deviceName: options?.deviceName,
+      appVersion: options?.appVersion,
+    });
+
+    return { id };
+  }
+
+  /**
+   * Unregister a push token
+   */
+  async unregisterPushToken(token: string): Promise<void> {
+    await db
+      .update(pushTokens)
+      .set({ isActive: false, invalidatedAt: new Date() })
+      .where(eq(pushTokens.token, token));
+  }
+
+  /**
+   * Get all active push tokens for a user
+   */
+  async getPushTokens(userDid: string): Promise<Array<{ token: string; platform: PushPlatform }>> {
+    const tokens = await db
+      .select({ token: pushTokens.token, platform: pushTokens.platform })
+      .from(pushTokens)
+      .where(and(eq(pushTokens.userDid, userDid), eq(pushTokens.isActive, true)));
+
+    return tokens as Array<{ token: string; platform: PushPlatform }>;
+  }
+
+  /**
+   * Invalidate tokens that failed to deliver
+   */
+  async invalidateTokens(tokens: string[]): Promise<void> {
+    if (tokens.length === 0) return;
+
+    for (const token of tokens) {
+      await db
+        .update(pushTokens)
+        .set({ isActive: false, invalidatedAt: new Date() })
+        .where(eq(pushTokens.token, token));
+    }
+  }
+
+  /**
+   * Send push notification to a user
+   */
+  async sendPushNotification(
+    userDid: string,
+    options: PushNotificationOptions,
+    event: NotificationEvent
+  ): Promise<NotificationResult | null> {
+    // Check if user has push enabled
+    const settings = await this.getSettings(userDid);
+    if (!settings?.pushEnabled) {
+      return null;
+    }
+
+    // Get user's push tokens
+    const tokens = await this.getPushTokens(userDid);
+    if (tokens.length === 0) {
+      return null;
+    }
+
+    try {
+      const result = await this.push.sendToTokens(tokens, options);
+
+      // Invalidate failed tokens
+      if (result.invalidTokens.length > 0) {
+        await this.invalidateTokens(result.invalidTokens);
+      }
+
+      await this.logNotification({
+        userDid,
+        type: 'push',
+        event,
+        status: result.success ? 'sent' : 'failed',
+        payload: { ...options, event } as unknown as NotificationPayload,
+        errorMessage: result.error,
+      });
+
+      return {
+        type: 'push',
+        success: result.success,
+        error: result.error,
+        details: {
+          successCount: result.successCount,
+          failureCount: result.failureCount,
+          invalidTokens: result.invalidTokens.length,
+        },
+      };
+    } catch (error) {
+      console.error('Failed to send push notification:', error);
+      return null;
+    }
   }
 
   /**
@@ -56,6 +205,13 @@ export class NotificationService {
       webhookSecret: string;
       notifyOnComplete: boolean;
       notifyOnFailed: boolean;
+      // Push notification settings
+      pushEnabled: boolean;
+      pushOnFollow: boolean;
+      pushOnLike: boolean;
+      pushOnComment: boolean;
+      pushOnMention: boolean;
+      pushOnMessage: boolean;
     }>
   ) {
     await db
@@ -317,166 +473,251 @@ export class NotificationService {
   }
 
   /**
-   * Send follow notification to the followed user
+   * Send follow notification to the followed user (email + push)
    */
   async sendFollowNotification(
     followeeDid: string,
     follower: { did: string; handle: string; displayName?: string; avatar?: string }
-  ): Promise<NotificationResult | null> {
-    // Get followee's email settings
+  ): Promise<NotificationResult[]> {
+    const results: NotificationResult[] = [];
     const settings = await this.getSettings(followeeDid);
-    if (!settings?.emailEnabled || !settings.email) {
-      return null;
-    }
 
-    const payload: FollowPayload = {
-      event: 'user.follow',
-      userDid: followeeDid,
-      timestamp: new Date().toISOString(),
-      data: {
-        followerDid: follower.did,
-        followerHandle: follower.handle,
-        followerDisplayName: follower.displayName,
-        followerAvatar: follower.avatar,
-      },
-    };
+    const followerName = follower.displayName || `@${follower.handle}`;
 
-    try {
-      const result = await this.email.sendFollowNotification(settings.email, payload);
-
-      await this.logNotification({
-        userDid: followeeDid,
-        type: 'email',
+    // Send email notification
+    if (settings?.emailEnabled && settings.email) {
+      const payload: FollowPayload = {
         event: 'user.follow',
-        status: result.success ? 'sent' : 'failed',
-        recipientEmail: settings.email,
-        payload,
-        errorMessage: result.error,
-      });
-
-      return {
-        type: 'email',
-        success: result.success,
-        error: result.error,
+        userDid: followeeDid,
+        timestamp: new Date().toISOString(),
+        data: {
+          followerDid: follower.did,
+          followerHandle: follower.handle,
+          followerDisplayName: follower.displayName,
+          followerAvatar: follower.avatar,
+        },
       };
-    } catch (error) {
-      console.error('Failed to send follow notification:', error);
-      return null;
+
+      try {
+        const result = await this.email.sendFollowNotification(settings.email, payload);
+
+        await this.logNotification({
+          userDid: followeeDid,
+          type: 'email',
+          event: 'user.follow',
+          status: result.success ? 'sent' : 'failed',
+          recipientEmail: settings.email,
+          payload,
+          errorMessage: result.error,
+        });
+
+        results.push({
+          type: 'email',
+          success: result.success,
+          error: result.error,
+        });
+      } catch (error) {
+        console.error('Failed to send follow email:', error);
+      }
     }
+
+    // Send push notification
+    if (settings?.pushEnabled && settings.pushOnFollow !== false) {
+      const pushResult = await this.sendPushNotification(
+        followeeDid,
+        {
+          title: 'New Follower',
+          body: `${followerName} started following you`,
+          data: {
+            type: 'follow',
+            followerDid: follower.did,
+            followerHandle: follower.handle,
+          },
+          imageUrl: follower.avatar,
+          clickAction: `/profile/${follower.handle}`,
+        },
+        'user.follow'
+      );
+
+      if (pushResult) {
+        results.push(pushResult);
+      }
+    }
+
+    return results;
   }
 
   /**
-   * Send like notification to video author
+   * Send like notification to video author (email + push)
    */
   async sendLikeNotification(
     authorDid: string,
     video: { uri: string; title?: string; thumbnail?: string },
     liker: { did: string; handle: string; displayName?: string; avatar?: string },
     totalLikes: number
-  ): Promise<NotificationResult | null> {
+  ): Promise<NotificationResult[]> {
+    const results: NotificationResult[] = [];
     const settings = await this.getSettings(authorDid);
-    if (!settings?.emailEnabled || !settings.email) {
-      return null;
-    }
 
-    const payload: VideoLikePayload = {
-      event: 'video.like',
-      userDid: authorDid,
-      timestamp: new Date().toISOString(),
-      data: {
-        videoUri: video.uri,
-        videoTitle: video.title,
-        videoThumbnail: video.thumbnail,
-        likerDid: liker.did,
-        likerHandle: liker.handle,
-        likerDisplayName: liker.displayName,
-        likerAvatar: liker.avatar,
-        totalLikes,
-      },
-    };
+    const likerName = liker.displayName || `@${liker.handle}`;
+    const videoTitle = video.title || 'your video';
 
-    try {
-      const result = await this.email.sendLikeNotification(settings.email, payload);
-
-      await this.logNotification({
-        userDid: authorDid,
-        type: 'email',
+    // Send email notification
+    if (settings?.emailEnabled && settings.email) {
+      const payload: VideoLikePayload = {
         event: 'video.like',
-        status: result.success ? 'sent' : 'failed',
-        recipientEmail: settings.email,
-        payload,
-        errorMessage: result.error,
-      });
-
-      return {
-        type: 'email',
-        success: result.success,
-        error: result.error,
+        userDid: authorDid,
+        timestamp: new Date().toISOString(),
+        data: {
+          videoUri: video.uri,
+          videoTitle: video.title,
+          videoThumbnail: video.thumbnail,
+          likerDid: liker.did,
+          likerHandle: liker.handle,
+          likerDisplayName: liker.displayName,
+          likerAvatar: liker.avatar,
+          totalLikes,
+        },
       };
-    } catch (error) {
-      console.error('Failed to send like notification:', error);
-      return null;
+
+      try {
+        const result = await this.email.sendLikeNotification(settings.email, payload);
+
+        await this.logNotification({
+          userDid: authorDid,
+          type: 'email',
+          event: 'video.like',
+          status: result.success ? 'sent' : 'failed',
+          recipientEmail: settings.email,
+          payload,
+          errorMessage: result.error,
+        });
+
+        results.push({
+          type: 'email',
+          success: result.success,
+          error: result.error,
+        });
+      } catch (error) {
+        console.error('Failed to send like email:', error);
+      }
     }
+
+    // Send push notification
+    if (settings?.pushEnabled && settings.pushOnLike !== false) {
+      const pushResult = await this.sendPushNotification(
+        authorDid,
+        {
+          title: 'New Like',
+          body: `${likerName} liked ${videoTitle}`,
+          data: {
+            type: 'like',
+            videoUri: video.uri,
+            likerDid: liker.did,
+          },
+          imageUrl: video.thumbnail || liker.avatar,
+          clickAction: `/video/${encodeURIComponent(video.uri)}`,
+          badge: totalLikes,
+        },
+        'video.like'
+      );
+
+      if (pushResult) {
+        results.push(pushResult);
+      }
+    }
+
+    return results;
   }
 
   /**
-   * Send comment notification to video author
+   * Send comment notification to video author (email + push)
    */
   async sendCommentNotification(
     authorDid: string,
     video: { uri: string; title?: string; thumbnail?: string },
     comment: { uri: string; text: string },
     commenter: { did: string; handle: string; displayName?: string; avatar?: string }
-  ): Promise<NotificationResult | null> {
+  ): Promise<NotificationResult[]> {
     // Don't notify if author is commenting on their own video
     if (authorDid === commenter.did) {
-      return null;
+      return [];
     }
 
+    const results: NotificationResult[] = [];
     const settings = await this.getSettings(authorDid);
-    if (!settings?.emailEnabled || !settings.email) {
-      return null;
-    }
 
-    const payload: VideoCommentPayload = {
-      event: 'video.comment',
-      userDid: authorDid,
-      timestamp: new Date().toISOString(),
-      data: {
-        videoUri: video.uri,
-        videoTitle: video.title,
-        videoThumbnail: video.thumbnail,
-        commentUri: comment.uri,
-        commentText: comment.text,
-        commenterDid: commenter.did,
-        commenterHandle: commenter.handle,
-        commenterDisplayName: commenter.displayName,
-        commenterAvatar: commenter.avatar,
-      },
-    };
+    const commenterName = commenter.displayName || `@${commenter.handle}`;
+    const videoTitle = video.title || 'your video';
+    const commentPreview = comment.text.length > 50 ? comment.text.slice(0, 50) + '...' : comment.text;
 
-    try {
-      const result = await this.email.sendCommentNotification(settings.email, payload);
-
-      await this.logNotification({
-        userDid: authorDid,
-        type: 'email',
+    // Send email notification
+    if (settings?.emailEnabled && settings.email) {
+      const payload: VideoCommentPayload = {
         event: 'video.comment',
-        status: result.success ? 'sent' : 'failed',
-        recipientEmail: settings.email,
-        payload,
-        errorMessage: result.error,
-      });
-
-      return {
-        type: 'email',
-        success: result.success,
-        error: result.error,
+        userDid: authorDid,
+        timestamp: new Date().toISOString(),
+        data: {
+          videoUri: video.uri,
+          videoTitle: video.title,
+          videoThumbnail: video.thumbnail,
+          commentUri: comment.uri,
+          commentText: comment.text,
+          commenterDid: commenter.did,
+          commenterHandle: commenter.handle,
+          commenterDisplayName: commenter.displayName,
+          commenterAvatar: commenter.avatar,
+        },
       };
-    } catch (error) {
-      console.error('Failed to send comment notification:', error);
-      return null;
+
+      try {
+        const result = await this.email.sendCommentNotification(settings.email, payload);
+
+        await this.logNotification({
+          userDid: authorDid,
+          type: 'email',
+          event: 'video.comment',
+          status: result.success ? 'sent' : 'failed',
+          recipientEmail: settings.email,
+          payload,
+          errorMessage: result.error,
+        });
+
+        results.push({
+          type: 'email',
+          success: result.success,
+          error: result.error,
+        });
+      } catch (error) {
+        console.error('Failed to send comment email:', error);
+      }
     }
+
+    // Send push notification
+    if (settings?.pushEnabled && settings.pushOnComment !== false) {
+      const pushResult = await this.sendPushNotification(
+        authorDid,
+        {
+          title: 'New Comment',
+          body: `${commenterName} commented on ${videoTitle}: "${commentPreview}"`,
+          data: {
+            type: 'comment',
+            videoUri: video.uri,
+            commentUri: comment.uri,
+            commenterDid: commenter.did,
+          },
+          imageUrl: commenter.avatar,
+          clickAction: `/video/${encodeURIComponent(video.uri)}`,
+        },
+        'video.comment'
+      );
+
+      if (pushResult) {
+        results.push(pushResult);
+      }
+    }
+
+    return results;
   }
 
   /**
@@ -612,7 +853,7 @@ export class NotificationService {
 
   private async logNotification(data: {
     userDid: string;
-    type: 'email' | 'webhook';
+    type: 'email' | 'webhook' | 'push';
     event: string;
     status: 'sent' | 'failed';
     recipientEmail?: string;

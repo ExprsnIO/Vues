@@ -3835,8 +3835,43 @@ export const notificationSettings = pgTable('notification_settings', {
   webhookSecret: text('webhook_secret'),
   notifyOnComplete: boolean('notify_on_complete').default(true),
   notifyOnFailed: boolean('notify_on_failed').default(true),
+  // Push notification preferences
+  pushEnabled: boolean('push_enabled').default(true),
+  pushOnFollow: boolean('push_on_follow').default(true),
+  pushOnLike: boolean('push_on_like').default(true),
+  pushOnComment: boolean('push_on_comment').default(true),
+  pushOnMention: boolean('push_on_mention').default(true),
+  pushOnMessage: boolean('push_on_message').default(true),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
+
+// Push tokens - store device tokens for push notifications
+export const pushTokens = pgTable(
+  'push_tokens',
+  {
+    id: text('id').primaryKey(),
+    userDid: text('user_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    token: text('token').notNull(),
+    platform: text('platform').notNull().$type<'ios' | 'android' | 'web'>(),
+    deviceId: text('device_id'),
+    deviceName: text('device_name'),
+    appVersion: text('app_version'),
+    isActive: boolean('is_active').default(true).notNull(),
+    lastUsedAt: timestamp('last_used_at').defaultNow().notNull(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    invalidatedAt: timestamp('invalidated_at'),
+  },
+  (table) => ({
+    userIdx: index('push_tokens_user_idx').on(table.userDid),
+    tokenIdx: index('push_tokens_token_idx').on(table.token),
+    platformIdx: index('push_tokens_platform_idx').on(table.platform),
+  })
+);
+
+export type PushToken = typeof pushTokens.$inferSelect;
+export type NewPushToken = typeof pushTokens.$inferInsert;
 
 // Notification log - track sent notifications
 export const notificationLog = pgTable(
