@@ -10,6 +10,12 @@ import type {
   RenderCompletePayload,
   RenderFailedPayload,
   NotificationEvent,
+  WelcomePayload,
+  FollowPayload,
+  VideoLikePayload,
+  VideoCommentPayload,
+  PasswordResetPayload,
+  OrgInvitePayload,
 } from './types.js';
 
 export * from './types.js';
@@ -271,6 +277,274 @@ export class NotificationService {
     }
 
     return results;
+  }
+
+  // ==================== USER ENGAGEMENT NOTIFICATIONS ====================
+
+  /**
+   * Send welcome email to new user
+   */
+  async sendWelcomeEmail(userDid: string, handle: string, email: string, displayName?: string): Promise<NotificationResult | null> {
+    const payload: WelcomePayload = {
+      event: 'user.welcome',
+      userDid,
+      timestamp: new Date().toISOString(),
+      data: { handle, email, displayName },
+    };
+
+    try {
+      const result = await this.email.sendWelcome(email, payload);
+
+      await this.logNotification({
+        userDid,
+        type: 'email',
+        event: 'user.welcome',
+        status: result.success ? 'sent' : 'failed',
+        recipientEmail: email,
+        payload,
+        errorMessage: result.error,
+      });
+
+      return {
+        type: 'email',
+        success: result.success,
+        error: result.error,
+      };
+    } catch (error) {
+      console.error('Failed to send welcome email:', error);
+      return null;
+    }
+  }
+
+  /**
+   * Send follow notification to the followed user
+   */
+  async sendFollowNotification(
+    followeeDid: string,
+    follower: { did: string; handle: string; displayName?: string; avatar?: string }
+  ): Promise<NotificationResult | null> {
+    // Get followee's email settings
+    const settings = await this.getSettings(followeeDid);
+    if (!settings?.emailEnabled || !settings.email) {
+      return null;
+    }
+
+    const payload: FollowPayload = {
+      event: 'user.follow',
+      userDid: followeeDid,
+      timestamp: new Date().toISOString(),
+      data: {
+        followerDid: follower.did,
+        followerHandle: follower.handle,
+        followerDisplayName: follower.displayName,
+        followerAvatar: follower.avatar,
+      },
+    };
+
+    try {
+      const result = await this.email.sendFollowNotification(settings.email, payload);
+
+      await this.logNotification({
+        userDid: followeeDid,
+        type: 'email',
+        event: 'user.follow',
+        status: result.success ? 'sent' : 'failed',
+        recipientEmail: settings.email,
+        payload,
+        errorMessage: result.error,
+      });
+
+      return {
+        type: 'email',
+        success: result.success,
+        error: result.error,
+      };
+    } catch (error) {
+      console.error('Failed to send follow notification:', error);
+      return null;
+    }
+  }
+
+  /**
+   * Send like notification to video author
+   */
+  async sendLikeNotification(
+    authorDid: string,
+    video: { uri: string; title?: string; thumbnail?: string },
+    liker: { did: string; handle: string; displayName?: string; avatar?: string },
+    totalLikes: number
+  ): Promise<NotificationResult | null> {
+    const settings = await this.getSettings(authorDid);
+    if (!settings?.emailEnabled || !settings.email) {
+      return null;
+    }
+
+    const payload: VideoLikePayload = {
+      event: 'video.like',
+      userDid: authorDid,
+      timestamp: new Date().toISOString(),
+      data: {
+        videoUri: video.uri,
+        videoTitle: video.title,
+        videoThumbnail: video.thumbnail,
+        likerDid: liker.did,
+        likerHandle: liker.handle,
+        likerDisplayName: liker.displayName,
+        likerAvatar: liker.avatar,
+        totalLikes,
+      },
+    };
+
+    try {
+      const result = await this.email.sendLikeNotification(settings.email, payload);
+
+      await this.logNotification({
+        userDid: authorDid,
+        type: 'email',
+        event: 'video.like',
+        status: result.success ? 'sent' : 'failed',
+        recipientEmail: settings.email,
+        payload,
+        errorMessage: result.error,
+      });
+
+      return {
+        type: 'email',
+        success: result.success,
+        error: result.error,
+      };
+    } catch (error) {
+      console.error('Failed to send like notification:', error);
+      return null;
+    }
+  }
+
+  /**
+   * Send comment notification to video author
+   */
+  async sendCommentNotification(
+    authorDid: string,
+    video: { uri: string; title?: string; thumbnail?: string },
+    comment: { uri: string; text: string },
+    commenter: { did: string; handle: string; displayName?: string; avatar?: string }
+  ): Promise<NotificationResult | null> {
+    // Don't notify if author is commenting on their own video
+    if (authorDid === commenter.did) {
+      return null;
+    }
+
+    const settings = await this.getSettings(authorDid);
+    if (!settings?.emailEnabled || !settings.email) {
+      return null;
+    }
+
+    const payload: VideoCommentPayload = {
+      event: 'video.comment',
+      userDid: authorDid,
+      timestamp: new Date().toISOString(),
+      data: {
+        videoUri: video.uri,
+        videoTitle: video.title,
+        videoThumbnail: video.thumbnail,
+        commentUri: comment.uri,
+        commentText: comment.text,
+        commenterDid: commenter.did,
+        commenterHandle: commenter.handle,
+        commenterDisplayName: commenter.displayName,
+        commenterAvatar: commenter.avatar,
+      },
+    };
+
+    try {
+      const result = await this.email.sendCommentNotification(settings.email, payload);
+
+      await this.logNotification({
+        userDid: authorDid,
+        type: 'email',
+        event: 'video.comment',
+        status: result.success ? 'sent' : 'failed',
+        recipientEmail: settings.email,
+        payload,
+        errorMessage: result.error,
+      });
+
+      return {
+        type: 'email',
+        success: result.success,
+        error: result.error,
+      };
+    } catch (error) {
+      console.error('Failed to send comment notification:', error);
+      return null;
+    }
+  }
+
+  /**
+   * Send password reset email
+   */
+  async sendPasswordResetEmail(
+    email: string,
+    resetToken: string,
+    resetUrl: string,
+    expiresAt: Date
+  ): Promise<NotificationResult> {
+    const payload: PasswordResetPayload = {
+      event: 'auth.password_reset',
+      userDid: '', // Not associated with a specific DID yet
+      timestamp: new Date().toISOString(),
+      data: {
+        resetToken,
+        resetUrl,
+        expiresAt: expiresAt.toISOString(),
+      },
+    };
+
+    const result = await this.email.sendPasswordReset(email, payload);
+
+    return {
+      type: 'email',
+      success: result.success,
+      error: result.error,
+    };
+  }
+
+  /**
+   * Send organization invite email
+   */
+  async sendOrgInviteEmail(
+    email: string,
+    org: { id: string; name: string; logo?: string },
+    inviter: { did: string; handle: string; displayName?: string },
+    role: string,
+    inviteToken: string,
+    acceptUrl: string,
+    expiresAt: Date
+  ): Promise<NotificationResult> {
+    const payload: OrgInvitePayload = {
+      event: 'org.invite',
+      userDid: '', // Invitee may not have an account yet
+      timestamp: new Date().toISOString(),
+      data: {
+        organizationId: org.id,
+        organizationName: org.name,
+        organizationLogo: org.logo,
+        inviterDid: inviter.did,
+        inviterHandle: inviter.handle,
+        inviterDisplayName: inviter.displayName,
+        role,
+        inviteToken,
+        acceptUrl,
+        expiresAt: expiresAt.toISOString(),
+      },
+    };
+
+    const result = await this.email.sendOrgInvite(email, payload);
+
+    return {
+      type: 'email',
+      success: result.success,
+      error: result.error,
+    };
   }
 
   /**

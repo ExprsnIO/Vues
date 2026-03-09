@@ -15,6 +15,7 @@ import {
   getAuthDelay,
   sanitizeInput,
 } from '../auth/security-middleware.js';
+import { getNotificationService } from '../services/notifications/index.js';
 
 export const authRouter = new Hono();
 
@@ -251,6 +252,14 @@ authRouter.post('/io.exprsn.auth.createAccount', authRateLimiter('signup'), asyn
         expiresAt,
       });
 
+      // Send welcome email (non-blocking)
+      getNotificationService().sendWelcomeEmail(
+        result.did,
+        result.handle,
+        body.email,
+        body.displayName
+      ).catch((err) => console.error('Failed to send welcome email:', err));
+
       // Return response with certificate (one-time)
       return c.json({
         success: true,
@@ -340,6 +349,14 @@ authRouter.post('/io.exprsn.auth.createAccount', authRateLimiter('signup'), asyn
     refreshJwt: refreshToken,
     expiresAt,
   });
+
+  // Send welcome email (non-blocking)
+  getNotificationService().sendWelcomeEmail(
+    did,
+    handle,
+    body.email,
+    body.displayName
+  ).catch((err) => console.error('Failed to send welcome email:', err));
 
   return c.json({
     success: true,

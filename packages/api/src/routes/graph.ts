@@ -4,6 +4,7 @@ import { authMiddleware, optionalAuthMiddleware } from '../auth/middleware.js';
 import { db, users, follows, lists, listItems } from '../db/index.js';
 import { eq, desc, and, sql, or } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
+import { getNotificationService } from '../services/notifications/index.js';
 
 export const graphRouter = new Hono();
 
@@ -66,6 +67,20 @@ graphRouter.post('/io.exprsn.graph.follow', authMiddleware, async (c) => {
     .update(users)
     .set({ followerCount: sql`${users.followerCount} + 1` })
     .where(eq(users.did, did));
+
+  // Send follow notification email (non-blocking)
+  const follower = await db.query.users.findFirst({
+    where: eq(users.did, userDid),
+  });
+
+  if (follower) {
+    getNotificationService().sendFollowNotification(did, {
+      did: follower.did,
+      handle: follower.handle,
+      displayName: follower.displayName || undefined,
+      avatar: follower.avatar || undefined,
+    }).catch((err) => console.error('Failed to send follow notification:', err));
+  }
 
   return c.json({ uri: followUri });
 });
