@@ -26,16 +26,17 @@ interface OrganizationContextValue {
   refreshOrganizations: () => void;
 
   // Organization mutations
-  createOrganization: (data: CreateOrgData) => Promise<{ id: string }>;
+  createOrganization: (data: CreateOrgData) => Promise<{ organization: { id: string } }>;
   leaveOrganization: (orgId: string) => Promise<void>;
 }
 
 interface CreateOrgData {
   name: string;
   handle?: string;
-  type: string;
+  type: 'team' | 'enterprise' | 'nonprofit' | 'business';
   bio?: string;
   isPublic?: boolean;
+  website?: string;
 }
 
 const OrganizationContext = createContext<OrganizationContextValue | null>(null);

@@ -14,9 +14,8 @@ import {
   sounds,
   adminUsers,
 } from '../db/schema.js';
-import { eq, desc, and, or, gte, lte, sql, ilike, inArray } from 'drizzle-orm';
-import { optionalAuthMiddleware, authMiddleware } from '../middleware/auth.js';
-import { adminAuthMiddleware } from '../middleware/adminAuth.js';
+import { eq, desc, and, or, gte, lte, sql, ilike, inArray, count, countDistinct, sum } from 'drizzle-orm';
+import { optionalAuthMiddleware, authMiddleware, adminAuthMiddleware } from '../auth/middleware.js';
 import { nanoid } from 'nanoid';
 
 const challengesRouter = new Hono();
@@ -130,6 +129,89 @@ challengesRouter.get('/io.exprsn.challenge.getChallenge', optionalAuthMiddleware
       isWinner: userParticipation.isWinner,
       joinedAt: userParticipation.joinedAt,
     } : null,
+  });
+});
+
+/**
+ * Get challenge statistics
+ * GET /xrpc/io.exprsn.challenge.getStats
+ */
+challengesRouter.get('/io.exprsn.challenge.getStats', optionalAuthMiddleware, async (c) => {
+  const challengeId = c.req.query('challengeId');
+
+  if (!challengeId) {
+    return c.json({ error: 'challengeId is required' }, 400);
+  }
+
+  // Verify challenge exists
+  const challenge = await db.query.challenges.findFirst({
+    where: eq(challenges.id, challengeId),
+  });
+
+  if (!challenge) {
+    return c.json({ error: 'Challenge not found' }, 404);
+  }
+
+  // Get aggregate statistics
+  const statsResult = await db
+    .select({
+      totalEntries: count(),
+      uniqueCreators: countDistinct(videos.authorDid),
+      totalViews: sum(videos.viewCount),
+      totalLikes: sum(videos.likeCount),
+      totalComments: sum(videos.commentCount),
+      totalShares: sum(videos.shareCount),
+    })
+    .from(challengeEntries)
+    .innerJoin(videos, eq(challengeEntries.videoUri, videos.uri))
+    .where(eq(challengeEntries.challengeId, challengeId));
+
+  const stats = statsResult[0];
+
+  // Get top creators by entry count
+  const topCreators = await db
+    .select({
+      authorDid: videos.authorDid,
+      entryCount: count(),
+      totalViews: sum(videos.viewCount),
+    })
+    .from(challengeEntries)
+    .innerJoin(videos, eq(challengeEntries.videoUri, videos.uri))
+    .where(eq(challengeEntries.challengeId, challengeId))
+    .groupBy(videos.authorDid)
+    .orderBy(desc(count()))
+    .limit(10);
+
+  // Get user info for top creators
+  const creatorDids = topCreators.map((c) => c.authorDid);
+  const creatorUsers = creatorDids.length > 0
+    ? await db.query.users.findMany({
+        where: inArray(users.did, creatorDids),
+      })
+    : [];
+  const userMap = new Map(creatorUsers.map((u) => [u.did, u]));
+
+  return c.json({
+    stats: {
+      totalEntries: Number(stats?.totalEntries || 0),
+      uniqueCreators: Number(stats?.uniqueCreators || 0),
+      totalViews: Number(stats?.totalViews || 0),
+      totalLikes: Number(stats?.totalLikes || 0),
+      totalComments: Number(stats?.totalComments || 0),
+      totalShares: Number(stats?.totalShares || 0),
+      totalEngagement: Number(stats?.totalLikes || 0) + Number(stats?.totalComments || 0) + Number(stats?.totalShares || 0),
+    },
+    topCreators: topCreators.map((c) => {
+      const user = userMap.get(c.authorDid);
+      return {
+        did: c.authorDid,
+        handle: user?.handle || 'unknown',
+        displayName: user?.displayName,
+        avatar: user?.avatar,
+        entryCount: Number(c.entryCount),
+        totalViews: Number(c.totalViews || 0),
+      };
+    }),
   });
 });
 
@@ -580,7 +662,7 @@ challengesRouter.get('/io.exprsn.challenge.search', optionalAuthMiddleware, asyn
  * POST /xrpc/io.exprsn.admin.challenge.create
  */
 challengesRouter.post('/io.exprsn.admin.challenge.create', adminAuthMiddleware, async (c) => {
-  const adminId = c.get('adminId');
+  const adminUser = c.get('adminUser');
   const body = await c.req.json();
 
   const {
@@ -636,7 +718,7 @@ challengesRouter.post('/io.exprsn.admin.challenge.create', adminAuthMiddleware, 
     endAt: new Date(endAt),
     votingEndAt: votingEndAt ? new Date(votingEndAt) : null,
     featuredSoundId,
-    createdBy: adminId,
+    createdBy: adminUser.id,
   });
 
   return c.json({
@@ -850,7 +932,7 @@ challengesRouter.get('/io.exprsn.admin.challenge.getStats', adminAuthMiddleware,
       totalViews: challenge.totalViews,
       totalEngagement: challenge.totalEngagement,
     },
-    dailyEntries: dailyEntries.rows,
+    dailyEntries: dailyEntries as unknown[],
     topParticipants,
   });
 });

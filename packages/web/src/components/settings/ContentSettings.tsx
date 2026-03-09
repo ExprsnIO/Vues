@@ -3,6 +3,7 @@
 import { useCallback } from 'react';
 import type { ContentSettings as ContentSettingsType, UserSettingsUpdate } from '@exprsn/shared';
 import { SettingsRow, ToggleSwitch, Select } from './SettingsSection';
+import { useSettingsStore } from '@/stores/settings-store';
 
 interface ContentSettingsProps {
   content: ContentSettingsType;
@@ -22,11 +23,21 @@ const LANGUAGE_OPTIONS = [
 ];
 
 export function ContentSettings({ content, onUpdate, isUpdating }: ContentSettingsProps) {
+  // Use Zustand store for immediate UI updates
+  const storeContent = useSettingsStore((state) => state.settings.content);
+  const updateContent = useSettingsStore((state) => state.updateContent);
+
+  // Use store values for display (more reliable than props)
+  const currentContent = storeContent || content;
+
   const handleChange = useCallback(
     <K extends keyof ContentSettingsType>(key: K, value: ContentSettingsType[K]) => {
+      // Update Zustand store immediately
+      updateContent({ [key]: value });
+      // Also update React Query cache
       onUpdate({ content: { [key]: value } });
     },
-    [onUpdate]
+    [updateContent, onUpdate]
   );
 
   return (
@@ -36,7 +47,7 @@ export function ContentSettings({ content, onUpdate, isUpdating }: ContentSettin
         description="Language for content recommendations"
       >
         <Select
-          value={content.language}
+          value={currentContent.language}
           onChange={(v) => handleChange('language', v)}
           options={LANGUAGE_OPTIONS}
           disabled={isUpdating}
@@ -48,7 +59,7 @@ export function ContentSettings({ content, onUpdate, isUpdating }: ContentSettin
         description="Show warnings for sensitive content"
       >
         <ToggleSwitch
-          checked={content.contentWarnings}
+          checked={currentContent.contentWarnings}
           onChange={(v) => handleChange('contentWarnings', v)}
           disabled={isUpdating}
         />
@@ -59,7 +70,7 @@ export function ContentSettings({ content, onUpdate, isUpdating }: ContentSettin
         description="Show content that may be sensitive"
       >
         <ToggleSwitch
-          checked={content.sensitiveContent}
+          checked={currentContent.sensitiveContent}
           onChange={(v) => handleChange('sensitiveContent', v)}
           disabled={isUpdating}
         />

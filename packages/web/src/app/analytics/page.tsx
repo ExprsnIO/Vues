@@ -6,6 +6,8 @@ import { useAuth } from '@/lib/auth-context';
 import Link from 'next/link';
 import { LineChart, BarChart, DoughnutChart } from '@/components/analytics';
 
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3002';
+
 type Tab = 'overview' | 'videos' | 'followers' | 'streams' | 'earnings';
 type Period = '7d' | '30d' | '90d' | 'all';
 
@@ -155,7 +157,7 @@ function OverviewTab({ period }: { period: Period }) {
   const { data, isLoading } = useQuery({
     queryKey: ['analytics', 'overview', period],
     queryFn: async () => {
-      const response = await fetch(`/api/xrpc/io.exprsn.analytics.overview?period=${period}`);
+      const response = await fetch(`${API_BASE}/xrpc/io.exprsn.analytics.overview?period=${period}`);
       return response.json() as Promise<OverviewData>;
     },
   });
@@ -294,7 +296,7 @@ function VideosTab() {
   const { data, isLoading } = useQuery({
     queryKey: ['analytics', 'videos', sortBy],
     queryFn: async () => {
-      const response = await fetch(`/api/xrpc/io.exprsn.analytics.videos?sortBy=${sortBy}&limit=20`);
+      const response = await fetch(`${API_BASE}/xrpc/io.exprsn.analytics.videos?sortBy=${sortBy}&limit=20`);
       return response.json();
     },
   });
@@ -399,7 +401,7 @@ function FollowersTab({ period }: { period: Period }) {
   const { data, isLoading } = useQuery({
     queryKey: ['analytics', 'followers', period],
     queryFn: async () => {
-      const response = await fetch(`/api/xrpc/io.exprsn.analytics.followers?period=${period}`);
+      const response = await fetch(`${API_BASE}/xrpc/io.exprsn.analytics.followers?period=${period}`);
       return response.json();
     },
   });
@@ -502,7 +504,7 @@ function StreamsTab({ period }: { period: Period }) {
   const { data, isLoading } = useQuery({
     queryKey: ['analytics', 'streams', period],
     queryFn: async () => {
-      const response = await fetch(`/api/xrpc/io.exprsn.analytics.streams?period=${period}`);
+      const response = await fetch(`${API_BASE}/xrpc/io.exprsn.analytics.streams?period=${period}`);
       return response.json();
     },
   });
@@ -629,7 +631,7 @@ function EarningsTab() {
   const { data, isLoading } = useQuery({
     queryKey: ['analytics', 'earnings'],
     queryFn: async () => {
-      const response = await fetch('/api/xrpc/io.exprsn.analytics.earnings');
+      const response = await fetch(`${API_BASE}/xrpc/io.exprsn.analytics.earnings`);
       return response.json();
     },
   });

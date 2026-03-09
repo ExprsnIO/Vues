@@ -318,6 +318,51 @@ function createSqliteTables(sqlite: Database.Database): void {
     CREATE UNIQUE INDEX IF NOT EXISTS sessions_access_jwt_idx ON sessions(access_jwt);
     CREATE UNIQUE INDEX IF NOT EXISTS sessions_refresh_jwt_idx ON sessions(refresh_jwt);
     CREATE INDEX IF NOT EXISTS sessions_expires_at_idx ON sessions(expires_at);
+
+    -- Auth config table
+    CREATE TABLE IF NOT EXISTS auth_config (
+      id TEXT PRIMARY KEY DEFAULT 'default',
+      signing_key TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- Service registry table
+    CREATE TABLE IF NOT EXISTS service_registry (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      type TEXT NOT NULL,
+      url TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'unknown',
+      metadata TEXT,
+      last_health_check TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS service_registry_type_idx ON service_registry(type);
+    CREATE INDEX IF NOT EXISTS service_registry_status_idx ON service_registry(status);
+
+    -- CA config table
+    CREATE TABLE IF NOT EXISTS ca_config (
+      id TEXT PRIMARY KEY DEFAULT 'default',
+      private_key TEXT NOT NULL,
+      certificate TEXT NOT NULL,
+      crl TEXT,
+      last_crl_update TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- Admin users table
+    CREATE TABLE IF NOT EXISTS admin_users (
+      id TEXT PRIMARY KEY,
+      user_did TEXT NOT NULL REFERENCES users(did) ON DELETE CASCADE,
+      role TEXT NOT NULL DEFAULT 'moderator',
+      permissions TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS admin_users_did_idx ON admin_users(user_did);
   `);
 }
 

@@ -19,6 +19,7 @@ import {
 import { eq, and, lte, desc, or, isNull, sql, inArray } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import { CronJob } from 'cron';
+import { emitCommitToRelay, isRelayEnabled } from '../relay/index.js';
 
 /**
  * Publishing options
@@ -273,7 +274,23 @@ export class PublishingService {
         });
       }
 
-      // Insert video
+      // Submit to content moderation gate
+      const { getContentGateService } = await import('../moderation/ContentGateService.js');
+      const contentGateService = getContentGateService();
+      const gateResult = await contentGateService.submitForModeration(videoUri, userDid, {
+        caption: publishing.caption || undefined,
+        tags: publishing.tags || [],
+        thumbnailUrl: thumbnailUrl || undefined,
+        duration: duration || undefined,
+        cdnUrl: videoUrl,
+      });
+
+      // Determine visibility based on moderation result
+      const effectiveVisibility = gateResult.autoApproved
+        ? (publishing.visibility || 'public')
+        : 'pending'; // Pending review videos are not publicly visible
+
+      // Insert video with moderation status
       await db.insert(videos).values({
         uri: videoUri,
         cid: videoCid,
@@ -286,12 +303,18 @@ export class PublishingService {
         thumbnailUrl: thumbnailUrl || null,
         duration: duration || 0,
         aspectRatio: aspectRatio || { width: 16, height: 9 },
-        visibility: publishing.visibility || 'public',
+        visibility: effectiveVisibility,
+        moderationStatus: gateResult.moderationStatus,
         allowDuet: publishing.allowDuet ?? true,
         allowStitch: publishing.allowStitch ?? true,
         allowComments: publishing.allowComments ?? true,
         createdAt: new Date(),
       });
+
+      // Log moderation result
+      if (!gateResult.autoApproved) {
+        console.log(`[PublishingService] Video pending moderation: ${videoUri} (risk: ${gateResult.riskLevel}, score: ${gateResult.riskScore})`);
+      }
 
       // Track sound usage for trending calculation
       if (soundUri) {
@@ -316,6 +339,42 @@ export class PublishingService {
       const tags = (publishing.tags || []).map((t: string) => t.toLowerCase().replace(/^#/, ''));
       if (tags.length > 0) {
         await this.checkAndEnterChallenges(videoUri, userDid, tags);
+      }
+
+      // Emit to relay for federation (non-blocking) - only if auto-approved
+      // Videos pending moderation should not be federated until approved
+      if (isRelayEnabled() && gateResult.autoApproved) {
+        emitCommitToRelay(userDid, {
+          rev: new Date().toISOString(),
+          operation: 'create',
+          collection: 'io.exprsn.video.post',
+          rkey: videoId,
+          cid: videoCid,
+          record: {
+            $type: 'io.exprsn.video.post',
+            video: {
+              cdnUrl: videoUrl,
+              hlsPlaylist: hlsPlaylist || undefined,
+              thumbnail: thumbnailUrl || undefined,
+              duration: duration || undefined,
+              aspectRatio: aspectRatio || undefined,
+            },
+            caption: publishing.caption || '',
+            tags: publishing.tags || [],
+            sound: soundUri ? { uri: soundUri } : undefined,
+            visibility: publishing.visibility || 'public',
+            allowDuet: publishing.allowDuet ?? true,
+            allowStitch: publishing.allowStitch ?? true,
+            allowComments: publishing.allowComments ?? true,
+            createdAt: new Date().toISOString(),
+          },
+        }).then((event) => {
+          if (event) {
+            console.log(`[PublishingService] Video federated: seq=${event.seq}`);
+          }
+        }).catch((err) => {
+          console.warn('[PublishingService] Failed to emit to relay:', err);
+        });
       }
 
       // Update publishing record

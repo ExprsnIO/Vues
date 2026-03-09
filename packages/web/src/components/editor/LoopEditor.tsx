@@ -213,7 +213,7 @@ export function LoopEditor({
     queryKey: ['sounds', 'trending'],
     queryFn: async () => {
       // Use the sounds API if available
-      if ('getTrendingSounds' in api && typeof (api as Record<string, unknown>).getTrendingSounds === 'function') {
+      if ('getTrendingSounds' in api && typeof (api as unknown as Record<string, unknown>).getTrendingSounds === 'function') {
         return (api as unknown as { getTrendingSounds: () => Promise<{ sounds: Sound[] }> }).getTrendingSounds();
       }
       return { sounds: [] };

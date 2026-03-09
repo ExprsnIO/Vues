@@ -38,6 +38,11 @@ export interface UploadStatus {
   hlsPlaylist?: string;
   thumbnail?: string;
   error?: string;
+  // Retry information
+  retryCount?: number;
+  maxRetries?: number;
+  canRetry?: boolean;
+  lastRetryAt?: string;
 }
 
 class UploadService {
@@ -186,6 +191,239 @@ class UploadService {
         updatedAt: new Date(),
       })
       .where(eq(uploadJobs.id, uploadId));
+  }
+
+  /**
+   * Retry a failed upload
+   * @param uploadId - The upload ID to retry
+   * @param userId - The user requesting the retry (must own the upload)
+   * @returns Success or error information
+   */
+  async retryUpload(
+    uploadId: string,
+    userId: string
+  ): Promise<{ success: boolean; error?: string }> {
+    // Get the upload job
+    const job = await db.query.uploadJobs.findFirst({
+      where: eq(uploadJobs.id, uploadId),
+    });
+
+    if (!job) {
+      return { success: false, error: 'Upload not found' };
+    }
+
+    // Verify ownership
+    if (job.userDid !== userId) {
+      return { success: false, error: 'Not authorized to retry this upload' };
+    }
+
+    // Check if it's in a failed state
+    if (job.status !== 'failed') {
+      return { success: false, error: `Cannot retry upload with status: ${job.status}` };
+    }
+
+    // Check retry limit
+    if (job.retryCount >= job.maxRetries) {
+      return { success: false, error: `Maximum retry limit (${job.maxRetries}) reached` };
+    }
+
+    // Record retry attempt
+    const retryHistory = (job.retryHistory as Array<{ attemptedAt: string; error: string }>) || [];
+    retryHistory.push({
+      attemptedAt: new Date().toISOString(),
+      error: job.error || 'Unknown error',
+    });
+
+    // Update job status
+    await db
+      .update(uploadJobs)
+      .set({
+        status: 'processing',
+        progress: 10,
+        error: null,
+        retryCount: job.retryCount + 1,
+        lastRetryAt: new Date(),
+        retryHistory,
+        updatedAt: new Date(),
+      })
+      .where(eq(uploadJobs.id, uploadId));
+
+    // Update Redis cache
+    const cached = await redis.get(CacheKeys.upload(uploadId));
+    if (cached) {
+      const data = JSON.parse(cached);
+      data.status = 'processing';
+      data.progress = 10;
+      data.error = null;
+      await redis.setex(CacheKeys.upload(uploadId), 7200, JSON.stringify(data));
+    }
+
+    // Re-queue the transcode job
+    await transcodeQueue.add(
+      'transcode',
+      {
+        uploadId,
+        inputKey: job.inputKey,
+        userId: job.userDid,
+        isRetry: true,
+        retryCount: job.retryCount + 1,
+      },
+      {
+        attempts: 3,
+        backoff: {
+          type: 'exponential',
+          delay: 5000,
+        },
+      }
+    );
+
+    console.log(`[UploadService] Retry queued for upload: ${uploadId} (attempt ${job.retryCount + 1})`);
+
+    return { success: true };
+  }
+
+  /**
+   * Force retry an upload (admin only)
+   * Bypasses ownership check and retry limit
+   * @param uploadId - The upload ID to retry
+   * @param adminId - The admin performing the retry
+   */
+  async forceRetry(
+    uploadId: string,
+    adminId: string
+  ): Promise<{ success: boolean; error?: string }> {
+    // Get the upload job
+    const job = await db.query.uploadJobs.findFirst({
+      where: eq(uploadJobs.id, uploadId),
+    });
+
+    if (!job) {
+      return { success: false, error: 'Upload not found' };
+    }
+
+    // Check if it's in a failed state
+    if (job.status !== 'failed') {
+      return { success: false, error: `Cannot retry upload with status: ${job.status}` };
+    }
+
+    // Record retry attempt with admin info
+    const retryHistory = (job.retryHistory as Array<{ attemptedAt: string; error: string; forcedBy?: string }>) || [];
+    retryHistory.push({
+      attemptedAt: new Date().toISOString(),
+      error: job.error || 'Unknown error',
+      forcedBy: adminId,
+    });
+
+    // Update job status - reset retry count for forced retries
+    await db
+      .update(uploadJobs)
+      .set({
+        status: 'processing',
+        progress: 10,
+        error: null,
+        retryCount: 0, // Reset for forced retry
+        maxRetries: 5, // Reset max retries
+        lastRetryAt: new Date(),
+        retryHistory,
+        updatedAt: new Date(),
+      })
+      .where(eq(uploadJobs.id, uploadId));
+
+    // Update Redis cache
+    const cached = await redis.get(CacheKeys.upload(uploadId));
+    if (cached) {
+      const data = JSON.parse(cached);
+      data.status = 'processing';
+      data.progress = 10;
+      data.error = null;
+      await redis.setex(CacheKeys.upload(uploadId), 7200, JSON.stringify(data));
+    }
+
+    // Re-queue the transcode job with high priority
+    await transcodeQueue.add(
+      'transcode',
+      {
+        uploadId,
+        inputKey: job.inputKey,
+        userId: job.userDid,
+        isRetry: true,
+        forcedBy: adminId,
+      },
+      {
+        priority: 1, // High priority for admin-forced retries
+        attempts: 5, // More attempts for forced retries
+        backoff: {
+          type: 'exponential',
+          delay: 5000,
+        },
+      }
+    );
+
+    console.log(`[UploadService] Force retry queued for upload: ${uploadId} by admin: ${adminId}`);
+
+    return { success: true };
+  }
+
+  /**
+   * Get retry information for an upload
+   */
+  async getRetryInfo(uploadId: string): Promise<{
+    retryCount: number;
+    maxRetries: number;
+    canRetry: boolean;
+    lastRetryAt?: string;
+    retryHistory: Array<{ attemptedAt: string; error: string; forcedBy?: string }>;
+  } | null> {
+    const job = await db.query.uploadJobs.findFirst({
+      where: eq(uploadJobs.id, uploadId),
+    });
+
+    if (!job) {
+      return null;
+    }
+
+    return {
+      retryCount: job.retryCount,
+      maxRetries: job.maxRetries,
+      canRetry: job.status === 'failed' && job.retryCount < job.maxRetries,
+      lastRetryAt: job.lastRetryAt?.toISOString(),
+      retryHistory: (job.retryHistory as Array<{ attemptedAt: string; error: string; forcedBy?: string }>) || [],
+    };
+  }
+
+  /**
+   * Get user's failed uploads
+   */
+  async getUserFailedUploads(
+    userId: string,
+    limit = 10
+  ): Promise<Array<{
+    id: string;
+    status: string;
+    error?: string;
+    retryCount: number;
+    maxRetries: number;
+    canRetry: boolean;
+    createdAt: string;
+  }>> {
+    const jobs = await db
+      .select()
+      .from(uploadJobs)
+      .where(eq(uploadJobs.userDid, userId))
+      .orderBy(uploadJobs.createdAt)
+      .limit(limit);
+
+    return jobs
+      .filter((job) => job.status === 'failed')
+      .map((job) => ({
+        id: job.id,
+        status: job.status,
+        error: job.error || undefined,
+        retryCount: job.retryCount,
+        maxRetries: job.maxRetries,
+        canRetry: job.retryCount < job.maxRetries,
+        createdAt: job.createdAt.toISOString(),
+      }));
   }
 }
 

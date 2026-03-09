@@ -3,6 +3,7 @@
 import { useCallback } from 'react';
 import type { NotificationSettings as NotificationSettingsType, UserSettingsUpdate } from '@exprsn/shared';
 import { SettingsRow, ToggleSwitch, Select } from './SettingsSection';
+import { useSettingsStore } from '@/stores/settings-store';
 
 interface NotificationSettingsProps {
   notifications: NotificationSettingsType;
@@ -17,11 +18,21 @@ const EMAIL_DIGEST_OPTIONS = [
 ];
 
 export function NotificationSettings({ notifications, onUpdate, isUpdating }: NotificationSettingsProps) {
+  // Use Zustand store for immediate UI updates
+  const storeNotifications = useSettingsStore((state) => state.settings.notifications);
+  const updateNotifications = useSettingsStore((state) => state.updateNotifications);
+
+  // Use store values for display (more reliable than props)
+  const currentNotifications = storeNotifications || notifications;
+
   const handleChange = useCallback(
     <K extends keyof NotificationSettingsType>(key: K, value: NotificationSettingsType[K]) => {
+      // Update Zustand store immediately
+      updateNotifications({ [key]: value });
+      // Also update React Query cache
       onUpdate({ notifications: { [key]: value } });
     },
-    [onUpdate]
+    [updateNotifications, onUpdate]
   );
 
   return (
@@ -31,7 +42,7 @@ export function NotificationSettings({ notifications, onUpdate, isUpdating }: No
         description="When someone likes your content"
       >
         <ToggleSwitch
-          checked={notifications.likes}
+          checked={currentNotifications.likes}
           onChange={(v) => handleChange('likes', v)}
           disabled={isUpdating}
         />
@@ -42,7 +53,7 @@ export function NotificationSettings({ notifications, onUpdate, isUpdating }: No
         description="When someone comments on your content"
       >
         <ToggleSwitch
-          checked={notifications.comments}
+          checked={currentNotifications.comments}
           onChange={(v) => handleChange('comments', v)}
           disabled={isUpdating}
         />
@@ -53,7 +64,7 @@ export function NotificationSettings({ notifications, onUpdate, isUpdating }: No
         description="When someone follows you"
       >
         <ToggleSwitch
-          checked={notifications.follows}
+          checked={currentNotifications.follows}
           onChange={(v) => handleChange('follows', v)}
           disabled={isUpdating}
         />
@@ -64,7 +75,7 @@ export function NotificationSettings({ notifications, onUpdate, isUpdating }: No
         description="When someone mentions you"
       >
         <ToggleSwitch
-          checked={notifications.mentions}
+          checked={currentNotifications.mentions}
           onChange={(v) => handleChange('mentions', v)}
           disabled={isUpdating}
         />
@@ -75,7 +86,7 @@ export function NotificationSettings({ notifications, onUpdate, isUpdating }: No
         description="When you receive a direct message"
       >
         <ToggleSwitch
-          checked={notifications.directMessages}
+          checked={currentNotifications.directMessages}
           onChange={(v) => handleChange('directMessages', v)}
           disabled={isUpdating}
         />
@@ -86,7 +97,7 @@ export function NotificationSettings({ notifications, onUpdate, isUpdating }: No
         description="Receive activity summaries via email"
       >
         <Select
-          value={notifications.emailDigest}
+          value={currentNotifications.emailDigest}
           onChange={(v) => handleChange('emailDigest', v as NotificationSettingsType['emailDigest'])}
           options={EMAIL_DIGEST_OPTIONS}
           disabled={isUpdating}

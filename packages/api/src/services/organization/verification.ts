@@ -294,7 +294,13 @@ export class OrganizationVerificationService {
     submittedAt: string;
     documentCount: number;
   }>> {
-    let query = db
+    // Build where conditions
+    const conditions = [eq(organizations.verificationStatus, 'pending')];
+    if (options?.orgType) {
+      conditions.push(eq(organizations.type, options.orgType));
+    }
+
+    const results = await db
       .select({
         id: organizations.id,
         name: organizations.name,
@@ -304,18 +310,7 @@ export class OrganizationVerificationService {
         documents: organizations.verificationDocuments,
       })
       .from(organizations)
-      .where(eq(organizations.verificationStatus, 'pending'));
-
-    if (options?.orgType) {
-      query = query.where(
-        and(
-          eq(organizations.verificationStatus, 'pending'),
-          eq(organizations.type, options.orgType)
-        )
-      ) as typeof query;
-    }
-
-    const results = await query
+      .where(and(...conditions))
       .limit(options?.limit || 50)
       .offset(options?.offset || 0);
 

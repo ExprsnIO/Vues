@@ -2,8 +2,9 @@
 
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { api } from '@/lib/api';
 import toast from 'react-hot-toast';
+
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3002';
 
 type Tab = 'identities' | 'handles' | 'config' | 'audit';
 
@@ -104,7 +105,7 @@ function IdentitiesTab() {
   const { data, isLoading } = useQuery({
     queryKey: ['admin', 'plc', 'identities', search],
     queryFn: async () => {
-      const response = await fetch(`/api/xrpc/io.exprsn.admin.plc.listIdentities?search=${encodeURIComponent(search)}&limit=50`, {
+      const response = await fetch(`${API_BASE}/xrpc/io.exprsn.admin.plc.listIdentities?search=${encodeURIComponent(search)}&limit=50`, {
         headers: { 'X-Dev-Admin': 'true' },
       });
       return response.json();
@@ -114,7 +115,7 @@ function IdentitiesTab() {
   const { data: statsData } = useQuery({
     queryKey: ['admin', 'plc', 'stats'],
     queryFn: async () => {
-      const response = await fetch('/api/xrpc/io.exprsn.admin.plc.getStats', {
+      const response = await fetch(`${API_BASE}/xrpc/io.exprsn.admin.plc.getStats`, {
         headers: { 'X-Dev-Admin': 'true' },
       });
       return response.json();
@@ -251,7 +252,7 @@ function IdentityDetailModal({
     queryKey: ['admin', 'plc', 'identity', identity.did],
     queryFn: async () => {
       const response = await fetch(
-        `/api/xrpc/io.exprsn.admin.plc.getIdentity?did=${encodeURIComponent(identity.did)}`,
+        `${API_BASE}/xrpc/io.exprsn.admin.plc.getIdentity?did=${encodeURIComponent(identity.did)}`,
         { headers: { 'X-Dev-Admin': 'true' } }
       );
       return response.json();
@@ -263,7 +264,7 @@ function IdentityDetailModal({
     queryKey: ['admin', 'plc', 'operations', identity.did],
     queryFn: async () => {
       const response = await fetch(
-        `/api/xrpc/io.exprsn.admin.plc.listOperations?did=${encodeURIComponent(identity.did)}&limit=50`,
+        `${API_BASE}/xrpc/io.exprsn.admin.plc.listOperations?did=${encodeURIComponent(identity.did)}&limit=50`,
         { headers: { 'X-Dev-Admin': 'true' } }
       );
       return response.json();
@@ -273,7 +274,7 @@ function IdentityDetailModal({
   // Tombstone mutation
   const tombstoneMutation = useMutation({
     mutationFn: async () => {
-      const response = await fetch('/api/xrpc/io.exprsn.admin.plc.tombstoneIdentity', {
+      const response = await fetch(`${API_BASE}/xrpc/io.exprsn.admin.plc.tombstoneIdentity`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Dev-Admin': 'true' },
         body: JSON.stringify({ did: identity.did, reason: 'Admin action' }),
@@ -291,7 +292,7 @@ function IdentityDetailModal({
   // Reactivate mutation
   const reactivateMutation = useMutation({
     mutationFn: async () => {
-      const response = await fetch('/api/xrpc/io.exprsn.admin.plc.reactivateIdentity', {
+      const response = await fetch(`${API_BASE}/xrpc/io.exprsn.admin.plc.reactivateIdentity`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Dev-Admin': 'true' },
         body: JSON.stringify({ did: identity.did }),
@@ -527,7 +528,7 @@ function OperationDetailModal({
     queryKey: ['admin', 'plc', 'operation', operation.cid],
     queryFn: async () => {
       const response = await fetch(
-        `/api/xrpc/io.exprsn.admin.plc.getOperation?did=${encodeURIComponent(did)}&cid=${encodeURIComponent(operation.cid)}`,
+        `${API_BASE}/xrpc/io.exprsn.admin.plc.getOperation?did=${encodeURIComponent(did)}&cid=${encodeURIComponent(operation.cid)}`,
         { headers: { 'X-Dev-Admin': 'true' } }
       );
       return response.json();
@@ -615,7 +616,7 @@ function HandlesTab() {
   const { data, isLoading } = useQuery({
     queryKey: ['admin', 'plc', 'reservations'],
     queryFn: async () => {
-      const response = await fetch('/api/xrpc/io.exprsn.admin.plc.listReservations', {
+      const response = await fetch(`${API_BASE}/xrpc/io.exprsn.admin.plc.listReservations`, {
         headers: { 'X-Dev-Admin': 'true' },
       });
       return response.json();
@@ -624,7 +625,7 @@ function HandlesTab() {
 
   const releaseMutation = useMutation({
     mutationFn: async (handle: string) => {
-      const response = await fetch('/api/xrpc/io.exprsn.plc.releaseHandle', {
+      const response = await fetch(`${API_BASE}/xrpc/io.exprsn.plc.releaseHandle`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Dev-Admin': 'true' },
         body: JSON.stringify({ handle }),
@@ -752,7 +753,7 @@ function ReserveHandleModal({
 
     setIsLoading(true);
     try {
-      const response = await fetch('/api/xrpc/io.exprsn.plc.reserveHandle', {
+      const response = await fetch(`${API_BASE}/xrpc/io.exprsn.plc.reserveHandle`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Dev-Admin': 'true' },
         body: JSON.stringify({ handle: handle.trim(), type: handleType }),
@@ -853,7 +854,7 @@ function ConfigTab() {
   const { data, isLoading } = useQuery({
     queryKey: ['admin', 'plc', 'config'],
     queryFn: async () => {
-      const response = await fetch('/api/xrpc/io.exprsn.admin.plc.getConfig', {
+      const response = await fetch(`${API_BASE}/xrpc/io.exprsn.admin.plc.getConfig`, {
         headers: { 'X-Dev-Admin': 'true' },
       });
       return response.json();
@@ -862,7 +863,7 @@ function ConfigTab() {
 
   const updateMutation = useMutation({
     mutationFn: async (config: Partial<PlcConfig>) => {
-      const response = await fetch('/api/xrpc/io.exprsn.admin.plc.updateConfig', {
+      const response = await fetch(`${API_BASE}/xrpc/io.exprsn.admin.plc.updateConfig`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Dev-Admin': 'true' },
         body: JSON.stringify(config),
@@ -1009,7 +1010,7 @@ function AuditTab() {
     queryKey: ['admin', 'plc', 'audit', selectedDid],
     queryFn: async () => {
       const params = selectedDid ? `?did=${encodeURIComponent(selectedDid)}` : '';
-      const response = await fetch(`/api/xrpc/io.exprsn.admin.plc.getAuditLog${params}`, {
+      const response = await fetch(`${API_BASE}/xrpc/io.exprsn.admin.plc.getAuditLog${params}`, {
         headers: { 'X-Dev-Admin': 'true' },
       });
       return response.json();

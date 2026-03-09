@@ -37,11 +37,11 @@ export function BrandSettings({
 
       const [campaignsRes, influencersRes] = await Promise.all([
         canViewCampaigns
-          ? api.get(`/xrpc/io.exprsn.org.brand.campaigns.list?organizationId=${organizationId}`)
-          : Promise.resolve({ campaigns: [] }),
+          ? api.get<{ campaigns: BrandCampaign[] }>(`/xrpc/io.exprsn.org.brand.campaigns.list?organizationId=${organizationId}`)
+          : Promise.resolve({ campaigns: [] as BrandCampaign[] }),
         canViewInfluencers
-          ? api.get(`/xrpc/io.exprsn.org.brand.influencers.list?organizationId=${organizationId}`)
-          : Promise.resolve({ connections: [] }),
+          ? api.get<{ connections: InfluencerConnection[] }>(`/xrpc/io.exprsn.org.brand.influencers.list?organizationId=${organizationId}`)
+          : Promise.resolve({ connections: [] as InfluencerConnection[] }),
       ]);
 
       setCampaigns(campaignsRes.campaigns || []);

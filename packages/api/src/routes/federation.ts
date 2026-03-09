@@ -2,11 +2,26 @@ import { Hono } from 'hono';
 import { ContentSync } from '../services/federation/ContentSync.js';
 import { FederatedSearch } from '../services/federation/FederatedSearch.js';
 import { ServiceAuth } from '../services/federation/ServiceAuth.js';
+import { createBlobSync } from '../services/federation/BlobSync.js';
 import { getServiceRegistry } from './registry.js';
 import { db } from '../db/index.js';
-import { eq, and, desc, gt } from 'drizzle-orm';
-import { repoRecords } from '../db/schema.js';
+import { eq, and, desc, gt, sql } from 'drizzle-orm';
+import { repoRecords, serviceRegistry, federationSyncState } from '../db/schema.js';
 import { adminAuthMiddleware, requirePermission, ADMIN_PERMISSIONS } from '../auth/middleware.js';
+import { nanoid } from 'nanoid';
+import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
+import * as schema from '../db/schema.js';
+
+// Lazy-loaded federation consumer to avoid circular deps
+let federationConsumer: Awaited<ReturnType<typeof import('../workers/federationConsumer.js').getFederationConsumer>> | null = null;
+
+async function getFederationConsumer() {
+  if (!federationConsumer) {
+    const { getFederationConsumer: getConsumer } = await import('../workers/federationConsumer.js');
+    federationConsumer = getConsumer(db as PostgresJsDatabase<typeof schema>);
+  }
+  return federationConsumer;
+}
 
 // Singleton instances
 let contentSync: ContentSync | null = null;
@@ -437,6 +452,341 @@ federationRouter.post('/io.exprsn.sync.pushToRemote', async (c) => {
     return c.json({ error: 'InternalError', message: 'Failed to push to remote' }, 500);
   }
 });
+
+// ===========================================
+// Federation Admin Endpoints
+// ===========================================
+
+/**
+ * POST io.exprsn.admin.addRelay
+ * Register an external relay for federation
+ */
+federationRouter.post(
+  '/io.exprsn.admin.addRelay',
+  adminAuthMiddleware,
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_EDIT),
+  async (c) => {
+    const body = await c.req.json<{
+      endpoint: string;
+      name?: string;
+      description?: string;
+      region?: string;
+      wantedCollections?: string[];
+      autoSubscribe?: boolean;
+    }>();
+
+    if (!body.endpoint) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing endpoint' }, 400);
+    }
+
+    // Validate endpoint URL
+    try {
+      new URL(body.endpoint);
+    } catch {
+      return c.json({ error: 'InvalidRequest', message: 'Invalid endpoint URL' }, 400);
+    }
+
+    try {
+      // Check if relay already exists
+      const existingRelays = await db
+        .select()
+        .from(serviceRegistry)
+        .where(eq(serviceRegistry.endpoint, body.endpoint))
+        .limit(1);
+
+      const existingRelay = existingRelays[0];
+      if (existingRelay) {
+        // Update existing
+        await db
+          .update(serviceRegistry)
+          .set({
+            status: 'active',
+            name: body.name || existingRelay.name,
+            description: body.description,
+            region: body.region || existingRelay.region,
+            updatedAt: new Date(),
+          })
+          .where(eq(serviceRegistry.endpoint, body.endpoint));
+
+        // Subscribe if requested
+        if (body.autoSubscribe !== false) {
+          const consumer = await getFederationConsumer();
+          await consumer.subscribeToRelay(body.endpoint, existingRelay.id);
+        }
+
+        return c.json({
+          success: true,
+          relay: {
+            id: existingRelay.id,
+            endpoint: body.endpoint,
+            status: 'active',
+            action: 'updated',
+          },
+        });
+      }
+
+      // Create new relay entry
+      const relayId = `relay_${nanoid(10)}`;
+      await db.insert(serviceRegistry).values({
+        id: relayId,
+        type: 'relay',
+        endpoint: body.endpoint,
+        name: body.name || `Relay ${body.endpoint}`,
+        description: body.description,
+        status: 'active',
+        region: body.region,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      // Subscribe if requested
+      if (body.autoSubscribe !== false) {
+        const consumer = await getFederationConsumer();
+        await consumer.subscribeToRelay(body.endpoint, relayId);
+      }
+
+      return c.json({
+        success: true,
+        relay: {
+          id: relayId,
+          endpoint: body.endpoint,
+          status: 'active',
+          action: 'created',
+        },
+      });
+    } catch (error) {
+      console.error('Add relay error:', error);
+      return c.json({ error: 'InternalError', message: 'Failed to add relay' }, 500);
+    }
+  }
+);
+
+/**
+ * DELETE io.exprsn.admin.removeRelay
+ * Remove an external relay from federation
+ */
+federationRouter.post(
+  '/io.exprsn.admin.removeRelay',
+  adminAuthMiddleware,
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_EDIT),
+  async (c) => {
+    const body = await c.req.json<{
+      relayId?: string;
+      endpoint?: string;
+      hardDelete?: boolean;
+    }>();
+
+    if (!body.relayId && !body.endpoint) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing relayId or endpoint' }, 400);
+    }
+
+    try {
+      const condition = body.relayId
+        ? eq(serviceRegistry.id, body.relayId)
+        : eq(serviceRegistry.endpoint, body.endpoint!);
+
+      // Get relay info first
+      const relays = await db
+        .select()
+        .from(serviceRegistry)
+        .where(condition)
+        .limit(1);
+
+      const relay = relays[0];
+      if (!relay) {
+        return c.json({ error: 'NotFound', message: 'Relay not found' }, 404);
+      }
+
+      // Unsubscribe from firehose
+      const consumer = await getFederationConsumer();
+      await consumer.unsubscribeFromRelay(relay.endpoint);
+
+      if (body.hardDelete) {
+        // Permanently delete
+        await db.delete(serviceRegistry).where(condition);
+
+        // Also delete sync state
+        await db
+          .delete(federationSyncState)
+          .where(eq(federationSyncState.remoteEndpoint, relay.endpoint));
+      } else {
+        // Soft delete (mark inactive)
+        await db
+          .update(serviceRegistry)
+          .set({
+            status: 'inactive',
+            updatedAt: new Date(),
+          })
+          .where(condition);
+      }
+
+      return c.json({
+        success: true,
+        relay: {
+          id: relay.id,
+          endpoint: relay.endpoint,
+          action: body.hardDelete ? 'deleted' : 'deactivated',
+        },
+      });
+    } catch (error) {
+      console.error('Remove relay error:', error);
+      return c.json({ error: 'InternalError', message: 'Failed to remove relay' }, 500);
+    }
+  }
+);
+
+/**
+ * GET io.exprsn.admin.federationStatus
+ * Get federation status including relay health and sync states
+ */
+federationRouter.get(
+  '/io.exprsn.admin.federationStatus',
+  adminAuthMiddleware,
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_VIEW),
+  async (c) => {
+    try {
+      // Get all registered relays
+      const relays = await db
+        .select()
+        .from(serviceRegistry)
+        .where(eq(serviceRegistry.type, 'relay'));
+
+      // Get sync states
+      const syncStates = await db.select().from(federationSyncState);
+
+      // Get consumer status
+      const consumer = await getFederationConsumer();
+      const subscriptionStatus = consumer.getStatus();
+
+      // Build relay status map
+      const relayStatus = relays.map((relay) => {
+        const syncState = syncStates.find((s) => s.remoteEndpoint === relay.endpoint);
+        const subStatus = subscriptionStatus.get(relay.endpoint);
+
+        return {
+          id: relay.id,
+          endpoint: relay.endpoint,
+          name: relay.name,
+          region: relay.region,
+          registryStatus: relay.status,
+          connectionStatus: subStatus?.status || 'not_connected',
+          lastSyncedSeq: syncState?.lastSyncedSeq ?? null,
+          lastSyncedAt: syncState?.lastSyncedAt?.toISOString() ?? null,
+          errorCount: subStatus?.errorCount ?? syncState?.errorCount ?? 0,
+          errorMessage: syncState?.errorMessage ?? null,
+          createdAt: relay.createdAt.toISOString(),
+        };
+      });
+
+      // Get counts
+      const activeRelays = relayStatus.filter((r) => r.connectionStatus === 'connected').length;
+      const totalSynced = syncStates.reduce((sum, s) => sum + (s.lastSyncedSeq || 0), 0);
+
+      // Get recent sync activity
+      const recentActivity = syncStates
+        .filter((s) => s.lastSyncedAt)
+        .sort((a, b) => (b.lastSyncedAt?.getTime() || 0) - (a.lastSyncedAt?.getTime() || 0))
+        .slice(0, 5)
+        .map((s) => ({
+          endpoint: s.remoteEndpoint,
+          lastSyncedAt: s.lastSyncedAt?.toISOString(),
+          status: s.status,
+        }));
+
+      return c.json({
+        summary: {
+          totalRelays: relays.length,
+          activeRelays,
+          totalEventsProcessed: totalSynced,
+          consumerRunning: subscriptionStatus.size > 0,
+        },
+        relays: relayStatus,
+        recentActivity,
+      });
+    } catch (error) {
+      console.error('Federation status error:', error);
+      return c.json({ error: 'InternalError', message: 'Failed to get federation status' }, 500);
+    }
+  }
+);
+
+/**
+ * POST io.exprsn.admin.startFederationConsumer
+ * Start the federation consumer worker
+ */
+federationRouter.post(
+  '/io.exprsn.admin.startFederationConsumer',
+  adminAuthMiddleware,
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_EDIT),
+  async (c) => {
+    try {
+      const consumer = await getFederationConsumer();
+      await consumer.start();
+
+      return c.json({
+        success: true,
+        message: 'Federation consumer started',
+      });
+    } catch (error) {
+      console.error('Start federation consumer error:', error);
+      return c.json({ error: 'InternalError', message: 'Failed to start federation consumer' }, 500);
+    }
+  }
+);
+
+/**
+ * POST io.exprsn.admin.stopFederationConsumer
+ * Stop the federation consumer worker
+ */
+federationRouter.post(
+  '/io.exprsn.admin.stopFederationConsumer',
+  adminAuthMiddleware,
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_EDIT),
+  async (c) => {
+    try {
+      const consumer = await getFederationConsumer();
+      await consumer.stop();
+
+      return c.json({
+        success: true,
+        message: 'Federation consumer stopped',
+      });
+    } catch (error) {
+      console.error('Stop federation consumer error:', error);
+      return c.json({ error: 'InternalError', message: 'Failed to stop federation consumer' }, 500);
+    }
+  }
+);
+
+/**
+ * POST io.exprsn.admin.syncBlobManual
+ * Manually sync a blob from a remote DID
+ */
+federationRouter.post(
+  '/io.exprsn.admin.syncBlobManual',
+  adminAuthMiddleware,
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_EDIT),
+  async (c) => {
+    const body = await c.req.json<{
+      did: string;
+      cid: string;
+    }>();
+
+    if (!body.did || !body.cid) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing did or cid' }, 400);
+    }
+
+    try {
+      const blobSync = createBlobSync(db as PostgresJsDatabase<typeof schema>);
+      const result = await blobSync.syncBlob(body.did, body.cid);
+
+      return c.json(result);
+    } catch (error) {
+      console.error('Manual blob sync error:', error);
+      return c.json({ error: 'InternalError', message: 'Failed to sync blob' }, 500);
+    }
+  }
+);
 
 export { federationRouter };
 export default federationRouter;

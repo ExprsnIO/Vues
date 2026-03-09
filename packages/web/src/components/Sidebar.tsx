@@ -70,7 +70,9 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
   }, [isOpen, settingsOpen]);
 
   return (
-    <SidebarContext.Provider value={{ isOpen, toggle, close, settingsOpen, openSettings, closeSettings }}>
+    <SidebarContext.Provider
+      value={{ isOpen, toggle, close, settingsOpen, openSettings, closeSettings }}
+    >
       {children}
     </SidebarContext.Provider>
   );
@@ -98,20 +100,13 @@ export function Sidebar() {
   });
 
   const unreadCount = notificationData?.count || 0;
-  const unreadMessageCount = conversationsData?.conversations?.reduce(
-    (sum, c) => sum + (c.unreadCount || 0),
-    0
-  ) || 0;
+  const unreadMessageCount =
+    conversationsData?.conversations?.reduce((sum, c) => sum + (c.unreadCount || 0), 0) || 0;
 
   return (
     <>
       {/* Mobile overlay */}
-      {isOpen && (
-        <div
-          className="fixed inset-0 bg-black/60 z-40 lg:hidden"
-          onClick={close}
-        />
-      )}
+      {isOpen && <div className="fixed inset-0 bg-black/60 z-40 lg:hidden" onClick={close} />}
 
       {/* Sidebar */}
       <aside
@@ -131,10 +126,7 @@ export function Sidebar() {
             <span className="text-xl font-bold text-text-primary">exprsn</span>
           </Link>
           {/* Close button on mobile */}
-          <button
-            onClick={close}
-            className="lg:hidden p-2 text-text-muted hover:text-text-primary"
-          >
+          <button onClick={close} className="lg:hidden p-2 text-text-muted hover:text-text-primary">
             <CloseIcon className="w-5 h-5" />
           </button>
         </div>
@@ -143,8 +135,7 @@ export function Sidebar() {
         <nav className="flex-1 px-2 py-4 space-y-1">
           {NAV_ITEMS.map((item) => {
             const isActive =
-              pathname === item.href ||
-              (item.href !== '/' && pathname.startsWith(item.href));
+              pathname === item.href || (item.href !== '/' && pathname.startsWith(item.href));
             const Icon = item.icon;
 
             return (
@@ -287,8 +278,7 @@ export function MobileBottomNav() {
     <nav className="lg:hidden fixed bottom-0 left-0 right-0 h-16 bg-background-alt border-t border-border z-30 flex items-center justify-around px-2">
       {NAV_ITEMS.slice(0, 4).map((item) => {
         const isActive =
-          pathname === item.href ||
-          (item.href !== '/' && pathname.startsWith(item.href));
+          pathname === item.href || (item.href !== '/' && pathname.startsWith(item.href));
         const Icon = item.icon;
 
         return (
@@ -305,10 +295,7 @@ export function MobileBottomNav() {
           </Link>
         );
       })}
-      <Link
-        href="/upload"
-        className="flex flex-col items-center gap-1 p-2 text-accent"
-      >
+      <Link href="/upload" className="flex flex-col items-center gap-1 p-2 text-accent">
         <div className="w-8 h-8 bg-gradient-to-r from-primary-500 to-primary-600 rounded-lg flex items-center justify-center">
           <PlusIcon className="w-5 h-5 text-white" />
         </div>
@@ -409,7 +396,9 @@ function OrganizationSwitcher({ user, signOut }: OrganizationSwitcherProps) {
             {currentContext.type === 'org' ? 'Organization' : 'Personal Account'}
           </div>
         </div>
-        <ChevronIcon className={cn('w-4 h-4 text-text-muted transition-transform', isOpen && 'rotate-180')} />
+        <ChevronIcon
+          className={cn('w-4 h-4 text-text-muted transition-transform', isOpen && 'rotate-180')}
+        />
       </button>
 
       {/* Dropdown Menu */}
@@ -436,9 +425,7 @@ function OrganizationSwitcher({ user, signOut }: OrganizationSwitcherProps) {
               )}
             </div>
             <div className="flex-1 min-w-0 text-left">
-              <div className="text-text-primary text-sm font-medium truncate">
-                @{user.handle}
-              </div>
+              <div className="text-text-primary text-sm font-medium truncate">@{user.handle}</div>
               <div className="text-text-muted text-xs">Personal Account</div>
             </div>
             {!activeOrganization && <CheckIcon className="w-4 h-4 text-accent" />}
@@ -485,7 +472,9 @@ function OrganizationSwitcher({ user, signOut }: OrganizationSwitcherProps) {
                       <span className="text-text-primary text-sm font-medium truncate">
                         {org.displayName || org.name}
                       </span>
-                      {org.verified && <VerifiedBadge className="w-3.5 h-3.5 text-accent flex-shrink-0" />}
+                      {org.verified && (
+                        <VerifiedBadge className="w-3.5 h-3.5 text-accent flex-shrink-0" />
+                      )}
                     </div>
                     <div className="flex items-center gap-1.5">
                       <span
@@ -534,6 +523,14 @@ function OrganizationSwitcher({ user, signOut }: OrganizationSwitcherProps) {
 
           {/* Profile and Sign Out */}
           <Link
+            href="/docs"
+            onClick={() => setIsOpen(false)}
+            className="flex items-center gap-3 px-3 py-2.5 hover:bg-surface-hover transition-colors text-text-muted hover:text-text-primary"
+          >
+            <DocumentationIcon className="w-5 h-5" />
+            <span className="text-sm">Documentation</span>
+          </Link>
+          <Link
             href={`/profile/${user.handle}`}
             onClick={() => setIsOpen(false)}
             className="flex items-center gap-3 px-3 py-2.5 hover:bg-surface-hover transition-colors text-text-muted hover:text-text-primary"
@@ -567,27 +564,37 @@ function OrganizationSwitcher({ user, signOut }: OrganizationSwitcherProps) {
 
 function MenuIcon({ className }: { className?: string }) {
   return (
-    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-      <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
+    <svg
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      viewBox="0 0 24 24"
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5"
+      />
     </svg>
   );
 }
 
 function CloseIcon({ className }: { className?: string }) {
   return (
-    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+    <svg
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      viewBox="0 0 24 24"
+    >
       <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
     </svg>
   );
 }
 
-function HomeIcon({
-  className,
-  filled,
-}: {
-  className?: string;
-  filled?: boolean;
-}) {
+function HomeIcon({ className, filled }: { className?: string; filled?: boolean }) {
   return (
     <svg
       className={className}
@@ -605,13 +612,7 @@ function HomeIcon({
   );
 }
 
-function FollowingIcon({
-  className,
-  filled,
-}: {
-  className?: string;
-  filled?: boolean;
-}) {
+function FollowingIcon({ className, filled }: { className?: string; filled?: boolean }) {
   return (
     <svg
       className={className}
@@ -629,13 +630,7 @@ function FollowingIcon({
   );
 }
 
-function DiscoverIcon({
-  className,
-  filled,
-}: {
-  className?: string;
-  filled?: boolean;
-}) {
+function DiscoverIcon({ className, filled }: { className?: string; filled?: boolean }) {
   return (
     <svg
       className={className}
@@ -662,11 +657,7 @@ function PlusIcon({ className }: { className?: string }) {
       strokeWidth={2}
       viewBox="0 0 24 24"
     >
-      <path
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        d="M12 4.5v15m7.5-7.5h-15"
-      />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
     </svg>
   );
 }
@@ -689,13 +680,7 @@ function LogoutIcon({ className }: { className?: string }) {
   );
 }
 
-function NotificationIcon({
-  className,
-  filled,
-}: {
-  className?: string;
-  filled?: boolean;
-}) {
+function NotificationIcon({ className, filled }: { className?: string; filled?: boolean }) {
   return (
     <svg
       className={className}
@@ -713,13 +698,7 @@ function NotificationIcon({
   );
 }
 
-function BookmarkIcon({
-  className,
-  filled,
-}: {
-  className?: string;
-  filled?: boolean;
-}) {
+function BookmarkIcon({ className, filled }: { className?: string; filled?: boolean }) {
   return (
     <svg
       className={className}
@@ -751,22 +730,12 @@ function SettingsIcon({ className }: { className?: string }) {
         strokeLinejoin="round"
         d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.324.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.24-.438.613-.431.992a6.759 6.759 0 010 .255c-.007.378.138.75.43.99l1.005.828c.424.35.534.954.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.57 6.57 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.28c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.02-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.992a6.932 6.932 0 010-.255c.007-.378-.138-.75-.43-.99l-1.004-.828a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.281z"
       />
-      <path
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
-      />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
     </svg>
   );
 }
 
-function MessagesIcon({
-  className,
-  filled,
-}: {
-  className?: string;
-  filled?: boolean;
-}) {
+function MessagesIcon({ className, filled }: { className?: string; filled?: boolean }) {
   return (
     <svg
       className={className}
@@ -786,7 +755,13 @@ function MessagesIcon({
 
 function ChevronIcon({ className }: { className?: string }) {
   return (
-    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+    <svg
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      viewBox="0 0 24 24"
+    >
       <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
     </svg>
   );
@@ -794,7 +769,13 @@ function ChevronIcon({ className }: { className?: string }) {
 
 function CheckIcon({ className }: { className?: string }) {
   return (
-    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+    <svg
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      viewBox="0 0 24 24"
+    >
       <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
     </svg>
   );
@@ -803,32 +784,83 @@ function CheckIcon({ className }: { className?: string }) {
 function VerifiedBadge({ className }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 24 24" fill="currentColor">
-      <path fillRule="evenodd" d="M8.603 3.799A4.49 4.49 0 0112 2.25c1.357 0 2.573.6 3.397 1.549a4.49 4.49 0 013.498 1.307 4.491 4.491 0 011.307 3.497A4.49 4.49 0 0121.75 12a4.49 4.49 0 01-1.549 3.397 4.491 4.491 0 01-1.307 3.497 4.491 4.491 0 01-3.497 1.307A4.49 4.49 0 0112 21.75a4.49 4.49 0 01-3.397-1.549 4.49 4.49 0 01-3.498-1.306 4.491 4.491 0 01-1.307-3.498A4.49 4.49 0 012.25 12c0-1.357.6-2.573 1.549-3.397a4.49 4.49 0 011.307-3.497 4.49 4.49 0 013.497-1.307zm7.007 6.387a.75.75 0 10-1.22-.872l-3.236 4.53L9.53 12.22a.75.75 0 00-1.06 1.06l2.25 2.25a.75.75 0 001.14-.094l3.75-5.25z" clipRule="evenodd" />
+      <path
+        fillRule="evenodd"
+        d="M8.603 3.799A4.49 4.49 0 0112 2.25c1.357 0 2.573.6 3.397 1.549a4.49 4.49 0 013.498 1.307 4.491 4.491 0 011.307 3.497A4.49 4.49 0 0121.75 12a4.49 4.49 0 01-1.549 3.397 4.491 4.491 0 01-1.307 3.497 4.491 4.491 0 01-3.497 1.307A4.49 4.49 0 0112 21.75a4.49 4.49 0 01-3.397-1.549 4.49 4.49 0 01-3.498-1.306 4.491 4.491 0 01-1.307-3.498A4.49 4.49 0 012.25 12c0-1.357.6-2.573 1.549-3.397a4.49 4.49 0 011.307-3.497 4.49 4.49 0 013.497-1.307zm7.007 6.387a.75.75 0 10-1.22-.872l-3.236 4.53L9.53 12.22a.75.75 0 00-1.06 1.06l2.25 2.25a.75.75 0 001.14-.094l3.75-5.25z"
+        clipRule="evenodd"
+      />
     </svg>
   );
 }
 
 function OrgSettingsIcon({ className }: { className?: string }) {
   return (
-    <svg className={className} fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
-      <path strokeLinecap="round" strokeLinejoin="round" d="M18 18.72a9.094 9.094 0 003.741-.479 3 3 0 00-4.682-2.72m.94 3.198l.001.031c0 .225-.012.447-.037.666A11.944 11.944 0 0112 21c-2.17 0-4.207-.576-5.963-1.584A6.062 6.062 0 016 18.719m12 0a5.971 5.971 0 00-.941-3.197m0 0A5.995 5.995 0 0012 12.75a5.995 5.995 0 00-5.058 2.772m0 0a3 3 0 00-4.681 2.72 8.986 8.986 0 003.74.477m.94-3.197a5.971 5.971 0 00-.94 3.197M15 6.75a3 3 0 11-6 0 3 3 0 016 0zm6 3a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0zm-13.5 0a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0z" />
+    <svg
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.5}
+      viewBox="0 0 24 24"
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M18 18.72a9.094 9.094 0 003.741-.479 3 3 0 00-4.682-2.72m.94 3.198l.001.031c0 .225-.012.447-.037.666A11.944 11.944 0 0112 21c-2.17 0-4.207-.576-5.963-1.584A6.062 6.062 0 016 18.719m12 0a5.971 5.971 0 00-.941-3.197m0 0A5.995 5.995 0 0012 12.75a5.995 5.995 0 00-5.058 2.772m0 0a3 3 0 00-4.681 2.72 8.986 8.986 0 003.74.477m.94-3.197a5.971 5.971 0 00-.94 3.197M15 6.75a3 3 0 11-6 0 3 3 0 016 0zm6 3a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0zm-13.5 0a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0z"
+      />
+    </svg>
+  );
+}
+
+function DocumentationIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.5}
+      viewBox="0 0 24 24"
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M9.88 9a3 3 0 115.24 2.122c-.82.838-1.62 1.414-1.62 2.378V15m.75 4.5h.008v.008h-.008V19.5zm7.5-7.5a9 9 0 11-18 0 9 9 0 0118 0z"
+      />
     </svg>
   );
 }
 
 function ShieldIcon({ className }: { className?: string }) {
   return (
-    <svg className={className} fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
-      <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" />
+    <svg
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.5}
+      viewBox="0 0 24 24"
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z"
+      />
     </svg>
   );
 }
 
 function UserCircleIcon({ className }: { className?: string }) {
   return (
-    <svg className={className} fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
-      <path strokeLinecap="round" strokeLinejoin="round" d="M17.982 18.725A7.488 7.488 0 0012 15.75a7.488 7.488 0 00-5.982 2.975m11.963 0a9 9 0 10-11.963 0m11.963 0A8.966 8.966 0 0112 21a8.966 8.966 0 01-5.982-2.275M15 9.75a3 3 0 11-6 0 3 3 0 016 0z" />
+    <svg
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.5}
+      viewBox="0 0 24 24"
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M17.982 18.725A7.488 7.488 0 0012 15.75a7.488 7.488 0 00-5.982 2.975m11.963 0a9 9 0 10-11.963 0m11.963 0A8.966 8.966 0 0112 21a8.966 8.966 0 01-5.982-2.275M15 9.75a3 3 0 11-6 0 3 3 0 016 0z"
+      />
     </svg>
   );
 }
-

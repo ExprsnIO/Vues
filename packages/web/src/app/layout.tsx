@@ -1,11 +1,18 @@
 import type { Metadata, Viewport } from 'next';
-import { Inter } from 'next/font/google';
+import localFont from 'next/font/local';
 import './globals.css';
 import { Providers } from './providers';
 
-const inter = Inter({
-  subsets: ['latin'],
-  variable: '--font-inter',
+const sansFont = localFont({
+  src: './fonts/InterVariable.woff2',
+  variable: '--font-sans',
+  display: 'swap',
+});
+
+const dyslexicFont = localFont({
+  src: './fonts/OpenDyslexic-Regular.ttf',
+  variable: '--font-dyslexic',
+  display: 'swap',
 });
 
 export const metadata: Metadata = {
@@ -41,7 +48,12 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" className={`${inter.variable} dark`} data-theme="slate" data-color-mode="dark">
+    <html
+      lang="en"
+      className={`${sansFont.variable} ${dyslexicFont.variable} dark`}
+      data-theme="slate"
+      data-color-mode="dark"
+    >
       <body className="bg-background text-text-primary antialiased">
         <Providers>{children}</Providers>
       </body>

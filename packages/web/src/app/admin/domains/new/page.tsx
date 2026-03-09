@@ -7,7 +7,7 @@ import Link from 'next/link';
 import { api } from '@/lib/api';
 import toast from 'react-hot-toast';
 
-type Step = 'basic' | 'verification' | 'services' | 'complete';
+type Step = 'basic' | 'verification' | 'services' | 'certificates' | 'complete';
 type DomainType = 'hosted' | 'federated';
 
 interface FormData {
@@ -31,6 +31,13 @@ interface FormData {
     dailyUploadLimit: number;
     storageQuotaGb: number;
   };
+  certificates: {
+    createIntermediate: boolean;
+    createServerCert: boolean;
+    createCodeSigningCert: boolean;
+    serverSans: string[];
+    intermediateName: string;
+  };
 }
 
 const DEFAULT_FEATURES = {
@@ -50,6 +57,14 @@ const DEFAULT_RATE_LIMITS = {
   storageQuotaGb: 10,
 };
 
+const DEFAULT_CERTIFICATES = {
+  createIntermediate: true,
+  createServerCert: true,
+  createCodeSigningCert: true,
+  serverSans: [] as string[],
+  intermediateName: '',
+};
+
 export default function NewDomainPage() {
   const router = useRouter();
   const [step, setStep] = useState<Step>('basic');
@@ -66,6 +81,7 @@ export default function NewDomainPage() {
     pdsEndpoint: '',
     features: DEFAULT_FEATURES,
     rateLimits: DEFAULT_RATE_LIMITS,
+    certificates: DEFAULT_CERTIFICATES,
   });
 
   const createMutation = useMutation({
@@ -124,8 +140,16 @@ export default function NewDomainPage() {
     { id: 'basic', label: 'Basic Info', number: 1 },
     { id: 'verification', label: 'Verification', number: 2 },
     { id: 'services', label: 'Services', number: 3 },
-    { id: 'complete', label: 'Complete', number: 4 },
+    { id: 'certificates', label: 'Certificates', number: 4 },
+    { id: 'complete', label: 'Complete', number: 5 },
   ];
+
+  const updateCertificates = (key: keyof FormData['certificates'], value: any) => {
+    setFormData((prev) => ({
+      ...prev,
+      certificates: { ...prev.certificates, [key]: value },
+    }));
+  };
 
   const currentStepIndex = steps.findIndex((s) => s.id === step);
 
@@ -203,8 +227,17 @@ export default function NewDomainPage() {
             rateLimits={formData.rateLimits}
             updateFeature={updateFeature}
             updateRateLimit={updateRateLimit}
-            onNext={() => setStep('complete')}
+            onNext={() => setStep('certificates')}
             onBack={() => setStep('verification')}
+          />
+        )}
+        {step === 'certificates' && (
+          <CertificatesStep
+            domain={formData.domain}
+            certificates={formData.certificates}
+            updateCertificates={updateCertificates}
+            onNext={() => setStep('complete')}
+            onBack={() => setStep('services')}
           />
         )}
         {step === 'complete' && createdDomain && (
@@ -546,6 +579,232 @@ function ServicesStep({
           onClick={onNext}
           className="px-6 py-2 bg-accent hover:bg-accent-hover text-text-inverse rounded-lg transition-colors"
         >
+          Continue
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// Certificates Step
+function CertificatesStep({
+  domain,
+  certificates,
+  updateCertificates,
+  onNext,
+  onBack,
+}: {
+  domain: string;
+  certificates: FormData['certificates'];
+  updateCertificates: (key: keyof FormData['certificates'], value: any) => void;
+  onNext: () => void;
+  onBack: () => void;
+}) {
+  const [newSan, setNewSan] = useState('');
+
+  const addSan = () => {
+    if (newSan.trim() && !certificates.serverSans.includes(newSan.trim())) {
+      updateCertificates('serverSans', [...certificates.serverSans, newSan.trim()]);
+      setNewSan('');
+    }
+  };
+
+  const removeSan = (san: string) => {
+    updateCertificates('serverSans', certificates.serverSans.filter((s) => s !== san));
+  };
+
+  // Default SANs that will be included
+  const defaultSans = domain ? [
+    domain,
+    `*.${domain}`,
+    `pds.${domain}`,
+    `api.${domain}`,
+  ] : [];
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h2 className="text-lg font-semibold text-text-primary mb-1">Certificate Configuration</h2>
+        <p className="text-text-muted text-sm">
+          Configure SSL/TLS certificates and code signing for your domain
+        </p>
+      </div>
+
+      <div className="bg-blue-500/10 border border-blue-500/30 rounded-lg p-4">
+        <div className="flex items-start gap-3">
+          <InfoIcon className="w-5 h-5 text-blue-400 mt-0.5" />
+          <div>
+            <p className="text-blue-400 font-medium text-sm">Automatic Certificate Generation</p>
+            <p className="text-text-muted text-sm mt-1">
+              Certificates will be automatically generated when the domain is created. You can customize the settings below.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div className="space-y-4">
+        {/* Intermediate CA */}
+        <div className="flex items-center justify-between p-4 bg-background rounded-lg border border-border">
+          <div>
+            <div className="flex items-center gap-2">
+              <CertIcon className="w-5 h-5 text-purple-400" />
+              <span className="font-medium text-text-primary">Intermediate CA</span>
+            </div>
+            <p className="text-text-muted text-sm mt-1">
+              Create an intermediate certificate authority for this domain
+            </p>
+          </div>
+          <button
+            onClick={() => updateCertificates('createIntermediate', !certificates.createIntermediate)}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+              certificates.createIntermediate ? 'bg-accent' : 'bg-surface-hover'
+            }`}
+          >
+            <span
+              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                certificates.createIntermediate ? 'translate-x-6' : 'translate-x-1'
+              }`}
+            />
+          </button>
+        </div>
+
+        {certificates.createIntermediate && (
+          <div className="ml-8 p-4 bg-surface rounded-lg border border-border">
+            <label className="block text-sm font-medium text-text-primary mb-1">
+              Intermediate CA Name
+            </label>
+            <input
+              type="text"
+              value={certificates.intermediateName}
+              onChange={(e) => updateCertificates('intermediateName', e.target.value)}
+              placeholder={`${domain} Intermediate CA`}
+              className="w-full px-4 py-2 bg-background border border-border rounded-lg text-text-primary placeholder:text-text-muted"
+            />
+          </div>
+        )}
+
+        {/* Server Certificate */}
+        <div className="flex items-center justify-between p-4 bg-background rounded-lg border border-border">
+          <div>
+            <div className="flex items-center gap-2">
+              <LockIcon className="w-5 h-5 text-green-400" />
+              <span className="font-medium text-text-primary">Server Certificate</span>
+            </div>
+            <p className="text-text-muted text-sm mt-1">
+              Create SSL/TLS certificate for HTTPS connections
+            </p>
+          </div>
+          <button
+            onClick={() => updateCertificates('createServerCert', !certificates.createServerCert)}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+              certificates.createServerCert ? 'bg-accent' : 'bg-surface-hover'
+            }`}
+          >
+            <span
+              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                certificates.createServerCert ? 'translate-x-6' : 'translate-x-1'
+              }`}
+            />
+          </button>
+        </div>
+
+        {certificates.createServerCert && (
+          <div className="ml-8 p-4 bg-surface rounded-lg border border-border space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-text-primary mb-2">
+                Default Subject Alternative Names
+              </label>
+              <div className="flex flex-wrap gap-2">
+                {defaultSans.map((san) => (
+                  <span
+                    key={san}
+                    className="px-3 py-1 bg-surface-hover text-text-secondary text-sm rounded-full"
+                  >
+                    {san}
+                  </span>
+                ))}
+              </div>
+              <p className="text-text-muted text-xs mt-2">
+                These SANs will be automatically included in the server certificate
+              </p>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-text-primary mb-2">
+                Additional SANs (optional)
+              </label>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={newSan}
+                  onChange={(e) => setNewSan(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), addSan())}
+                  placeholder="subdomain.example.com"
+                  className="flex-1 px-4 py-2 bg-background border border-border rounded-lg text-text-primary placeholder:text-text-muted"
+                />
+                <button
+                  onClick={addSan}
+                  className="px-4 py-2 bg-surface-hover hover:bg-background text-text-primary rounded-lg"
+                >
+                  Add
+                </button>
+              </div>
+              {certificates.serverSans.length > 0 && (
+                <div className="flex flex-wrap gap-2 mt-2">
+                  {certificates.serverSans.map((san) => (
+                    <span
+                      key={san}
+                      className="inline-flex items-center gap-1 px-3 py-1 bg-accent/10 text-accent text-sm rounded-full"
+                    >
+                      {san}
+                      <button onClick={() => removeSan(san)} className="hover:text-accent-hover">
+                        &times;
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Code Signing Certificate */}
+        <div className="flex items-center justify-between p-4 bg-background rounded-lg border border-border">
+          <div>
+            <div className="flex items-center gap-2">
+              <CodeIcon className="w-5 h-5 text-orange-400" />
+              <span className="font-medium text-text-primary">Code Signing Certificate</span>
+            </div>
+            <p className="text-text-muted text-sm mt-1">
+              Create certificate for signing code and packages
+            </p>
+          </div>
+          <button
+            onClick={() => updateCertificates('createCodeSigningCert', !certificates.createCodeSigningCert)}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+              certificates.createCodeSigningCert ? 'bg-accent' : 'bg-surface-hover'
+            }`}
+          >
+            <span
+              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                certificates.createCodeSigningCert ? 'translate-x-6' : 'translate-x-1'
+              }`}
+            />
+          </button>
+        </div>
+      </div>
+
+      <div className="flex justify-between pt-4 border-t border-border">
+        <button
+          onClick={onBack}
+          className="px-6 py-2 text-text-muted hover:text-text-primary transition-colors"
+        >
+          Back
+        </button>
+        <button
+          onClick={onNext}
+          className="px-6 py-2 bg-accent hover:bg-accent-hover text-text-inverse rounded-lg transition-colors"
+        >
           Complete Setup
         </button>
       </div>
@@ -621,6 +880,38 @@ function CheckIcon({ className }: { className?: string }) {
   return (
     <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
       <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+    </svg>
+  );
+}
+
+function InfoIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z" />
+    </svg>
+  );
+}
+
+function CertIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" />
+    </svg>
+  );
+}
+
+function LockIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z" />
+    </svg>
+  );
+}
+
+function CodeIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M17.25 6.75L22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3l-4.5 16.5" />
     </svg>
   );
 }

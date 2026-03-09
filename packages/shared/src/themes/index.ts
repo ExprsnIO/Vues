@@ -358,6 +358,361 @@ const lavenderLight: ThemeColors = {
 };
 
 // ============================================================================
+// MIDNIGHT THEME (Deep Indigo/Navy)
+// ============================================================================
+const midnightDark: ThemeColors = {
+  background: '#080812',
+  backgroundAlt: '#0d0d1a',
+  surface: '#121225',
+  surfaceHover: '#1a1a35',
+
+  textPrimary: '#eef2ff',
+  textSecondary: '#a5b4fc',
+  textMuted: '#818cf8',
+  textInverse: '#080812',
+
+  accent: '#6366f1',
+  accentHover: '#818cf8',
+  accentMuted: '#1e1e4a',
+
+  interactive: '#818cf8',
+  interactiveHover: '#a5b4fc',
+
+  border: '#252550',
+  borderHover: '#353570',
+  borderFocus: '#6366f1',
+
+  success: '#4ade80',
+  successMuted: '#0d3d1a',
+  warning: '#fbbf24',
+  warningMuted: '#3d3414',
+  error: '#fb7185',
+  errorMuted: '#3d1a24',
+  info: '#60a5fa',
+  infoMuted: '#1a2d3d',
+
+  overlay: 'rgba(8, 8, 18, 0.85)',
+};
+
+const midnightLight: ThemeColors = {
+  background: '#eef2ff',
+  backgroundAlt: '#e0e7ff',
+  surface: '#ffffff',
+  surfaceHover: '#eef2ff',
+
+  textPrimary: '#1e1b4b',
+  textSecondary: '#3730a3',
+  textMuted: '#4f46e5',
+  textInverse: '#eef2ff',
+
+  accent: '#4f46e5',
+  accentHover: '#4338ca',
+  accentMuted: '#e0e7ff',
+
+  interactive: '#4338ca',
+  interactiveHover: '#3730a3',
+
+  border: '#c7d2fe',
+  borderHover: '#a5b4fc',
+  borderFocus: '#4f46e5',
+
+  success: '#16a34a',
+  successMuted: '#dcfce7',
+  warning: '#d97706',
+  warningMuted: '#fef3c7',
+  error: '#dc2626',
+  errorMuted: '#fee2e2',
+  info: '#2563eb',
+  infoMuted: '#dbeafe',
+
+  overlay: 'rgba(30, 27, 75, 0.5)',
+};
+
+// ============================================================================
+// ROSE THEME (Pink/Rose tones)
+// ============================================================================
+const roseDark: ThemeColors = {
+  background: '#18080f',
+  backgroundAlt: '#200d16',
+  surface: '#2a1320',
+  surfaceHover: '#3d1a2d',
+
+  textPrimary: '#fff1f2',
+  textSecondary: '#fda4af',
+  textMuted: '#fb7185',
+  textInverse: '#18080f',
+
+  accent: '#f43f5e',
+  accentHover: '#fb7185',
+  accentMuted: '#4a1525',
+
+  interactive: '#fb7185',
+  interactiveHover: '#fda4af',
+
+  border: '#4d1a2a',
+  borderHover: '#6d2540',
+  borderFocus: '#f43f5e',
+
+  success: '#4ade80',
+  successMuted: '#0d3d1a',
+  warning: '#fbbf24',
+  warningMuted: '#3d3414',
+  error: '#fb7185',
+  errorMuted: '#3d1a24',
+  info: '#60a5fa',
+  infoMuted: '#1a2d3d',
+
+  overlay: 'rgba(24, 8, 15, 0.85)',
+};
+
+const roseLight: ThemeColors = {
+  background: '#fff1f2',
+  backgroundAlt: '#ffe4e6',
+  surface: '#ffffff',
+  surfaceHover: '#fff1f2',
+
+  textPrimary: '#881337',
+  textSecondary: '#be123c',
+  textMuted: '#e11d48',
+  textInverse: '#fff1f2',
+
+  accent: '#e11d48',
+  accentHover: '#be123c',
+  accentMuted: '#ffe4e6',
+
+  interactive: '#be123c',
+  interactiveHover: '#9f1239',
+
+  border: '#fecdd3',
+  borderHover: '#fda4af',
+  borderFocus: '#e11d48',
+
+  success: '#16a34a',
+  successMuted: '#dcfce7',
+  warning: '#d97706',
+  warningMuted: '#fef3c7',
+  error: '#dc2626',
+  errorMuted: '#fee2e2',
+  info: '#2563eb',
+  infoMuted: '#dbeafe',
+
+  overlay: 'rgba(136, 19, 55, 0.5)',
+};
+
+// ============================================================================
+// EMBER THEME (Red/Warm Crimson)
+// ============================================================================
+const emberDark: ThemeColors = {
+  background: '#1a0808',
+  backgroundAlt: '#260d0d',
+  surface: '#331212',
+  surfaceHover: '#451a1a',
+
+  textPrimary: '#fef2f2',
+  textSecondary: '#fca5a5',
+  textMuted: '#f87171',
+  textInverse: '#1a0808',
+
+  accent: '#ef4444',
+  accentHover: '#f87171',
+  accentMuted: '#4a1515',
+
+  interactive: '#f87171',
+  interactiveHover: '#fca5a5',
+
+  border: '#4d1a1a',
+  borderHover: '#6d2525',
+  borderFocus: '#ef4444',
+
+  success: '#4ade80',
+  successMuted: '#0d3d1a',
+  warning: '#fbbf24',
+  warningMuted: '#3d3414',
+  error: '#f87171',
+  errorMuted: '#3d1a1a',
+  info: '#60a5fa',
+  infoMuted: '#1a2d3d',
+
+  overlay: 'rgba(26, 8, 8, 0.85)',
+};
+
+const emberLight: ThemeColors = {
+  background: '#fef2f2',
+  backgroundAlt: '#fee2e2',
+  surface: '#ffffff',
+  surfaceHover: '#fef2f2',
+
+  textPrimary: '#7f1d1d',
+  textSecondary: '#991b1b',
+  textMuted: '#dc2626',
+  textInverse: '#fef2f2',
+
+  accent: '#dc2626',
+  accentHover: '#b91c1c',
+  accentMuted: '#fee2e2',
+
+  interactive: '#b91c1c',
+  interactiveHover: '#991b1b',
+
+  border: '#fecaca',
+  borderHover: '#fca5a5',
+  borderFocus: '#dc2626',
+
+  success: '#16a34a',
+  successMuted: '#dcfce7',
+  warning: '#d97706',
+  warningMuted: '#fef3c7',
+  error: '#dc2626',
+  errorMuted: '#fee2e2',
+  info: '#2563eb',
+  infoMuted: '#dbeafe',
+
+  overlay: 'rgba(127, 29, 29, 0.5)',
+};
+
+// ============================================================================
+// MINT THEME (Teal/Cyan)
+// ============================================================================
+const mintDark: ThemeColors = {
+  background: '#051a1a',
+  backgroundAlt: '#0a2525',
+  surface: '#0f3030',
+  surfaceHover: '#154040',
+
+  textPrimary: '#f0fdfa',
+  textSecondary: '#5eead4',
+  textMuted: '#2dd4bf',
+  textInverse: '#051a1a',
+
+  accent: '#14b8a6',
+  accentHover: '#2dd4bf',
+  accentMuted: '#0a3d3d',
+
+  interactive: '#2dd4bf',
+  interactiveHover: '#5eead4',
+
+  border: '#1a4d4d',
+  borderHover: '#256060',
+  borderFocus: '#14b8a6',
+
+  success: '#4ade80',
+  successMuted: '#0d3d1a',
+  warning: '#fbbf24',
+  warningMuted: '#3d3414',
+  error: '#fb7185',
+  errorMuted: '#3d1a24',
+  info: '#60a5fa',
+  infoMuted: '#1a2d3d',
+
+  overlay: 'rgba(5, 26, 26, 0.85)',
+};
+
+const mintLight: ThemeColors = {
+  background: '#f0fdfa',
+  backgroundAlt: '#ccfbf1',
+  surface: '#ffffff',
+  surfaceHover: '#f0fdfa',
+
+  textPrimary: '#134e4a',
+  textSecondary: '#115e59',
+  textMuted: '#0d9488',
+  textInverse: '#f0fdfa',
+
+  accent: '#0d9488',
+  accentHover: '#0f766e',
+  accentMuted: '#ccfbf1',
+
+  interactive: '#0f766e',
+  interactiveHover: '#115e59',
+
+  border: '#99f6e4',
+  borderHover: '#5eead4',
+  borderFocus: '#0d9488',
+
+  success: '#16a34a',
+  successMuted: '#dcfce7',
+  warning: '#d97706',
+  warningMuted: '#fef3c7',
+  error: '#dc2626',
+  errorMuted: '#fee2e2',
+  info: '#2563eb',
+  infoMuted: '#dbeafe',
+
+  overlay: 'rgba(19, 78, 74, 0.5)',
+};
+
+// ============================================================================
+// COPPER THEME (Brown/Bronze)
+// ============================================================================
+const copperDark: ThemeColors = {
+  background: '#1a120a',
+  backgroundAlt: '#261a10',
+  surface: '#332215',
+  surfaceHover: '#452e1c',
+
+  textPrimary: '#fefcfb',
+  textSecondary: '#d6bcab',
+  textMuted: '#c49a7c',
+  textInverse: '#1a120a',
+
+  accent: '#c2410c',
+  accentHover: '#ea580c',
+  accentMuted: '#3d1f0a',
+
+  interactive: '#ea580c',
+  interactiveHover: '#f97316',
+
+  border: '#4d2e15',
+  borderHover: '#6d4020',
+  borderFocus: '#c2410c',
+
+  success: '#4ade80',
+  successMuted: '#0d3d1a',
+  warning: '#fbbf24',
+  warningMuted: '#3d3414',
+  error: '#fb7185',
+  errorMuted: '#3d1a24',
+  info: '#60a5fa',
+  infoMuted: '#1a2d3d',
+
+  overlay: 'rgba(26, 18, 10, 0.85)',
+};
+
+const copperLight: ThemeColors = {
+  background: '#fefcfb',
+  backgroundAlt: '#fdf4ef',
+  surface: '#ffffff',
+  surfaceHover: '#fefcfb',
+
+  textPrimary: '#7c2d12',
+  textSecondary: '#9a3412',
+  textMuted: '#c2410c',
+  textInverse: '#fefcfb',
+
+  accent: '#c2410c',
+  accentHover: '#9a3412',
+  accentMuted: '#fdf4ef',
+
+  interactive: '#9a3412',
+  interactiveHover: '#7c2d12',
+
+  border: '#fed7aa',
+  borderHover: '#fdba74',
+  borderFocus: '#c2410c',
+
+  success: '#16a34a',
+  successMuted: '#dcfce7',
+  warning: '#d97706',
+  warningMuted: '#fef3c7',
+  error: '#dc2626',
+  errorMuted: '#fee2e2',
+  info: '#2563eb',
+  infoMuted: '#dbeafe',
+
+  overlay: 'rgba(124, 45, 18, 0.5)',
+};
+
+// ============================================================================
 // THEME REGISTRY
 // ============================================================================
 export const themes: Record<ThemeId, Theme> = {
@@ -395,6 +750,41 @@ export const themes: Record<ThemeId, Theme> = {
     description: 'Elegant purple tones for a creative vibe',
     light: lavenderLight,
     dark: lavenderDark,
+  },
+  midnight: {
+    id: 'midnight',
+    name: 'Midnight',
+    description: 'Deep indigo for focused late-night sessions',
+    light: midnightLight,
+    dark: midnightDark,
+  },
+  rose: {
+    id: 'rose',
+    name: 'Rose',
+    description: 'Soft pink tones with romantic warmth',
+    light: roseLight,
+    dark: roseDark,
+  },
+  ember: {
+    id: 'ember',
+    name: 'Ember',
+    description: 'Bold crimson energy and passion',
+    light: emberLight,
+    dark: emberDark,
+  },
+  mint: {
+    id: 'mint',
+    name: 'Mint',
+    description: 'Fresh teal vibes for clarity',
+    light: mintLight,
+    dark: mintDark,
+  },
+  copper: {
+    id: 'copper',
+    name: 'Copper',
+    description: 'Warm bronze sophistication',
+    light: copperLight,
+    dark: copperDark,
   },
 };
 

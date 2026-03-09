@@ -11,7 +11,15 @@ import {
   bookmarks,
   trendingVideos,
 } from '../db/index.js';
-import { eq, desc, and, or, sql, lt, inArray } from 'drizzle-orm';
+import { eq, desc, and, or, sql, lt, gte, inArray, notInArray, count, countDistinct, sum, isNull } from 'drizzle-orm';
+import { createUserPreferenceModel } from '../services/preferences/index.js';
+import { createForYouAlgorithm } from '../services/feed/index.js';
+import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
+import * as schema from '../db/schema.js';
+
+// Initialize preference model and FYP algorithm
+const preferenceModel = createUserPreferenceModel(db as PostgresJsDatabase<typeof schema>);
+const forYouAlgorithm = createForYouAlgorithm(db as PostgresJsDatabase<typeof schema>, preferenceModel);
 
 export const feedRouter = new Hono();
 
@@ -77,6 +85,24 @@ async function buildVideoView(video: typeof videos.$inferSelect, viewerDid?: str
 }
 
 // =============================================================================
+// Moderation Filters Helper
+// =============================================================================
+
+/**
+ * Get moderation filter conditions for public video queries
+ * Only shows approved/auto_approved videos that are not deleted
+ */
+function getModerationFilters() {
+  return [
+    or(
+      eq(videos.moderationStatus, 'approved'),
+      eq(videos.moderationStatus, 'auto_approved')
+    ),
+    isNull(videos.deletedAt),
+  ];
+}
+
+// =============================================================================
 // Feed Endpoints
 // =============================================================================
 
@@ -102,7 +128,10 @@ feedRouter.get('/io.exprsn.feed.getTimeline', authMiddleware, async (c) => {
   }
 
   // Get videos from followed users
-  const timelineConditions = [inArray(videos.authorDid, followedDids)];
+  const timelineConditions = [
+    inArray(videos.authorDid, followedDids),
+    ...getModerationFilters(), // Only show approved, non-deleted videos
+  ];
   if (cursor) {
     const cursorDate = new Date(cursor);
     timelineConditions.push(lt(videos.createdAt, cursorDate));
@@ -159,7 +188,10 @@ feedRouter.get('/io.exprsn.feed.getActorLikes', optionalAuthMiddleware, async (c
   }
 
   // Get likes with video data
-  const likesConditions = [eq(likes.authorDid, user.did)];
+  const likesConditions = [
+    eq(likes.authorDid, user.did),
+    ...getModerationFilters(), // Only show approved, non-deleted videos
+  ];
   if (cursor) {
     const cursorDate = new Date(cursor);
     likesConditions.push(lt(likes.createdAt, cursorDate));
@@ -193,53 +225,94 @@ feedRouter.get('/io.exprsn.feed.getActorLikes', optionalAuthMiddleware, async (c
 });
 
 /**
- * Get suggested/for-you feed
+ * Get suggested/for-you feed with personalization
  * GET /xrpc/io.exprsn.feed.getSuggestedFeed
+ *
+ * For authenticated users: Returns personalized feed based on engagement history
+ * For anonymous users: Returns trending feed
  */
 feedRouter.get('/io.exprsn.feed.getSuggestedFeed', optionalAuthMiddleware, async (c) => {
   const viewerDid = c.get('did');
-  const limit = Math.min(parseInt(c.req.query('limit') || '20', 10), 100);
+  const limit = Math.min(parseInt(c.req.query('limit') || '30', 10), 100);
   const cursor = c.req.query('cursor');
 
-  // Get trending videos combined with recent popular videos
-  const suggestedConditions = [eq(videos.visibility, 'public')];
-  if (cursor) {
-    const cursorScore = parseFloat(cursor);
-    suggestedConditions.push(
-      sql`COALESCE(${trendingVideos.score}, 0) + ${videos.viewCount} * 0.001 < ${cursorScore}`
+  try {
+    if (viewerDid) {
+      // Authenticated user: use personalized ForYou algorithm
+      const result = await forYouAlgorithm.generateFeed(viewerDid, { limit, cursor });
+
+      return c.json({
+        feed: result.items.map((item) => item.video),
+        cursor: result.cursor,
+        // Include personalization metadata for debugging/analytics
+        _meta: {
+          personalized: true,
+          itemCount: result.items.length,
+        },
+      });
+    } else {
+      // Anonymous user: fall back to trending
+      const result = await forYouAlgorithm.generateAnonymousFeed({ limit, cursor });
+
+      return c.json({
+        feed: result.items,
+        cursor: result.cursor,
+        _meta: {
+          personalized: false,
+          itemCount: result.items.length,
+        },
+      });
+    }
+  } catch (error) {
+    console.error('Error generating suggested feed:', error);
+
+    // Fallback to simple trending query on error
+    const suggestedConditions = [
+      eq(videos.visibility, 'public'),
+      ...getModerationFilters(), // Only show approved, non-deleted videos
+    ];
+    if (cursor) {
+      const cursorScore = parseFloat(cursor);
+      suggestedConditions.push(
+        sql`COALESCE(${trendingVideos.score}, 0) + ${videos.viewCount} * 0.001 < ${cursorScore}`
+      );
+    }
+
+    const results = await db
+      .select({
+        video: videos,
+        trendingScore: trendingVideos.score,
+      })
+      .from(videos)
+      .leftJoin(trendingVideos, eq(videos.uri, trendingVideos.videoUri))
+      .where(and(...suggestedConditions))
+      .orderBy(
+        desc(sql`COALESCE(${trendingVideos.score}, 0) + ${videos.viewCount} * 0.001`)
+      )
+      .limit(limit);
+
+    const feed = await Promise.all(
+      results.map(async (r) => await buildVideoView(r.video, viewerDid))
     );
+
+    const lastSuggestedResult = results[results.length - 1];
+    const nextCursor =
+      results.length === limit && lastSuggestedResult
+        ? (
+            (lastSuggestedResult.trendingScore || 0) +
+            lastSuggestedResult.video.viewCount * 0.001
+          ).toString()
+        : undefined;
+
+    return c.json({
+      feed,
+      cursor: nextCursor,
+      _meta: {
+        personalized: false,
+        fallback: true,
+      },
+    });
   }
-
-  const results = await db
-    .select({
-      video: videos,
-      trendingScore: trendingVideos.score,
-    })
-    .from(videos)
-    .leftJoin(trendingVideos, eq(videos.uri, trendingVideos.videoUri))
-    .where(and(...suggestedConditions))
-    .orderBy(
-      desc(sql`COALESCE(${trendingVideos.score}, 0) + ${videos.viewCount} * 0.001`)
-    )
-    .limit(limit);
-
-  const feed = await Promise.all(
-    results.map(async (r) => await buildVideoView(r.video, viewerDid))
-  );
-
-  const lastSuggestedResult = results[results.length - 1];
-  const nextCursor =
-    results.length === limit && lastSuggestedResult
-      ? (
-          (lastSuggestedResult.trendingScore || 0) +
-          lastSuggestedResult.video.viewCount * 0.001
-        ).toString()
-      : undefined;
-
-  return c.json({
-    feed,
-    cursor: nextCursor,
-  });
 });
 
 /**
@@ -278,7 +351,10 @@ feedRouter.get('/io.exprsn.feed.getActorFeed', optionalAuthMiddleware, async (c)
 
   // Get posts if filter includes posts
   if (filter === 'posts' || filter === 'posts_and_reposts') {
-    const postsConditions = [eq(videos.authorDid, user.did)];
+    const postsConditions = [
+      eq(videos.authorDid, user.did),
+      ...getModerationFilters(), // Only show approved, non-deleted videos
+    ];
     if (cursor) {
       const cursorDate = new Date(cursor);
       postsConditions.push(lt(videos.createdAt, cursorDate));
@@ -301,7 +377,10 @@ feedRouter.get('/io.exprsn.feed.getActorFeed', optionalAuthMiddleware, async (c)
 
   // Get reposts if filter includes reposts
   if (filter === 'reposts' || filter === 'posts_and_reposts') {
-    const repostsConditions = [eq(reposts.authorDid, user.did)];
+    const repostsConditions = [
+      eq(reposts.authorDid, user.did),
+      ...getModerationFilters(), // Only show approved, non-deleted videos
+    ];
     if (cursor) {
       const cursorDate = new Date(cursor);
       repostsConditions.push(lt(reposts.createdAt, cursorDate));
@@ -364,5 +443,293 @@ feedRouter.get('/io.exprsn.feed.getActorFeed', optionalAuthMiddleware, async (c)
   return c.json({
     feed,
     cursor: nextCursor,
+  });
+});
+
+/**
+ * Get following blend feed - mix of following content with discovery
+ * GET /xrpc/io.exprsn.feed.getFollowingBlend
+ *
+ * 70% from followed creators (last 48h, chronological)
+ * 30% from FYP algorithm for discovery
+ */
+feedRouter.get('/io.exprsn.feed.getFollowingBlend', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  const limit = Math.min(parseInt(c.req.query('limit') || '30', 10), 100);
+  const cursor = c.req.query('cursor');
+
+  // Parse cursor (format: "following:ISO|discovery:offset")
+  let followingCursor: Date | undefined;
+  let discoveryCursor: string | undefined;
+
+  if (cursor) {
+    const parts = cursor.split('|');
+    for (const part of parts) {
+      if (part.startsWith('following:')) {
+        followingCursor = new Date(part.substring(10));
+      } else if (part.startsWith('discovery:')) {
+        discoveryCursor = part.substring(10);
+      }
+    }
+  }
+
+  // Get followed DIDs
+  const followedUsers = await db
+    .select({ did: follows.followeeDid })
+    .from(follows)
+    .where(eq(follows.followerDid, userDid));
+
+  const followedDids = followedUsers.map((f) => f.did);
+
+  // 70% following content
+  const followingLimit = Math.ceil(limit * 0.7);
+  let followingVideos: (typeof videos.$inferSelect)[] = [];
+
+  if (followedDids.length > 0) {
+    const followingConditions = [
+      inArray(videos.authorDid, followedDids),
+      eq(videos.visibility, 'public'),
+      gte(videos.createdAt, sql`NOW() - INTERVAL '48 hours'`),
+    ];
+    if (followingCursor) {
+      followingConditions.push(lt(videos.createdAt, followingCursor));
+    }
+
+    followingVideos = await db
+      .select()
+      .from(videos)
+      .where(and(...followingConditions))
+      .orderBy(desc(videos.createdAt))
+      .limit(followingLimit);
+  }
+
+  // 30% discovery via FYP algorithm
+  const discoveryLimit = limit - followingVideos.length;
+  const fypResult = await forYouAlgorithm.generateFeed(userDid, {
+    limit: discoveryLimit * 2, // Get extra to filter duplicates
+    cursor: discoveryCursor,
+  });
+
+  // Filter out videos already in following feed
+  const followingUris = new Set(followingVideos.map((v) => v.uri));
+  const discoveryItems = fypResult.items.filter((i) => !followingUris.has(i.video.uri));
+
+  // Build following video views
+  const followingFeed = await Promise.all(
+    followingVideos.map(async (video) => ({
+      ...(await buildVideoView(video, userDid)),
+      _source: 'following' as const,
+    }))
+  );
+
+  // Build discovery video views with same shape as following
+  const discoveryFeed = await Promise.all(
+    discoveryItems.slice(0, discoveryLimit).map(async (item) => ({
+      ...item.video,
+      _source: 'discovery' as const,
+    }))
+  );
+
+  // Interleave: every 4th video is discovery
+  type FeedItem = { _source: 'following' | 'discovery'; [key: string]: unknown };
+  const blendedFeed: FeedItem[] = [];
+  let followingIdx = 0;
+  let discoveryIdx = 0;
+
+  for (let i = 0; i < limit; i++) {
+    if ((i + 1) % 4 === 0 && discoveryIdx < discoveryFeed.length) {
+      const item = discoveryFeed[discoveryIdx++];
+      if (item) blendedFeed.push(item);
+    } else if (followingIdx < followingFeed.length) {
+      const item = followingFeed[followingIdx++];
+      if (item) blendedFeed.push(item);
+    } else if (discoveryIdx < discoveryFeed.length) {
+      const item = discoveryFeed[discoveryIdx++];
+      if (item) blendedFeed.push(item);
+    }
+  }
+
+  // Build cursor
+  const lastFollowing = followingVideos[followingVideos.length - 1];
+  const cursorParts: string[] = [];
+  if (lastFollowing) {
+    cursorParts.push(`following:${lastFollowing.createdAt.toISOString()}`);
+  }
+  if (fypResult.cursor) {
+    cursorParts.push(`discovery:${fypResult.cursor}`);
+  }
+
+  return c.json({
+    feed: blendedFeed,
+    cursor: cursorParts.length > 0 ? cursorParts.join('|') : undefined,
+    _meta: {
+      followingCount: followingFeed.length,
+      discoveryCount: discoveryFeed.length,
+    },
+  });
+});
+
+/**
+ * Get explore feed - trending content with diverse tags, no personalization
+ * GET /xrpc/io.exprsn.feed.getExplore
+ */
+feedRouter.get('/io.exprsn.feed.getExplore', optionalAuthMiddleware, async (c) => {
+  const viewerDid = c.get('did');
+  const limit = Math.min(parseInt(c.req.query('limit') || '30', 10), 100);
+  const cursor = c.req.query('cursor');
+  const offset = cursor ? parseInt(cursor, 10) : 0;
+
+  // Get trending videos with diverse tags
+  const results = await db
+    .select({
+      video: videos,
+      trendingScore: trendingVideos.score,
+    })
+    .from(trendingVideos)
+    .innerJoin(videos, eq(trendingVideos.videoUri, videos.uri))
+    .where(eq(videos.visibility, 'public'))
+    .orderBy(desc(trendingVideos.score))
+    .limit(limit * 2) // Get extra for diversity
+    .offset(offset);
+
+  // Apply diversity: ensure varied tags
+  const selectedVideos: typeof results = [];
+  const usedTags = new Set<string>();
+  const authorCounts = new Map<string, number>();
+
+  for (const item of results) {
+    if (selectedVideos.length >= limit) break;
+
+    // Limit 2 per author
+    const authorCount = authorCounts.get(item.video.authorDid) || 0;
+    if (authorCount >= 2) continue;
+
+    // Prefer videos with new tags
+    const videoTags = (item.video.tags as string[]) || [];
+    const hasNewTag = videoTags.some((t) => !usedTags.has(t)) || videoTags.length === 0;
+
+    if (hasNewTag || selectedVideos.length < limit / 2) {
+      selectedVideos.push(item);
+      authorCounts.set(item.video.authorDid, authorCount + 1);
+      videoTags.forEach((t) => usedTags.add(t));
+    }
+  }
+
+  const feed = await Promise.all(
+    selectedVideos.map(async (r) => await buildVideoView(r.video, viewerDid))
+  );
+
+  return c.json({
+    feed,
+    cursor: selectedVideos.length >= limit ? String(offset + limit) : undefined,
+    _meta: {
+      uniqueTags: usedTags.size,
+    },
+  });
+});
+
+/**
+ * Get discover feed - heavy personalization, focused on new creators
+ * GET /xrpc/io.exprsn.feed.getDiscover
+ */
+feedRouter.get('/io.exprsn.feed.getDiscover', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  const limit = Math.min(parseInt(c.req.query('limit') || '30', 10), 100);
+  const cursor = c.req.query('cursor');
+
+  // Get users the viewer already follows
+  const followedUsers = await db
+    .select({ did: follows.followeeDid })
+    .from(follows)
+    .where(eq(follows.followerDid, userDid));
+  const followedDids = new Set(followedUsers.map((f) => f.did));
+
+  // Get personalized feed focusing on new creators
+  const result = await forYouAlgorithm.generateFeed(userDid, { limit: limit * 2, cursor });
+
+  // Filter to only include creators the user doesn't follow
+  const discoveryItems = result.items.filter(
+    (item) => !followedDids.has(item.video.author.did)
+  );
+
+  return c.json({
+    feed: discoveryItems.slice(0, limit).map((item) => item.video),
+    cursor: result.cursor,
+    _meta: {
+      personalized: true,
+      newCreatorsOnly: true,
+    },
+  });
+});
+
+/**
+ * Get challenge discovery feed - active challenges with top entries
+ * GET /xrpc/io.exprsn.feed.getChallenges
+ */
+feedRouter.get('/io.exprsn.feed.getChallenges', optionalAuthMiddleware, async (c) => {
+  const viewerDid = c.get('did');
+  const limit = Math.min(parseInt(c.req.query('limit') || '10', 10), 20);
+  const cursor = c.req.query('cursor');
+  const offset = cursor ? parseInt(cursor, 10) : 0;
+
+  // Get active challenges ordered by participant count
+  const activeChallenges = await db
+    .select()
+    .from(schema.challenges)
+    .where(
+      and(
+        eq(schema.challenges.status, 'active'),
+        gte(schema.challenges.endAt, new Date())
+      )
+    )
+    .orderBy(desc(schema.challenges.participantCount))
+    .limit(limit)
+    .offset(offset);
+
+  // For each challenge, get top 3 entries
+  const challengeFeeds = await Promise.all(
+    activeChallenges.map(async (challenge) => {
+      const topEntries = await db
+        .select({
+          entry: schema.challengeEntries,
+          video: videos,
+        })
+        .from(schema.challengeEntries)
+        .innerJoin(videos, eq(schema.challengeEntries.videoUri, videos.uri))
+        .where(eq(schema.challengeEntries.challengeId, challenge.id))
+        .orderBy(desc(schema.challengeEntries.engagementScore))
+        .limit(3);
+
+      const entries = await Promise.all(
+        topEntries.map(async (e) => ({
+          entry: {
+            id: e.entry.id,
+            score: e.entry.engagementScore,
+            rank: e.entry.rank,
+          },
+          video: await buildVideoView(e.video, viewerDid),
+        }))
+      );
+
+      return {
+        challenge: {
+          id: challenge.id,
+          name: challenge.name,
+          description: challenge.description,
+          hashtag: challenge.hashtag,
+          bannerUrl: challenge.bannerImageUrl,
+          participantCount: challenge.participantCount,
+          startDate: challenge.startAt.toISOString(),
+          endDate: challenge.endAt.toISOString(),
+          prizes: challenge.prizes,
+        },
+        entries,
+      };
+    })
+  );
+
+  return c.json({
+    challenges: challengeFeeds,
+    cursor: activeChallenges.length >= limit ? String(offset + limit) : undefined,
   });
 });

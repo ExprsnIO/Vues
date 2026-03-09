@@ -2,6 +2,7 @@
 
 import type { LayoutSettings as LayoutSettingsType, UserSettingsUpdate, CommentsPosition } from '@exprsn/shared';
 import { cn } from '@/lib/utils';
+import { useSettingsStore } from '@/stores/settings-store';
 
 interface LayoutSettingsProps {
   layout: LayoutSettingsType;
@@ -10,7 +11,23 @@ interface LayoutSettingsProps {
 }
 
 export function LayoutSettings({ layout, onUpdate, isUpdating }: LayoutSettingsProps) {
+  // Use Zustand store for immediate UI updates
+  const storeLayout = useSettingsStore((state) => state.settings.layout);
+  const setSettings = useSettingsStore((state) => state.settings);
+
+  // Use store values for display (more reliable than props)
+  const currentLayout = storeLayout || layout;
+
   const handleCommentsPositionChange = (position: CommentsPosition) => {
+    // Update local store immediately for UI responsiveness
+    useSettingsStore.setState((state) => ({
+      settings: {
+        ...state.settings,
+        layout: { ...state.settings.layout, commentsPosition: position },
+        updatedAt: new Date().toISOString(),
+      },
+    }));
+    // Sync to server
     onUpdate({ layout: { commentsPosition: position } });
   };
 
@@ -29,7 +46,7 @@ export function LayoutSettings({ layout, onUpdate, isUpdating }: LayoutSettingsP
             disabled={isUpdating}
             className={cn(
               'flex flex-col items-center gap-2 p-3 rounded-lg border-2 transition-all',
-              layout.commentsPosition === 'side'
+              currentLayout.commentsPosition === 'side'
                 ? 'border-accent bg-accent/10'
                 : 'border-border hover:border-text-muted'
             )}
@@ -42,7 +59,7 @@ export function LayoutSettings({ layout, onUpdate, isUpdating }: LayoutSettingsP
             disabled={isUpdating}
             className={cn(
               'flex flex-col items-center gap-2 p-3 rounded-lg border-2 transition-all',
-              layout.commentsPosition === 'bottom'
+              currentLayout.commentsPosition === 'bottom'
                 ? 'border-accent bg-accent/10'
                 : 'border-border hover:border-text-muted'
             )}

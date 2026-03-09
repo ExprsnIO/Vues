@@ -356,10 +356,10 @@ export async function exportAnalytics(options: ExportOptions): Promise<ExportRes
   }
 
   if (options.dateRange?.from) {
-    conditions.push(gte(analyticsSnapshots.timestamp, options.dateRange.from));
+    conditions.push(gte(analyticsSnapshots.createdAt, options.dateRange.from));
   }
   if (options.dateRange?.to) {
-    conditions.push(lte(analyticsSnapshots.timestamp, options.dateRange.to));
+    conditions.push(lte(analyticsSnapshots.createdAt, options.dateRange.to));
   }
 
   const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
@@ -369,18 +369,18 @@ export async function exportAnalytics(options: ExportOptions): Promise<ExportRes
     .select({
       id: analyticsSnapshots.id,
       period: analyticsSnapshots.period,
-      timestamp: analyticsSnapshots.timestamp,
+      createdAt: analyticsSnapshots.createdAt,
       metrics: analyticsSnapshots.metrics,
     })
     .from(analyticsSnapshots)
     .where(whereClause)
-    .orderBy(desc(analyticsSnapshots.timestamp))
+    .orderBy(desc(analyticsSnapshots.createdAt))
     .limit(limit);
 
   const formattedData = data.map((row) => ({
     id: row.id,
     period: row.period,
-    timestamp: row.timestamp?.toISOString() || '',
+    timestamp: row.createdAt?.toISOString() || '',
     metrics: row.metrics ? JSON.stringify(row.metrics) : '',
   }));
 
@@ -398,7 +398,7 @@ export async function exportPayments(options: ExportOptions): Promise<ExportResu
   }
 
   if (options.filters?.gateway) {
-    conditions.push(eq(paymentTransactions.gateway, options.filters.gateway as string));
+    conditions.push(eq(paymentTransactions.configId, options.filters.gateway as string));
   }
 
   if (options.dateRange?.from) {
@@ -414,13 +414,14 @@ export async function exportPayments(options: ExportOptions): Promise<ExportResu
   const data = await db
     .select({
       id: paymentTransactions.id,
-      userDid: paymentTransactions.userDid,
+      fromDid: paymentTransactions.fromDid,
+      toDid: paymentTransactions.toDid,
       type: paymentTransactions.type,
       amount: paymentTransactions.amount,
       currency: paymentTransactions.currency,
       status: paymentTransactions.status,
-      gateway: paymentTransactions.gateway,
-      gatewayTransactionId: paymentTransactions.gatewayTransactionId,
+      configId: paymentTransactions.configId,
+      providerTransactionId: paymentTransactions.providerTransactionId,
       description: paymentTransactions.description,
       createdAt: paymentTransactions.createdAt,
     })
@@ -449,7 +450,7 @@ export async function exportRenderJobs(options: ExportOptions): Promise<ExportRe
   }
 
   if (options.filters?.userId) {
-    conditions.push(eq(renderJobs.userId, options.filters.userId as string));
+    conditions.push(eq(renderJobs.userDid, options.filters.userId as string));
   }
 
   if (options.dateRange?.from) {
@@ -466,14 +467,14 @@ export async function exportRenderJobs(options: ExportOptions): Promise<ExportRe
     .select({
       id: renderJobs.id,
       projectId: renderJobs.projectId,
-      userId: renderJobs.userId,
+      userDid: renderJobs.userDid,
       status: renderJobs.status,
       priority: renderJobs.priority,
       progress: renderJobs.progress,
-      error: renderJobs.error,
+      errorMessage: renderJobs.errorMessage,
       createdAt: renderJobs.createdAt,
-      startedAt: renderJobs.startedAt,
-      completedAt: renderJobs.completedAt,
+      renderStartedAt: renderJobs.renderStartedAt,
+      renderCompletedAt: renderJobs.renderCompletedAt,
     })
     .from(renderJobs)
     .where(whereClause)
@@ -483,8 +484,8 @@ export async function exportRenderJobs(options: ExportOptions): Promise<ExportRe
   const formattedData = data.map((row) => ({
     ...row,
     createdAt: row.createdAt?.toISOString() || '',
-    startedAt: row.startedAt?.toISOString() || '',
-    completedAt: row.completedAt?.toISOString() || '',
+    startedAt: row.renderStartedAt?.toISOString() || '',
+    completedAt: row.renderCompletedAt?.toISOString() || '',
   }));
 
   return exportData(formattedData, options, 'render_jobs', 'render_jobs_export');

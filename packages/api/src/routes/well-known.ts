@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { JWTService } from '../services/sso/JWTService.js';
 
 /**
  * Well-known routes configuration
@@ -115,6 +116,16 @@ export function createWellKnownRouter(config: WellKnownConfig) {
       require_pushed_authorization_requests: false,
     };
 
+    return c.json(metadata);
+  });
+
+  /**
+   * /.well-known/openid-configuration
+   * OpenID Connect Discovery Document (RFC 8414)
+   * This is the standard OIDC discovery endpoint that external apps use
+   */
+  router.get('/openid-configuration', (c) => {
+    const metadata = JWTService.getDiscoveryMetadata();
     return c.json(metadata);
   });
 

@@ -37,11 +37,11 @@ export function LabelSettings({
 
       const [artistsRes, catalogRes] = await Promise.all([
         canViewArtists
-          ? api.get(`/xrpc/io.exprsn.org.label.artists.list?organizationId=${organizationId}`)
-          : Promise.resolve({ artists: [] }),
+          ? api.get<{ artists: LabelArtist[] }>(`/xrpc/io.exprsn.org.label.artists.list?organizationId=${organizationId}`)
+          : Promise.resolve({ artists: [] as LabelArtist[] }),
         canViewCatalog
-          ? api.get(`/xrpc/io.exprsn.org.label.catalog.list?organizationId=${organizationId}`)
-          : Promise.resolve({ entries: [] }),
+          ? api.get<{ entries: CatalogEntry[] }>(`/xrpc/io.exprsn.org.label.catalog.list?organizationId=${organizationId}`)
+          : Promise.resolve({ entries: [] as CatalogEntry[] }),
       ]);
 
       setArtists(artistsRes.artists || []);

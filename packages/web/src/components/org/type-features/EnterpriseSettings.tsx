@@ -37,11 +37,11 @@ export function EnterpriseSettings({
 
       const [deptRes, complianceRes] = await Promise.all([
         canViewDepartments
-          ? api.get(`/xrpc/io.exprsn.org.enterprise.departments.hierarchy?organizationId=${organizationId}`)
-          : Promise.resolve({ hierarchy: [] }),
+          ? api.get<{ hierarchy: EnterpriseDepartment[] }>(`/xrpc/io.exprsn.org.enterprise.departments.hierarchy?organizationId=${organizationId}`)
+          : Promise.resolve({ hierarchy: [] as EnterpriseDepartment[] }),
         canViewCompliance
-          ? api.get(`/xrpc/io.exprsn.org.enterprise.compliance.list?organizationId=${organizationId}`)
-          : Promise.resolve({ settings: [] }),
+          ? api.get<{ settings: ComplianceSetting[] }>(`/xrpc/io.exprsn.org.enterprise.compliance.list?organizationId=${organizationId}`)
+          : Promise.resolve({ settings: [] as ComplianceSetting[] }),
       ]);
 
       setDepartments(deptRes.hierarchy || []);

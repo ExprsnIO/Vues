@@ -2,8 +2,11 @@ import { Hono } from 'hono';
 import { eq, and, gte, desc } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import * as schema from '../db/schema.js';
-import { videos, likes, comments, follows, users } from '../db/schema.js';
+import { videos, likes, comments, follows, users, blobs } from '../db/schema.js';
 import { ServiceAuth } from '../services/federation/ServiceAuth.js';
+import { getStorageProvider } from '../services/storage/index.js';
+import { createReadStream, existsSync } from 'fs';
+import { Readable } from 'stream';
 
 export const syncRouter = new Hono();
 
@@ -565,6 +568,66 @@ syncRouter.post('/xrpc/io.exprsn.sync.pushRecords', async (c) => {
     failed,
     errors: errors.length > 0 ? errors : undefined,
   });
+});
+
+/**
+ * GET com.atproto.sync.getBlob
+ * Get a blob by DID and CID for federation
+ */
+syncRouter.get('/xrpc/com.atproto.sync.getBlob', async (c) => {
+  const did = c.req.query('did');
+  const cid = c.req.query('cid');
+
+  if (!did || !cid) {
+    return c.json({ error: 'InvalidRequest', message: 'DID and CID are required' }, 400);
+  }
+
+  try {
+    // Look up blob in database
+    const blob = await db.query.blobs.findFirst({
+      where: and(eq(blobs.did, did), eq(blobs.cid, cid)),
+    });
+
+    if (!blob) {
+      return c.json({ error: 'BlobNotFound', message: 'Blob not found' }, 404);
+    }
+
+    // Try to get blob from storage provider
+    try {
+      const storage = await getStorageProvider();
+      const buffer = await storage.downloadFile(blob.storagePath);
+
+      return new Response(buffer, {
+        status: 200,
+        headers: {
+          'Content-Type': blob.mimeType,
+          'Content-Length': blob.size.toString(),
+          'Cache-Control': 'public, max-age=31536000, immutable',
+          'X-Blob-CID': cid,
+        },
+      });
+    } catch (storageError) {
+      // Fallback to local file if storage provider fails
+      if (blob.storagePath && existsSync(blob.storagePath)) {
+        const fileStream = createReadStream(blob.storagePath);
+        return new Response(Readable.toWeb(fileStream) as ReadableStream, {
+          status: 200,
+          headers: {
+            'Content-Type': blob.mimeType,
+            'Content-Length': blob.size.toString(),
+            'Cache-Control': 'public, max-age=31536000, immutable',
+            'X-Blob-CID': cid,
+          },
+        });
+      }
+
+      console.error('Failed to retrieve blob:', storageError);
+      return c.json({ error: 'BlobNotFound', message: 'Blob storage unavailable' }, 404);
+    }
+  } catch (error) {
+    console.error('Error fetching blob:', error);
+    return c.json({ error: 'InternalServerError', message: 'Failed to fetch blob' }, 500);
+  }
 });
 
 /**

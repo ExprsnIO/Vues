@@ -16,12 +16,12 @@
     "@exprsn/shared": "workspace:*",
     "@ipld/car": "^5.2.0",
     "@ipld/dag-cbor": "^9.0.0",
-    "hono": "^4.6.0",
-    "ioredis": "^5.4.0",
+    "hono": "^4.12.5",
+    "ioredis": "^5.10.0",
     "multiformats": "^13.0.0"
   },
   "devDependencies": {
-    "@types/node": "^22.10.0",
+    "@types/node": "^22.19.13",
     "typescript": "^5.7.0"
   }
 }

@@ -53,7 +53,7 @@ export interface PartyQueueItem {
   videoUri: string;
   addedBy: string;
   position: number;
-  addedAt: Date;
+  createdAt: Date;
   video?: {
     thumbnail?: string;
     duration?: number;
@@ -152,11 +152,10 @@ export class WatchPartyService {
         videoUri: options.initialVideoUri,
         addedBy: hostDid,
         position: 0,
-        addedAt: new Date(),
       });
     }
 
-    return party;
+    return party as WatchParty;
   }
 
   /**
@@ -169,7 +168,7 @@ export class WatchPartyService {
       .where(eq(watchParties.id, partyId))
       .limit(1);
 
-    return party || null;
+    return (party as WatchParty) || null;
   }
 
   /**
@@ -187,7 +186,7 @@ export class WatchPartyService {
       )
       .limit(1);
 
-    return party || null;
+    return (party as WatchParty) || null;
   }
 
   /**
@@ -219,14 +218,19 @@ export class WatchPartyService {
         .set({ isPresent: true })
         .where(eq(watchPartyParticipants.id, existing.id));
 
-      return { party, participant: { ...existing, isPresent: true } };
+      return {
+        party: party as WatchParty,
+        participant: { ...existing, isPresent: true, role: existing.role as ParticipantRole } as PartyParticipant
+      };
     }
 
     // Check participant limit
-    const [{ count }] = await db
+    const countResult = await db
       .select({ count: sql<number>`count(*)` })
       .from(watchPartyParticipants)
       .where(eq(watchPartyParticipants.partyId, party.id));
+
+    const count = countResult[0]?.count ?? 0;
 
     if (count >= party.maxParticipants) {
       throw new Error('Party is full');
@@ -245,7 +249,7 @@ export class WatchPartyService {
       })
       .returning();
 
-    return { party, participant };
+    return { party: party as WatchParty, participant: participant as PartyParticipant };
   }
 
   /**
@@ -289,11 +293,11 @@ export class WatchPartyService {
    */
   async updatePlayback(
     partyId: string,
-    state: { videoUri?: string; position?: number; isPlaying?: boolean }
+    state: { videoUri?: string | null; position?: number; isPlaying?: boolean }
   ): Promise<void> {
     const updates: Partial<typeof watchParties.$inferInsert> = {};
 
-    if (state.videoUri !== undefined) updates.currentVideoUri = state.videoUri;
+    if (state.videoUri !== undefined) updates.currentVideoUri = state.videoUri ?? undefined;
     if (state.position !== undefined) updates.currentPosition = state.position;
     if (state.isPlaying !== undefined) updates.isPlaying = state.isPlaying;
 
@@ -325,10 +329,12 @@ export class WatchPartyService {
    */
   async addToQueue(partyId: string, videoUri: string, addedBy: string): Promise<PartyQueueItem> {
     // Get max position
-    const [{ maxPos }] = await db
+    const maxPosResult = await db
       .select({ maxPos: sql<number>`coalesce(max(position), -1)` })
       .from(watchPartyQueue)
       .where(eq(watchPartyQueue.partyId, partyId));
+
+    const maxPos = maxPosResult[0]?.maxPos ?? -1;
 
     const [item] = await db
       .insert(watchPartyQueue)
@@ -337,12 +343,11 @@ export class WatchPartyService {
         partyId,
         videoUri,
         addedBy,
-        position: (maxPos || 0) + 1,
-        addedAt: new Date(),
+        position: maxPos + 1,
       })
       .returning();
 
-    return item;
+    return item as PartyQueueItem;
   }
 
   /**
@@ -370,7 +375,7 @@ export class WatchPartyService {
         videoUri: watchPartyQueue.videoUri,
         addedBy: watchPartyQueue.addedBy,
         position: watchPartyQueue.position,
-        addedAt: watchPartyQueue.addedAt,
+        createdAt: watchPartyQueue.createdAt,
         videoThumbnail: videos.thumbnailUrl,
         videoDuration: videos.duration,
         videoCaption: videos.caption,
@@ -389,7 +394,7 @@ export class WatchPartyService {
       videoUri: item.videoUri,
       addedBy: item.addedBy,
       position: item.position,
-      addedAt: item.addedAt,
+      createdAt: item.createdAt,
       video: item.videoThumbnail
         ? {
             thumbnail: item.videoThumbnail || undefined,
@@ -421,6 +426,8 @@ export class WatchPartyService {
     if (nextIndex >= queue.length) return null;
 
     const nextItem = queue[nextIndex];
+    if (!nextItem) return null;
+
     await this.updatePlayback(partyId, {
       videoUri: nextItem.videoUri,
       position: 0,
@@ -485,11 +492,10 @@ export class WatchPartyService {
         senderDid,
         text,
         messageType,
-        createdAt: new Date(),
       })
       .returning();
 
-    return message;
+    return message as PartyMessage;
   }
 
   /**
@@ -603,7 +609,7 @@ export class WatchPartyService {
 
     if (partyIds.length === 0) return [];
 
-    return db
+    const parties = await db
       .select()
       .from(watchParties)
       .where(
@@ -615,6 +621,8 @@ export class WatchPartyService {
           eq(watchParties.status, 'active')
         )
       );
+
+    return parties as WatchParty[];
   }
 }
 

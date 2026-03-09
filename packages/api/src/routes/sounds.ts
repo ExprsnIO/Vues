@@ -7,7 +7,7 @@ import { Hono } from 'hono';
 import { db } from '../db/index.js';
 import { sounds, trendingSounds, soundUsageHistory, videos, users } from '../db/schema.js';
 import { eq, desc, like, and, gte, sql, ilike, or } from 'drizzle-orm';
-import { optionalAuthMiddleware } from '../middleware/auth.js';
+import { optionalAuthMiddleware } from '../auth/middleware.js';
 
 const soundsRouter = new Hono();
 
@@ -210,8 +210,48 @@ soundsRouter.get('/io.exprsn.sound.getVideosUsing', optionalAuthMiddleware, asyn
     return c.json({ error: 'Sound not found' }, 404);
   }
 
-  // Build query
-  let query = db
+  // Build conditions
+  const conditions = [
+    eq(videos.soundUri, soundId),
+    eq(videos.visibility, 'public'),
+  ];
+
+  // Apply cursor condition
+  if (cursor) {
+    const parts = cursor.split(':');
+    const sortValue = parts[0];
+    const cursorUri = parts[1];
+    if (sortValue && cursorUri) {
+      if (sort === 'popular') {
+        conditions.push(
+          or(
+            sql`${videos.likeCount} < ${parseInt(sortValue)}`,
+            and(
+              eq(videos.likeCount, parseInt(sortValue)),
+              sql`${videos.uri} > ${cursorUri}`
+            )
+          )!
+        );
+      } else {
+        conditions.push(
+          or(
+            sql`${videos.createdAt} < ${new Date(sortValue)}`,
+            and(
+              eq(videos.createdAt, new Date(sortValue)),
+              sql`${videos.uri} > ${cursorUri}`
+            )
+          )!
+        );
+      }
+    }
+  }
+
+  // Build and execute query
+  const orderByClause = sort === 'popular'
+    ? [desc(videos.likeCount), videos.uri]
+    : [desc(videos.createdAt), videos.uri];
+
+  const videoResults = await db
     .select({
       uri: videos.uri,
       cid: videos.cid,
@@ -228,47 +268,9 @@ soundsRouter.get('/io.exprsn.sound.getVideosUsing', optionalAuthMiddleware, asyn
       createdAt: videos.createdAt,
     })
     .from(videos)
-    .where(
-      and(
-        eq(videos.soundUri, soundId),
-        eq(videos.visibility, 'public')
-      )
-    );
-
-  // Apply cursor
-  if (cursor) {
-    const [sortValue, uri] = cursor.split(':');
-    if (sort === 'popular') {
-      query = query.where(
-        or(
-          sql`${videos.likeCount} < ${parseInt(sortValue)}`,
-          and(
-            eq(videos.likeCount, parseInt(sortValue)),
-            sql`${videos.uri} > ${uri}`
-          )
-        )
-      ) as typeof query;
-    } else {
-      query = query.where(
-        or(
-          sql`${videos.createdAt} < ${new Date(sortValue)}`,
-          and(
-            eq(videos.createdAt, new Date(sortValue)),
-            sql`${videos.uri} > ${uri}`
-          )
-        )
-      ) as typeof query;
-    }
-  }
-
-  // Apply sort and limit
-  if (sort === 'popular') {
-    query = query.orderBy(desc(videos.likeCount), videos.uri) as typeof query;
-  } else {
-    query = query.orderBy(desc(videos.createdAt), videos.uri) as typeof query;
-  }
-
-  const videoResults = await query.limit(limit + 1);
+    .where(and(...conditions))
+    .orderBy(...orderByClause)
+    .limit(limit + 1);
 
   const hasMore = videoResults.length > limit;
   const results = hasMore ? videoResults.slice(0, limit) : videoResults;
@@ -297,10 +299,12 @@ soundsRouter.get('/io.exprsn.sound.getVideosUsing', optionalAuthMiddleware, asyn
   let nextCursor: string | undefined;
   if (hasMore && results.length > 0) {
     const lastVideo = results[results.length - 1];
-    if (sort === 'popular') {
-      nextCursor = `${lastVideo.likeCount}:${lastVideo.uri}`;
-    } else {
-      nextCursor = `${lastVideo.createdAt.toISOString()}:${lastVideo.uri}`;
+    if (lastVideo) {
+      if (sort === 'popular') {
+        nextCursor = `${lastVideo.likeCount}:${lastVideo.uri}`;
+      } else {
+        nextCursor = `${lastVideo.createdAt.toISOString()}:${lastVideo.uri}`;
+      }
     }
   }
 

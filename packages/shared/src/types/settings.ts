@@ -1,6 +1,7 @@
 // Theme identifiers
-export type ThemeId = 'ocean' | 'forest' | 'sunset' | 'lavender' | 'slate';
+export type ThemeId = 'ocean' | 'forest' | 'sunset' | 'lavender' | 'slate' | 'midnight' | 'rose' | 'ember' | 'mint' | 'copper';
 export type ColorMode = 'light' | 'dark' | 'system';
+export type FontPreference = 'inter' | 'open-dyslexic';
 
 // Accessibility settings
 export interface AccessibilitySettings {
@@ -8,6 +9,7 @@ export interface AccessibilitySettings {
   highContrast: boolean;
   largeText: boolean;
   screenReaderOptimized: boolean;
+  fontPreference: FontPreference;
 }
 
 // Playback settings
@@ -110,6 +112,7 @@ export const DEFAULT_SETTINGS: UserSettings = {
     highContrast: false,
     largeText: false,
     screenReaderOptimized: false,
+    fontPreference: 'inter',
   },
   playback: {
     autoplay: true,

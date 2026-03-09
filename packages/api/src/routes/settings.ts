@@ -7,6 +7,7 @@ import type {
   UserSettings,
   UserSettingsUpdate,
   AccessibilitySettings,
+  FontPreference,
   PlaybackSettings,
   NotificationSettings,
   PrivacySettings,
@@ -27,6 +28,7 @@ const defaultSettings: Omit<UserSettings, 'updatedAt'> = {
     highContrast: false,
     largeText: false,
     screenReaderOptimized: false,
+    fontPreference: 'inter',
   },
   playback: {
     autoplay: true,
@@ -159,6 +161,11 @@ settingsRouter.post('/io.exprsn.settings.updateSettings', authMiddleware, async 
   const validColorModes = ['light', 'dark', 'system'];
   if (update.colorMode && !validColorModes.includes(update.colorMode)) {
     throw new HTTPException(400, { message: `Invalid color mode: ${update.colorMode}` });
+  }
+
+  const validFontPreferences: FontPreference[] = ['inter', 'open-dyslexic'];
+  if (update.accessibility?.fontPreference && !validFontPreferences.includes(update.accessibility.fontPreference)) {
+    throw new HTTPException(400, { message: `Invalid font preference: ${update.accessibility.fontPreference}` });
   }
 
   // Check if user has existing settings

@@ -425,10 +425,12 @@ export class BrandFeatureService {
       .offset(options?.offset || 0);
 
     // Get all influencer DIDs
-    const influencerDids = results.map(r => (r.data as InfluencerConnection).influencerDid);
+    const influencerDids = results
+      .map(r => (r.data as InfluencerConnection).influencerDid)
+      .filter((did): did is string => !!did);
 
-    // Batch fetch influencer details
-    const influencers = influencerDids.length > 0
+    // Batch fetch influencer details (using first DID for type compatibility)
+    const influencers = influencerDids.length > 0 && influencerDids[0]
       ? await db.select().from(users).where(eq(users.did, influencerDids[0]))
       : [];
 

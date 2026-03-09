@@ -1,12 +1,15 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useQuery } from '@tanstack/react-query';
 import { useAuth } from '@/lib/auth-context';
 import { api, QuickStats } from '@/lib/api';
+import { AdminDomainProvider, useAdminDomain } from '@/lib/admin-domain-context';
+import { DomainSelector } from '@/components/admin/DomainSelector';
+import { CommandPaletteProvider, useAdminCommands } from '@/components/admin/ui/CommandPalette';
 
 interface AdminSession {
   admin: {
@@ -22,13 +25,182 @@ interface AdminSession {
   } | null;
 }
 
-export default function AdminLayout({ children }: { children: React.ReactNode }) {
+interface NavItem {
+  href: string;
+  label: string;
+  icon: React.ComponentType<{ className?: string }>;
+  badge?: number;
+  badgeColor?: string;
+}
+
+interface NavGroup {
+  id: string;
+  label: string;
+  icon: React.ComponentType<{ className?: string }>;
+  items: NavItem[];
+}
+
+const STORAGE_KEY = 'admin-nav-expanded';
+
+function getInitialExpandedState(): string[] {
+  if (typeof window === 'undefined') return ['users', 'content'];
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY);
+    return stored ? JSON.parse(stored) : ['users', 'content'];
+  } catch {
+    return ['users', 'content'];
+  }
+}
+
+// Navigation configuration for domain-scoped view
+function getDomainNavGroups(domainId: string, stats?: QuickStats): NavGroup[] {
+  return [
+    {
+      id: 'users',
+      label: 'Users & Access',
+      icon: UsersGroupIcon,
+      items: [
+        { href: `/admin/d/${domainId}/users`, label: 'Users', icon: UsersIcon },
+        { href: `/admin/d/${domainId}/groups`, label: 'Groups', icon: TeamIcon },
+        { href: `/admin/d/${domainId}/admins`, label: 'Admins', icon: TeamIcon },
+        { href: `/admin/d/${domainId}/organizations`, label: 'Organizations', icon: OrganizationsIcon },
+        { href: `/admin/d/${domainId}/settings/sso`, label: 'SSO', icon: IdentityIcon },
+      ],
+    },
+    {
+      id: 'content',
+      label: 'Content & Moderation',
+      icon: ContentGroupIcon,
+      items: [
+        { href: `/admin/d/${domainId}/content`, label: 'Content Browser', icon: ContentIcon },
+        { href: `/admin/d/${domainId}/moderation`, label: 'Moderation Queue', icon: ModerationIcon, badge: stats?.pendingReports, badgeColor: 'bg-red-500' },
+        { href: `/admin/d/${domainId}/reports`, label: 'Reports', icon: ReportsIcon },
+        { href: `/admin/d/${domainId}/appeals`, label: 'Appeals', icon: AppealsIcon },
+        { href: `/admin/d/${domainId}/featured`, label: 'Featured', icon: FeaturedIcon },
+        { href: `/admin/d/${domainId}/challenges`, label: 'Challenges', icon: ChallengesIcon },
+        { href: `/admin/d/${domainId}/announcements`, label: 'Announcements', icon: AnnouncementsIcon },
+      ],
+    },
+    {
+      id: 'platform',
+      label: 'Platform Services',
+      icon: PlatformIcon,
+      items: [
+        { href: `/admin/d/${domainId}/analytics`, label: 'Analytics', icon: AnalyticsIcon },
+        { href: `/admin/d/${domainId}/payments`, label: 'Payments', icon: PaymentsIcon },
+        { href: `/admin/d/${domainId}/live`, label: 'Live Streams', icon: LiveIcon, badge: stats?.activeLiveStreams, badgeColor: 'bg-green-500' },
+        { href: `/admin/d/${domainId}/render`, label: 'Render Pipeline', icon: RenderIcon },
+      ],
+    },
+    {
+      id: 'settings',
+      label: 'Domain Settings',
+      icon: SettingsIcon,
+      items: [
+        { href: `/admin/d/${domainId}/settings`, label: 'Overview', icon: SettingsIcon },
+        { href: `/admin/d/${domainId}/settings/services`, label: 'Services', icon: PlatformIcon },
+        { href: `/admin/d/${domainId}/settings/identity`, label: 'Identity (PLC)', icon: IdentityIcon },
+        { href: `/admin/d/${domainId}/settings/certificates`, label: 'Certificates', icon: CertificatesIcon },
+        { href: `/admin/d/${domainId}/settings/branding`, label: 'Branding', icon: FeaturedIcon },
+        { href: `/admin/d/${domainId}/settings/federation`, label: 'Federation', icon: DomainsIcon },
+      ],
+    },
+    {
+      id: 'infrastructure',
+      label: 'Infrastructure',
+      icon: InfraGroupIcon,
+      items: [
+        { href: `/admin/d/${domainId}/clusters`, label: 'Clusters', icon: InfrastructureIcon },
+      ],
+    },
+    {
+      id: 'system',
+      label: 'System',
+      icon: SystemIcon,
+      items: [
+        { href: `/admin/d/${domainId}/audit`, label: 'Audit Log', icon: AuditIcon },
+        { href: `/admin/d/${domainId}/activity`, label: 'Activity Feed', icon: ActivityIcon },
+      ],
+    },
+  ];
+}
+
+// Navigation configuration for global view
+function getGlobalNavGroups(stats?: QuickStats): NavGroup[] {
+  return [
+    {
+      id: 'domains',
+      label: 'Domains',
+      icon: DomainsIcon,
+      items: [
+        { href: '/admin/domains', label: 'All Domains', icon: DomainsIcon },
+      ],
+    },
+    {
+      id: 'users',
+      label: 'Users & Access',
+      icon: UsersGroupIcon,
+      items: [
+        { href: '/admin/users', label: 'All Users', icon: UsersIcon, badge: stats?.newUsersToday },
+        { href: '/admin/organizations', label: 'Organizations', icon: OrganizationsIcon },
+        { href: '/admin/team', label: 'Platform Admin Team', icon: TeamIcon },
+      ],
+    },
+    {
+      id: 'content',
+      label: 'Content & Moderation',
+      icon: ContentGroupIcon,
+      items: [
+        { href: '/admin/content', label: 'Content', icon: ContentIcon },
+        { href: '/admin/reports', label: 'Reports', icon: ReportsIcon, badge: stats?.pendingReports, badgeColor: 'bg-red-500' },
+        { href: '/admin/moderation', label: 'Global Moderation', icon: ModerationIcon },
+        { href: '/admin/featured', label: 'Featured', icon: FeaturedIcon },
+        { href: '/admin/announcements', label: 'Announcements', icon: AnnouncementsIcon },
+        { href: '/admin/challenges', label: 'Challenges', icon: ChallengesIcon },
+      ],
+    },
+    {
+      id: 'platform',
+      label: 'Platform Services',
+      icon: PlatformIcon,
+      items: [
+        { href: '/admin/analytics', label: 'Analytics', icon: AnalyticsIcon },
+        { href: '/admin/payments', label: 'Payments', icon: PaymentsIcon },
+        { href: '/admin/live', label: 'Live Streams', icon: LiveIcon, badge: stats?.activeLiveStreams, badgeColor: 'bg-green-500' },
+        { href: '/admin/render', label: 'Render Pipeline', icon: RenderIcon },
+      ],
+    },
+    {
+      id: 'infrastructure',
+      label: 'Infrastructure',
+      icon: InfraGroupIcon,
+      items: [
+        { href: '/admin/infrastructure', label: 'Clusters', icon: InfrastructureIcon },
+      ],
+    },
+    {
+      id: 'system',
+      label: 'System',
+      icon: SystemIcon,
+      items: [
+        { href: '/admin/audit', label: 'Audit Log', icon: AuditIcon },
+        { href: '/admin/activity', label: 'Activity', icon: ActivityIcon },
+        { href: '/admin/settings', label: 'Platform Settings', icon: SettingsIcon },
+      ],
+    },
+  ];
+}
+
+function AdminLayoutContent({ children }: { children: React.ReactNode }) {
   const { user, isLoading: authLoading } = useAuth();
   const router = useRouter();
   const pathname = usePathname();
   const [adminSession, setAdminSession] = useState<AdminSession | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [expandedGroups, setExpandedGroups] = useState<string[]>(getInitialExpandedState);
+
+  const { selectedDomainId, isGlobal } = useAdminDomain();
 
   // Poll quick stats every 30 seconds
   const { data: quickStats } = useQuery<QuickStats>({
@@ -39,12 +211,25 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
     staleTime: 15000,
   });
 
+  // Persist expanded state
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(expandedGroups));
+    }
+  }, [expandedGroups]);
+
+  const toggleGroup = useCallback((groupId: string) => {
+    setExpandedGroups(prev =>
+      prev.includes(groupId)
+        ? prev.filter(id => id !== groupId)
+        : [...prev, groupId]
+    );
+  }, []);
+
   useEffect(() => {
     async function checkAdminAccess() {
       if (authLoading) return;
 
-      // Always enable dev admin mode for admin routes in development
-      // Check both NODE_ENV and window.location for localhost
       const isDev = typeof window !== 'undefined' &&
         (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
 
@@ -62,7 +247,6 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
         setAdminSession(session);
         setIsLoading(false);
       } catch (err) {
-        // In dev mode without user, show access denied
         if (isDev && !user) {
           setError('Dev admin bypass not enabled. Set DEV_ADMIN_BYPASS=true in API .env');
         } else {
@@ -74,6 +258,24 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
 
     checkAdminAccess();
   }, [user, authLoading, router]);
+
+  // Get navigation based on domain selection
+  const navGroups = isGlobal || !selectedDomainId
+    ? getGlobalNavGroups(quickStats)
+    : getDomainNavGroups(selectedDomainId, quickStats);
+
+  // Auto-expand group containing active route
+  useEffect(() => {
+    for (const group of navGroups) {
+      const hasActiveItem = group.items.some(item =>
+        item.href === '/admin' ? pathname === '/admin' : pathname.startsWith(item.href)
+      );
+      if (hasActiveItem && !expandedGroups.includes(group.id)) {
+        setExpandedGroups(prev => [...prev, group.id]);
+        break;
+      }
+    }
+  }, [pathname, navGroups]);
 
   if (authLoading || isLoading) {
     return (
@@ -97,31 +299,21 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
     );
   }
 
-  const navItems = [
-    { href: '/admin', label: 'Dashboard', icon: DashboardIcon },
-    { href: '/admin/users', label: 'Users', icon: UsersIcon, badge: quickStats?.newUsersToday },
-    { href: '/admin/reports', label: 'Reports', icon: ReportsIcon, badge: quickStats?.pendingReports, badgeColor: 'bg-red-500' },
-    { href: '/admin/moderation', label: 'Moderation', icon: ModerationIcon },
-    { href: '/admin/content', label: 'Content', icon: ContentIcon },
-    { href: '/admin/featured', label: 'Featured', icon: FeaturedIcon },
-    { href: '/admin/announcements', label: 'Announcements', icon: AnnouncementsIcon },
-    { href: '/admin/analytics', label: 'Analytics', icon: AnalyticsIcon },
-    { href: '/admin/payments', label: 'Payments', icon: PaymentsIcon },
-    { href: '/admin/live', label: 'Live Streams', icon: LiveIcon, badge: quickStats?.activeLiveStreams, badgeColor: 'bg-green-500' },
-    { href: '/admin/render', label: 'Render Pipeline', icon: RenderIcon },
-    { href: '/admin/infrastructure', label: 'Infrastructure', icon: InfrastructureIcon },
-    { href: '/admin/plc', label: 'PLC Directory', icon: IdentityIcon },
-    { href: '/admin/certificates', label: 'Certificates', icon: CertificatesIcon },
-    { href: '/admin/team', label: 'Admin Team', icon: TeamIcon },
-    { href: '/admin/audit', label: 'Audit Log', icon: AuditIcon },
-    { href: '/admin/activity', label: 'Activity', icon: ActivityIcon },
-    { href: '/admin/settings', label: 'Settings', icon: SettingsIcon },
-  ];
-
   const isActive = (href: string) => {
     if (href === '/admin') return pathname === '/admin';
+    // For domain-scoped routes, check exact path or sub-paths
+    if (href.startsWith('/admin/d/')) {
+      return pathname === href || pathname.startsWith(href + '/');
+    }
     return pathname.startsWith(href);
   };
+
+  const isGroupActive = (group: NavGroup) => {
+    return group.items.some(item => isActive(item.href));
+  };
+
+  // Get dashboard link based on context
+  const dashboardHref = isGlobal || !selectedDomainId ? '/admin' : `/admin/d/${selectedDomainId}`;
 
   return (
     <div className="min-h-screen bg-background flex">
@@ -137,54 +329,111 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
           </Link>
         </div>
 
+        {/* Domain Selector */}
+        <div className="p-3 border-b border-border">
+          <DomainSelector />
+        </div>
+
         {/* Navigation */}
-        <nav className="flex-1 p-4">
-          <ul className="space-y-1">
-            {navItems.map((item) => (
-              <li key={item.href}>
-                <Link
-                  href={item.href}
-                  className={`flex items-center gap-3 px-3 py-2 rounded-lg transition-colors ${
-                    isActive(item.href)
-                      ? 'bg-accent text-text-inverse'
-                      : 'text-text-secondary hover:bg-surface-hover hover:text-text-primary'
-                  }`}
-                >
-                  <item.icon className="w-5 h-5" />
-                  <span className="flex-1">{item.label}</span>
-                  {item.badge !== undefined && item.badge > 0 && (
-                    <span className={`px-1.5 py-0.5 text-xs font-medium rounded-full text-white min-w-[20px] text-center ${
-                      item.badgeColor || 'bg-accent'
-                    }`}>
-                      {item.badge > 99 ? '99+' : item.badge}
-                    </span>
-                  )}
-                </Link>
-              </li>
-            ))}
-          </ul>
+        <nav className="flex-1 p-3 overflow-y-auto">
+          {/* Dashboard - standalone */}
+          <Link
+            href={dashboardHref}
+            className={`flex items-center gap-3 px-3 py-2 rounded-lg transition-colors mb-2 ${
+              pathname === dashboardHref || (pathname === '/admin' && isGlobal)
+                ? 'bg-accent text-text-inverse'
+                : 'text-text-secondary hover:bg-surface-hover hover:text-text-primary'
+            }`}
+          >
+            <DashboardIcon className="w-5 h-5" />
+            <span>Dashboard</span>
+          </Link>
+
+          {/* Accordion Groups */}
+          <div className="space-y-1">
+            {navGroups.map((group) => {
+              const isExpanded = expandedGroups.includes(group.id);
+              const groupActive = isGroupActive(group);
+
+              return (
+                <div key={group.id}>
+                  {/* Group Header */}
+                  <button
+                    onClick={() => toggleGroup(group.id)}
+                    className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg transition-colors ${
+                      groupActive && !isExpanded
+                        ? 'bg-accent/10 text-accent'
+                        : 'text-text-secondary hover:bg-surface-hover hover:text-text-primary'
+                    }`}
+                  >
+                    <group.icon className="w-5 h-5" />
+                    <span className="flex-1 text-left text-sm font-medium">{group.label}</span>
+                    <ChevronIcon
+                      className={`w-4 h-4 transition-transform duration-200 ${
+                        isExpanded ? 'rotate-180' : ''
+                      }`}
+                    />
+                  </button>
+
+                  {/* Group Items */}
+                  <div
+                    className={`overflow-hidden transition-all duration-200 ${
+                      isExpanded ? 'max-h-96 opacity-100' : 'max-h-0 opacity-0'
+                    }`}
+                  >
+                    <ul className="ml-4 mt-1 space-y-0.5 border-l border-border pl-3">
+                      {group.items.map((item) => (
+                        <li key={item.href}>
+                          <Link
+                            href={item.href}
+                            className={`flex items-center gap-2 px-2 py-1.5 rounded-md transition-colors text-sm ${
+                              isActive(item.href)
+                                ? 'bg-accent text-text-inverse'
+                                : 'text-text-secondary hover:bg-surface-hover hover:text-text-primary'
+                            }`}
+                          >
+                            <item.icon className="w-4 h-4" />
+                            <span className="flex-1">{item.label}</span>
+                            {item.badge !== undefined && item.badge > 0 && (
+                              <span
+                                className={`px-1.5 py-0.5 text-xs font-medium rounded-full text-white min-w-[18px] text-center ${
+                                  item.badgeColor || 'bg-accent'
+                                }`}
+                              >
+                                {item.badge > 99 ? '99+' : item.badge}
+                              </span>
+                            )}
+                          </Link>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </nav>
 
         {/* Quick Stats Summary */}
         {quickStats && (
-          <div className="px-4 py-3 border-t border-border">
+          <div className="px-3 py-2 border-t border-border">
             <div className="grid grid-cols-2 gap-2 text-center">
               <div className="p-2 rounded-lg bg-surface-hover">
-                <p className="text-lg font-bold text-text-primary">{quickStats.activeUsersNow}</p>
-                <p className="text-xs text-text-muted">Online Now</p>
+                <p className="text-base font-bold text-text-primary">{quickStats.activeUsersNow}</p>
+                <p className="text-xs text-text-muted">Online</p>
               </div>
               <div className="p-2 rounded-lg bg-surface-hover">
-                <p className="text-lg font-bold text-text-primary">{quickStats.newUsersToday}</p>
-                <p className="text-xs text-text-muted">New Today</p>
+                <p className="text-base font-bold text-text-primary">{quickStats.newUsersToday}</p>
+                <p className="text-xs text-text-muted">New</p>
               </div>
             </div>
           </div>
         )}
 
         {/* Admin info */}
-        <div className="p-4 border-t border-border">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-full bg-surface-hover overflow-hidden">
+        <div className="p-3 border-t border-border">
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 rounded-full bg-surface-hover overflow-hidden flex-shrink-0">
               {adminSession?.user?.avatar ? (
                 <img
                   src={adminSession.user.avatar}
@@ -192,7 +441,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
                   className="w-full h-full object-cover"
                 />
               ) : (
-                <div className="w-full h-full flex items-center justify-center text-text-muted font-semibold">
+                <div className="w-full h-full flex items-center justify-center text-text-muted font-semibold text-sm">
                   {adminSession?.user?.handle?.[0]?.toUpperCase() || '?'}
                 </div>
               )}
@@ -214,6 +463,90 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
         <div className="p-8">{children}</div>
       </main>
     </div>
+  );
+}
+
+export default function AdminLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <AdminDomainProvider>
+      <CommandPaletteProvider>
+        <AdminLayoutContent>{children}</AdminLayoutContent>
+      </CommandPaletteProvider>
+    </AdminDomainProvider>
+  );
+}
+
+// Group Icons
+function ChevronIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+    </svg>
+  );
+}
+
+function UsersGroupIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M15 19.128a9.38 9.38 0 002.625.372 9.337 9.337 0 004.121-.952 4.125 4.125 0 00-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 018.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0111.964-3.07M12 6.375a3.375 3.375 0 11-6.75 0 3.375 3.375 0 016.75 0zm8.25 2.25a2.625 2.625 0 11-5.25 0 2.625 2.625 0 015.25 0z" />
+    </svg>
+  );
+}
+
+function ContentGroupIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M3.375 19.5h17.25m-17.25 0a1.125 1.125 0 01-1.125-1.125M3.375 19.5h7.5c.621 0 1.125-.504 1.125-1.125m-9.75 0V5.625m0 12.75v-1.5c0-.621.504-1.125 1.125-1.125m18.375 2.625V5.625m0 12.75c0 .621-.504 1.125-1.125 1.125m1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125m0 3.75h-7.5A1.125 1.125 0 0112 18.375m9.75-12.75c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125m19.5 0v1.5c0 .621-.504 1.125-1.125 1.125M2.25 5.625v1.5c0 .621.504 1.125 1.125 1.125m0 0h17.25m-17.25 0h7.5c.621 0 1.125.504 1.125 1.125M3.375 8.25c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125m17.25-3.75h-7.5c-.621 0-1.125.504-1.125 1.125m8.625-1.125c.621 0 1.125.504 1.125 1.125v1.5c0 .621-.504 1.125-1.125 1.125m-17.25 0h7.5m-7.5 0c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125M12 10.875v-1.5m0 1.5c0 .621-.504 1.125-1.125 1.125M12 10.875c0 .621.504 1.125 1.125 1.125m-2.25 0c.621 0 1.125.504 1.125 1.125M13.125 12h7.5m-7.5 0c-.621 0-1.125.504-1.125 1.125M20.625 12c.621 0 1.125.504 1.125 1.125v1.5c0 .621-.504 1.125-1.125 1.125m-17.25-3.75h7.5M3.375 12c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125m7.5-3.75v1.5c0 .621.504 1.125 1.125 1.125m0 0h7.5m-17.25 0h7.5m-7.5 0c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125m17.25-3.75c.621 0 1.125.504 1.125 1.125v1.5c0 .621-.504 1.125-1.125 1.125m0 0h-7.5m7.5 0c.621 0 1.125.504 1.125 1.125v1.5" />
+    </svg>
+  );
+}
+
+function PlatformIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M6.429 9.75L2.25 12l4.179 2.25m0-4.5l5.571 3 5.571-3m-11.142 0L2.25 7.5 12 2.25l9.75 5.25-4.179 2.25m0 0L21.75 12l-4.179 2.25m0 0l4.179 2.25L12 21.75 2.25 16.5l4.179-2.25m11.142 0l-5.571 3-5.571-3" />
+    </svg>
+  );
+}
+
+function InfraGroupIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M21.75 17.25v-.228a4.5 4.5 0 00-.12-1.03l-2.268-9.64a3.375 3.375 0 00-3.285-2.602H7.923a3.375 3.375 0 00-3.285 2.602l-2.268 9.64a4.5 4.5 0 00-.12 1.03v.228m19.5 0a3 3 0 01-3 3H5.25a3 3 0 01-3-3m19.5 0a3 3 0 00-3-3H5.25a3 3 0 00-3 3m16.5 0h.008v.008h-.008v-.008zm-3 0h.008v.008h-.008v-.008z" />
+    </svg>
+  );
+}
+
+function SystemIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.324.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.24-.438.613-.431.992a6.759 6.759 0 010 .255c-.007.378.138.75.43.99l1.005.828c.424.35.534.954.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.57 6.57 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.28c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.02-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.992a6.932 6.932 0 010-.255c.007-.378-.138-.75-.43-.99l-1.004-.828a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.281z" />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+    </svg>
+  );
+}
+
+function DomainsIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" />
+    </svg>
+  );
+}
+
+function OrganizationsIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 21h19.5m-18-18v18m10.5-18v18m6-13.5V21M6.75 6.75h.75m-.75 3h.75m-.75 3h.75m3-6h.75m-.75 3h.75m-.75 3h.75M6.75 21v-3.375c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125V21M3 3h12m-.75 4.5H21m-3.75 3.75h.008v.008h-.008v-.008zm0 3h.008v.008h-.008v-.008zm0 3h.008v.008h-.008v-.008z" />
+    </svg>
+  );
+}
+
+function ChallengesIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 18.75h-9m9 0a3 3 0 013 3h-15a3 3 0 013-3m9 0v-3.375c0-.621-.503-1.125-1.125-1.125h-.871M7.5 18.75v-3.375c0-.621.504-1.125 1.125-1.125h.872m5.007 0H9.497m5.007 0a7.454 7.454 0 01-.982-3.172M9.497 14.25a7.454 7.454 0 00.981-3.172M5.25 4.236c-.982.143-1.954.317-2.916.52A6.003 6.003 0 007.73 9.728M5.25 4.236V4.5c0 2.108.966 3.99 2.48 5.228M5.25 4.236V2.721C7.456 2.41 9.71 2.25 12 2.25c2.291 0 4.545.16 6.75.47v1.516M7.73 9.728a6.726 6.726 0 002.748 1.35m3.044-1.35a6.726 6.726 0 01-2.748 1.35m0 0a6.772 6.772 0 01-3.044 0" />
+    </svg>
   );
 }
 
@@ -359,6 +692,22 @@ function ActivityIcon({ className }: { className?: string }) {
   return (
     <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
       <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
+    </svg>
+  );
+}
+
+function AppealsIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h3.75M9 15h3.75M9 18h3.75m3 .75H18a2.25 2.25 0 002.25-2.25V6.108c0-1.135-.845-2.098-1.976-2.192a48.424 48.424 0 00-1.123-.08m-5.801 0c-.065.21-.1.433-.1.664 0 .414.336.75.75.75h4.5a.75.75 0 00.75-.75 2.25 2.25 0 00-.1-.664m-5.8 0A2.251 2.251 0 0113.5 2.25H15c1.012 0 1.867.668 2.15 1.586m-5.8 0c-.376.023-.75.05-1.124.08C9.095 4.01 8.25 4.973 8.25 6.108V8.25m0 0H4.875c-.621 0-1.125.504-1.125 1.125v11.25c0 .621.504 1.125 1.125 1.125h9.75c.621 0 1.125-.504 1.125-1.125V9.375c0-.621-.504-1.125-1.125-1.125H8.25zM6.75 12h.008v.008H6.75V12zm0 3h.008v.008H6.75V15zm0 3h.008v.008H6.75V18z" />
+    </svg>
+  );
+}
+
+function TokensIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z" />
     </svg>
   );
 }

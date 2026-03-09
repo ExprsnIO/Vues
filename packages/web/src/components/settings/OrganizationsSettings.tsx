@@ -120,9 +120,9 @@ interface OrganizationCardProps {
 
 function OrganizationCard({ organization, onManage, onDelete }: OrganizationCardProps) {
   const role = organization.membership.role;
-  const roleName = typeof role === 'object' && 'displayName' in role ? role.displayName : role.name;
-  const roleColor = typeof role === 'object' && 'color' in role ? role.color : undefined;
-  const isOwner = roleName === 'Owner' || roleName === 'owner' || (typeof role === 'object' && role.name === 'owner');
+  const roleName = role.displayName || role.name;
+  const roleColor = 'color' in role ? role.color : undefined;
+  const isOwner = roleName === 'Owner' || roleName === 'owner' || role.name === 'owner';
 
   return (
     <div className="flex items-center gap-4 p-4 bg-surface rounded-lg border border-border hover:border-accent/50 transition-colors">

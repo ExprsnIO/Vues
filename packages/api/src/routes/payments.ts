@@ -8,11 +8,13 @@ import {
   paymentTransactions,
   paymentMethods,
   creatorEarnings,
+  creatorSubscriptionTiers,
+  creatorSubscriptions,
   users,
   organizations,
   organizationMembers,
 } from '../db/schema.js';
-import { eq, and, desc, sql } from 'drizzle-orm';
+import { eq, and, desc, sql, gte, inArray } from 'drizzle-orm';
 import { authMiddleware } from '../auth/middleware.js';
 import { PaymentGatewayFactory } from '../services/payments/index.js';
 import type { PaymentProvider } from '@exprsn/shared/types';
@@ -1441,5 +1443,383 @@ async function processWebhookEvent(
       )
     );
 }
+
+// ============================================
+// Creator Subscriptions
+// ============================================
+
+// Create subscription tier
+paymentRoutes.post('/io.exprsn.payments.createSubscriptionTier', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const body = await c.req.json<{
+    name: string;
+    description?: string;
+    price: number; // cents/month
+    benefits?: {
+      earlyAccess?: boolean;
+      exclusiveContent?: boolean;
+      behindTheScenes?: boolean;
+      directMessaging?: boolean;
+      customEmojis?: boolean;
+      badgeColor?: string;
+    };
+    maxSubscribers?: number;
+  }>();
+
+  if (!body.name || body.price === undefined || body.price < 100) {
+    throw new HTTPException(400, { message: 'Name and price (min $1.00) required' });
+  }
+
+  const tierId = nanoid();
+  await db.insert(creatorSubscriptionTiers).values({
+    id: tierId,
+    creatorDid: userDid,
+    name: body.name,
+    description: body.description,
+    price: body.price,
+    benefits: body.benefits,
+    maxSubscribers: body.maxSubscribers,
+  });
+
+  return c.json({
+    tier: {
+      id: tierId,
+      creatorDid: userDid,
+      name: body.name,
+      price: body.price,
+      benefits: body.benefits,
+    },
+  });
+});
+
+// Get creator's subscription tiers
+paymentRoutes.get('/io.exprsn.payments.getSubscriptionTiers', async (c) => {
+  const creatorDid = c.req.query('creatorDid');
+  if (!creatorDid) {
+    throw new HTTPException(400, { message: 'creatorDid required' });
+  }
+
+  const tiers = await db
+    .select()
+    .from(creatorSubscriptionTiers)
+    .where(
+      and(
+        eq(creatorSubscriptionTiers.creatorDid, creatorDid),
+        eq(creatorSubscriptionTiers.isActive, true)
+      )
+    )
+    .orderBy(creatorSubscriptionTiers.sortOrder);
+
+  return c.json({
+    tiers: tiers.map((t) => ({
+      id: t.id,
+      name: t.name,
+      description: t.description,
+      price: t.price,
+      benefits: t.benefits,
+      currentSubscribers: t.currentSubscribers,
+      maxSubscribers: t.maxSubscribers,
+    })),
+  });
+});
+
+// Subscribe to a creator
+paymentRoutes.post('/io.exprsn.payments.subscribe', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const body = await c.req.json<{
+    tierId: string;
+    paymentMethodId?: string;
+  }>();
+
+  if (!body.tierId) {
+    throw new HTTPException(400, { message: 'tierId required' });
+  }
+
+  // Get tier
+  const tierResult = await db
+    .select()
+    .from(creatorSubscriptionTiers)
+    .where(eq(creatorSubscriptionTiers.id, body.tierId))
+    .limit(1);
+
+  const tier = tierResult[0];
+  if (!tier || !tier.isActive) {
+    throw new HTTPException(404, { message: 'Tier not found or inactive' });
+  }
+
+  // Check if already subscribed
+  const existingSub = await db
+    .select()
+    .from(creatorSubscriptions)
+    .where(
+      and(
+        eq(creatorSubscriptions.subscriberDid, userDid),
+        eq(creatorSubscriptions.creatorDid, tier.creatorDid),
+        eq(creatorSubscriptions.status, 'active')
+      )
+    )
+    .limit(1);
+
+  if (existingSub[0]) {
+    throw new HTTPException(400, { message: 'Already subscribed to this creator' });
+  }
+
+  // Check capacity
+  if (tier.maxSubscribers && tier.currentSubscribers >= tier.maxSubscribers) {
+    throw new HTTPException(400, { message: 'Subscription tier is at capacity' });
+  }
+
+  // Create subscription
+  const subId = nanoid();
+  const now = new Date();
+  const periodEnd = new Date(now);
+  periodEnd.setMonth(periodEnd.getMonth() + 1);
+
+  await db.insert(creatorSubscriptions).values({
+    id: subId,
+    subscriberDid: userDid,
+    creatorDid: tier.creatorDid,
+    tierId: body.tierId,
+    status: 'active',
+    currentPeriodStart: now,
+    currentPeriodEnd: periodEnd,
+  });
+
+  // Update subscriber count
+  await db
+    .update(creatorSubscriptionTiers)
+    .set({ currentSubscribers: sql`${creatorSubscriptionTiers.currentSubscribers} + 1` })
+    .where(eq(creatorSubscriptionTiers.id, body.tierId));
+
+  // Record payment (deduct from subscriber, credit to creator)
+  // Platform takes 30% of subscription revenue
+  const platformFee = Math.floor(tier.price * 0.3);
+  const creatorPayout = tier.price - platformFee;
+
+  // Update creator earnings
+  await db
+    .insert(creatorEarnings)
+    .values({
+      userDid: tier.creatorDid,
+      totalEarnings: creatorPayout,
+      pendingBalance: creatorPayout,
+      availableBalance: 0,
+    })
+    .onConflictDoUpdate({
+      target: creatorEarnings.userDid,
+      set: {
+        totalEarnings: sql`${creatorEarnings.totalEarnings} + ${creatorPayout}`,
+        pendingBalance: sql`${creatorEarnings.pendingBalance} + ${creatorPayout}`,
+        updatedAt: new Date(),
+      },
+    });
+
+  return c.json({
+    subscription: {
+      id: subId,
+      creatorDid: tier.creatorDid,
+      tierId: body.tierId,
+      tierName: tier.name,
+      status: 'active',
+      currentPeriodEnd: periodEnd.toISOString(),
+    },
+  });
+});
+
+// Cancel subscription
+paymentRoutes.post('/io.exprsn.payments.cancelSubscription', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const body = await c.req.json<{ subscriptionId: string }>();
+  if (!body.subscriptionId) {
+    throw new HTTPException(400, { message: 'subscriptionId required' });
+  }
+
+  const subResult = await db
+    .select()
+    .from(creatorSubscriptions)
+    .where(eq(creatorSubscriptions.id, body.subscriptionId))
+    .limit(1);
+
+  const subscription = subResult[0];
+  if (!subscription) {
+    throw new HTTPException(404, { message: 'Subscription not found' });
+  }
+
+  if (subscription.subscriberDid !== userDid) {
+    throw new HTTPException(403, { message: 'Permission denied' });
+  }
+
+  if (subscription.status !== 'active') {
+    throw new HTTPException(400, { message: 'Subscription is not active' });
+  }
+
+  // Cancel at end of period
+  await db
+    .update(creatorSubscriptions)
+    .set({
+      status: 'cancelled',
+      cancelledAt: new Date(),
+      updatedAt: new Date(),
+    })
+    .where(eq(creatorSubscriptions.id, body.subscriptionId));
+
+  // Update subscriber count
+  await db
+    .update(creatorSubscriptionTiers)
+    .set({ currentSubscribers: sql`${creatorSubscriptionTiers.currentSubscribers} - 1` })
+    .where(eq(creatorSubscriptionTiers.id, subscription.tierId));
+
+  return c.json({ success: true });
+});
+
+// Get user's subscriptions
+paymentRoutes.get('/io.exprsn.payments.getSubscriptions', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const subscriptions = await db
+    .select({
+      subscription: creatorSubscriptions,
+      tier: creatorSubscriptionTiers,
+      creator: {
+        did: users.did,
+        handle: users.handle,
+        displayName: users.displayName,
+        avatar: users.avatar,
+      },
+    })
+    .from(creatorSubscriptions)
+    .innerJoin(creatorSubscriptionTiers, eq(creatorSubscriptions.tierId, creatorSubscriptionTiers.id))
+    .innerJoin(users, eq(creatorSubscriptions.creatorDid, users.did))
+    .where(eq(creatorSubscriptions.subscriberDid, userDid))
+    .orderBy(desc(creatorSubscriptions.createdAt));
+
+  return c.json({
+    subscriptions: subscriptions.map(({ subscription, tier, creator }) => ({
+      id: subscription.id,
+      creator,
+      tier: {
+        id: tier.id,
+        name: tier.name,
+        price: tier.price,
+        benefits: tier.benefits,
+      },
+      status: subscription.status,
+      currentPeriodEnd: subscription.currentPeriodEnd.toISOString(),
+      cancelledAt: subscription.cancelledAt?.toISOString(),
+    })),
+  });
+});
+
+// Get creator's subscribers
+paymentRoutes.get('/io.exprsn.payments.getSubscribers', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const limit = Math.min(parseInt(c.req.query('limit') || '50'), 100);
+  const cursor = c.req.query('cursor');
+
+  const conditions = [
+    eq(creatorSubscriptions.creatorDid, userDid),
+    eq(creatorSubscriptions.status, 'active'),
+  ];
+
+  if (cursor) {
+    conditions.push(sql`${creatorSubscriptions.createdAt} < ${new Date(cursor)}`);
+  }
+
+  const subscribers = await db
+    .select({
+      subscription: creatorSubscriptions,
+      tier: creatorSubscriptionTiers,
+      subscriber: {
+        did: users.did,
+        handle: users.handle,
+        displayName: users.displayName,
+        avatar: users.avatar,
+      },
+    })
+    .from(creatorSubscriptions)
+    .innerJoin(creatorSubscriptionTiers, eq(creatorSubscriptions.tierId, creatorSubscriptionTiers.id))
+    .innerJoin(users, eq(creatorSubscriptions.subscriberDid, users.did))
+    .where(and(...conditions))
+    .orderBy(desc(creatorSubscriptions.createdAt))
+    .limit(limit + 1);
+
+  const hasMore = subscribers.length > limit;
+  const results = hasMore ? subscribers.slice(0, -1) : subscribers;
+
+  return c.json({
+    subscribers: results.map(({ subscription, tier, subscriber }) => ({
+      subscriber,
+      tier: {
+        id: tier.id,
+        name: tier.name,
+      },
+      subscribedAt: subscription.createdAt.toISOString(),
+    })),
+    cursor: hasMore ? results[results.length - 1]?.subscription.createdAt.toISOString() : undefined,
+  });
+});
+
+// Check if user is subscribed to a creator
+paymentRoutes.get('/io.exprsn.payments.isSubscribed', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const creatorDid = c.req.query('creatorDid');
+  if (!creatorDid) {
+    throw new HTTPException(400, { message: 'creatorDid required' });
+  }
+
+  const subscription = await db
+    .select({
+      subscription: creatorSubscriptions,
+      tier: creatorSubscriptionTiers,
+    })
+    .from(creatorSubscriptions)
+    .innerJoin(creatorSubscriptionTiers, eq(creatorSubscriptions.tierId, creatorSubscriptionTiers.id))
+    .where(
+      and(
+        eq(creatorSubscriptions.subscriberDid, userDid),
+        eq(creatorSubscriptions.creatorDid, creatorDid),
+        eq(creatorSubscriptions.status, 'active'),
+        gte(creatorSubscriptions.currentPeriodEnd, new Date())
+      )
+    )
+    .limit(1);
+
+  const sub = subscription[0];
+
+  return c.json({
+    isSubscribed: !!sub,
+    subscription: sub
+      ? {
+          tierId: sub.subscription.tierId,
+          tierName: sub.tier.name,
+          benefits: sub.tier.benefits,
+          expiresAt: sub.subscription.currentPeriodEnd.toISOString(),
+        }
+      : null,
+  });
+});
 
 export default paymentRoutes;

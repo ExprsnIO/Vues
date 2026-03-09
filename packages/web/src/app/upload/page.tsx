@@ -2,16 +2,28 @@
 
 import { useState, useRef, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
-import { useMutation } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Sidebar } from '@/components/Sidebar';
 import { api } from '@/lib/api';
 import { useAuth } from '@/lib/auth-context';
+import toast from 'react-hot-toast';
 
 const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
 const ACCEPTED_TYPES = ['video/mp4', 'video/webm', 'video/quicktime'];
 
+interface FailedUpload {
+  id: string;
+  status: string;
+  error?: string;
+  retryCount: number;
+  maxRetries: number;
+  canRetry: boolean;
+  createdAt: string;
+}
+
 export default function UploadPage() {
   const router = useRouter();
+  const queryClient = useQueryClient();
   const { user, isLoading: isAuthLoading } = useAuth();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -23,6 +35,43 @@ export default function UploadPage() {
   const [visibility, setVisibility] = useState<'public' | 'followers'>('public');
   const [uploadProgress, setUploadProgress] = useState(0);
   const [processingStatus, setProcessingStatus] = useState<string | null>(null);
+
+  // Fetch failed uploads
+  const { data: failedUploads } = useQuery<{ uploads: FailedUpload[] }>({
+    queryKey: ['failed-uploads'],
+    queryFn: async () => {
+      const response = await fetch('/api/xrpc/io.exprsn.upload.getFailedUploads', {
+        credentials: 'include',
+      });
+      if (!response.ok) return { uploads: [] };
+      return response.json();
+    },
+    enabled: !!user,
+  });
+
+  // Retry mutation
+  const retryMutation = useMutation({
+    mutationFn: async (uploadId: string) => {
+      const response = await fetch('/api/xrpc/io.exprsn.upload.retry', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ uploadId }),
+      });
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.message || 'Failed to retry upload');
+      }
+      return response.json();
+    },
+    onSuccess: () => {
+      toast.success('Retry started');
+      queryClient.invalidateQueries({ queryKey: ['failed-uploads'] });
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || 'Failed to retry upload');
+    },
+  });
 
   const uploadMutation = useMutation({
     mutationFn: async () => {
@@ -335,6 +384,52 @@ export default function UploadPage() {
               </button>
             </div>
           </div>
+
+          {/* Failed Uploads Section */}
+          {failedUploads && failedUploads.uploads.length > 0 && (
+            <div className="mt-12">
+              <h2 className="text-xl font-bold text-white mb-4">Failed Uploads</h2>
+              <p className="text-gray-400 text-sm mb-4">
+                These uploads failed to process. You can retry them below.
+              </p>
+              <div className="space-y-3">
+                {failedUploads.uploads.map((upload) => (
+                  <div
+                    key={upload.id}
+                    className="bg-zinc-900 border border-zinc-700 rounded-lg p-4 flex items-center justify-between"
+                  >
+                    <div>
+                      <p className="text-white font-medium">
+                        Upload {upload.id.slice(0, 8)}...
+                      </p>
+                      <p className="text-red-400 text-sm">
+                        {upload.error || 'Processing failed'}
+                      </p>
+                      <p className="text-gray-500 text-xs mt-1">
+                        {new Date(upload.createdAt).toLocaleDateString()} &bull;{' '}
+                        {upload.retryCount}/{upload.maxRetries} retries used
+                      </p>
+                    </div>
+                    <div className="flex gap-2">
+                      {upload.canRetry ? (
+                        <button
+                          onClick={() => retryMutation.mutate(upload.id)}
+                          disabled={retryMutation.isPending}
+                          className="px-4 py-2 bg-primary-500 hover:bg-primary-600 disabled:opacity-50 text-white rounded-lg text-sm font-medium transition-colors"
+                        >
+                          {retryMutation.isPending ? 'Retrying...' : 'Retry'}
+                        </button>
+                      ) : (
+                        <span className="px-4 py-2 bg-zinc-800 text-gray-500 rounded-lg text-sm">
+                          Max retries reached
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       </main>
     </div>

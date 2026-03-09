@@ -8,6 +8,8 @@ import { useSettingsStore } from '@/stores/settings-store';
 import { cn } from '@/lib/utils';
 import toast from 'react-hot-toast';
 
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3002';
+
 interface EditorSettingsProps {
   editor: EditorSettingsType;
   onUpdate: (update: UserSettingsUpdate) => void;
@@ -43,21 +45,28 @@ export function EditorSettings({ editor, onUpdate, isUpdating }: EditorSettingsP
   const toggleFavoritePreset = useSettingsStore((state) => state.toggleFavoritePreset);
   const updateEditor = useSettingsStore((state) => state.updateEditor);
 
+  // Get editor settings from store as fallback
+  const storeEditor = useSettingsStore((state) => state.settings.editor);
+
+  // Use provided editor prop or fall back to store
+  const editorSettings = editor || storeEditor;
+
   // Fetch system presets
   const { data: presetsData } = useQuery({
     queryKey: ['effects', 'presets'],
     queryFn: async () => {
-      const response = await fetch('/api/xrpc/io.exprsn.studio.effects.presets');
+      const response = await fetch(`${API_BASE}/xrpc/io.exprsn.studio.effects.presets`);
       return response.json();
     },
   });
 
   const systemPresets: EffectPreset[] = presetsData?.presets || [];
 
-  // Combine system presets with custom presets
+  // Combine system presets with custom presets (defensive: use empty array if undefined)
+  const customPresets = editorSettings?.customPresets || [];
   const allPresets = [
     ...systemPresets,
-    ...editor.customPresets.map((p) => ({
+    ...customPresets.map((p) => ({
       id: p.id,
       name: p.name,
       description: p.description || 'Custom preset',
@@ -101,13 +110,13 @@ export function EditorSettings({ editor, onUpdate, isUpdating }: EditorSettingsP
 
   const handleDeletePreset = useCallback(
     (presetId: string) => {
-      const preset = editor.customPresets.find((p) => p.id === presetId);
+      const preset = editorSettings.customPresets.find((p) => p.id === presetId);
       if (preset && window.confirm(`Delete preset "${preset.name}"?`)) {
         removeCustomPreset(presetId);
         toast.success('Preset deleted');
       }
     },
-    [editor.customPresets, removeCustomPreset]
+    [editorSettings.customPresets, removeCustomPreset]
   );
 
   const handleToggleFavorite = useCallback(
@@ -122,7 +131,7 @@ export function EditorSettings({ editor, onUpdate, isUpdating }: EditorSettingsP
     return allPresets.find((p) => p.id === id);
   };
 
-  const defaultPreset = editor.defaultPresetId ? getPresetById(editor.defaultPresetId) : null;
+  const defaultPreset = editorSettings.defaultPresetId ? getPresetById(editorSettings.defaultPresetId) : null;
 
   return (
     <div className="space-y-6">
@@ -133,7 +142,7 @@ export function EditorSettings({ editor, onUpdate, isUpdating }: EditorSettingsP
           This preset will be suggested when you start editing a new video.
         </p>
         <Select
-          value={editor.defaultPresetId || 'none'}
+          value={editorSettings.defaultPresetId || 'none'}
           onChange={(value) => handleSetDefaultPreset(value === 'none' ? null : value)}
           options={[
             { value: 'none', label: 'None' },
@@ -149,9 +158,9 @@ export function EditorSettings({ editor, onUpdate, isUpdating }: EditorSettingsP
         description="Automatically apply the default preset when starting the editor"
       >
         <ToggleSwitch
-          checked={editor.autoApplyDefault}
+          checked={editorSettings.autoApplyDefault}
           onChange={handleToggleAutoApply}
-          disabled={isUpdating || !editor.defaultPresetId}
+          disabled={isUpdating || !editorSettings.defaultPresetId}
         />
       </SettingsRow>
 
@@ -161,7 +170,7 @@ export function EditorSettings({ editor, onUpdate, isUpdating }: EditorSettingsP
         description="Display descriptions below preset names in the effects panel"
       >
         <ToggleSwitch
-          checked={editor.showPresetDescriptions}
+          checked={editorSettings.showPresetDescriptions}
           onChange={handleToggleDescriptions}
           disabled={isUpdating}
         />
@@ -173,11 +182,11 @@ export function EditorSettings({ editor, onUpdate, isUpdating }: EditorSettingsP
         <p className="text-xs text-text-muted mb-3">
           Quick access to your favorite presets in the editor.
         </p>
-        {editor.favoritePresetIds.length === 0 ? (
+        {(!editorSettings.favoritePresetIds || editorSettings.favoritePresetIds.length === 0) ? (
           <p className="text-sm text-text-muted italic">No favorites yet. Star presets in the editor to add them here.</p>
         ) : (
           <div className="flex flex-wrap gap-2">
-            {editor.favoritePresetIds.map((presetId) => {
+            {(editorSettings.favoritePresetIds || []).map((presetId) => {
               const preset = getPresetById(presetId);
               if (!preset) return null;
               return (
@@ -217,11 +226,11 @@ export function EditorSettings({ editor, onUpdate, isUpdating }: EditorSettingsP
           </button>
         </div>
 
-        {editor.customPresets.length === 0 ? (
+        {(!editorSettings.customPresets || editorSettings.customPresets.length === 0) ? (
           <p className="text-sm text-text-muted italic">No custom presets yet.</p>
         ) : (
           <div className="space-y-2">
-            {editor.customPresets.map((preset) => (
+            {(editorSettings.customPresets || []).map((preset) => (
               <div
                 key={preset.id}
                 className="flex items-center justify-between p-3 bg-surface-hover rounded-lg"
@@ -229,10 +238,10 @@ export function EditorSettings({ editor, onUpdate, isUpdating }: EditorSettingsP
                 <div className="flex-1">
                   <div className="flex items-center gap-2">
                     <span className="font-medium text-sm text-text-primary">{preset.name}</span>
-                    {editor.favoritePresetIds.includes(preset.id) && (
+                    {(editorSettings.favoritePresetIds || []).includes(preset.id) && (
                       <StarFilledIcon className="w-3 h-3 text-yellow-500" />
                     )}
-                    {editor.defaultPresetId === preset.id && (
+                    {editorSettings.defaultPresetId === preset.id && (
                       <span className="px-1.5 py-0.5 bg-accent/20 text-accent text-xs rounded">Default</span>
                     )}
                   </div>
@@ -248,11 +257,11 @@ export function EditorSettings({ editor, onUpdate, isUpdating }: EditorSettingsP
                     onClick={() => handleToggleFavorite(preset.id)}
                     className={cn(
                       'p-1.5 rounded hover:bg-surface transition-colors',
-                      editor.favoritePresetIds.includes(preset.id) ? 'text-yellow-500' : 'text-text-muted'
+                      (editorSettings.favoritePresetIds || []).includes(preset.id) ? 'text-yellow-500' : 'text-text-muted'
                     )}
-                    title={editor.favoritePresetIds.includes(preset.id) ? 'Remove from favorites' : 'Add to favorites'}
+                    title={(editorSettings.favoritePresetIds || []).includes(preset.id) ? 'Remove from favorites' : 'Add to favorites'}
                   >
-                    {editor.favoritePresetIds.includes(preset.id) ? (
+                    {(editorSettings.favoritePresetIds || []).includes(preset.id) ? (
                       <StarFilledIcon className="w-4 h-4" />
                     ) : (
                       <StarIcon className="w-4 h-4" />
@@ -280,11 +289,11 @@ export function EditorSettings({ editor, onUpdate, isUpdating }: EditorSettingsP
       </div>
 
       {/* Recent Presets */}
-      {editor.recentPresetIds.length > 0 && (
+      {editorSettings.recentPresetIds && editorSettings.recentPresetIds.length > 0 && (
         <div>
           <p className="text-sm font-medium text-text-primary mb-3">Recently Used</p>
           <div className="flex flex-wrap gap-2">
-            {editor.recentPresetIds.slice(0, 5).map((presetId) => {
+            {(editorSettings.recentPresetIds || []).slice(0, 5).map((presetId) => {
               const preset = getPresetById(presetId);
               if (!preset) return null;
               return (
@@ -315,7 +324,7 @@ export function EditorSettings({ editor, onUpdate, isUpdating }: EditorSettingsP
           onClose={() => setSelectedPresetForEdit(null)}
           onSave={(name, description) => {
             // Update the preset in the store
-            const updatedPresets = editor.customPresets.map((p) =>
+            const updatedPresets = editorSettings.customPresets.map((p) =>
               p.id === selectedPresetForEdit.id ? { ...p, name, description } : p
             );
             updateEditor({ customPresets: updatedPresets });
@@ -343,7 +352,7 @@ function CreatePresetModal({ onClose, onCreate }: CreatePresetModalProps) {
   const { data: effectsData } = useQuery({
     queryKey: ['effects', 'list'],
     queryFn: async () => {
-      const response = await fetch('/api/xrpc/io.exprsn.studio.effects.list');
+      const response = await fetch(`${API_BASE}/xrpc/io.exprsn.studio.effects.list`);
       return response.json();
     },
   });

@@ -17,7 +17,14 @@ import {
   organizations,
   organizationMembers,
   organizationActivity,
+  organizationRoles,
   sessions,
+  domains,
+  domainUsers,
+  domainRoles,
+  domainUserRoles,
+  domainGroups,
+  domainGroupMembers,
   type AdminUser,
 } from '../db/schema.js';
 import {
@@ -38,6 +45,13 @@ import {
   exportSanctions,
   type ExportFormat,
 } from '../services/export/index.js';
+import {
+  ensureSystemDomainRoles,
+  getDomainPermissionCatalog,
+  getEffectiveDomainAccess,
+  getLegacyDomainRole,
+  listInheritedGlobalAdmins,
+} from '../services/domain-access.js';
 import { broadcastAdminActivity, notifyAdmins } from '../websocket/admin.js';
 
 export const adminRouter = new Hono();
@@ -905,6 +919,735 @@ adminRouter.post(
 );
 
 // ============================================
+// User Domain/Org/Role/Group Management
+// ============================================
+
+// Get user's memberships (domains, organizations, roles, groups)
+adminRouter.get(
+  '/io.exprsn.admin.users.getMemberships',
+  requirePermission(ADMIN_PERMISSIONS.USERS_VIEW),
+  async (c) => {
+    const userDid = c.req.query('did');
+
+    if (!userDid) {
+      return c.json({ error: 'InvalidRequest', message: 'did is required' }, 400);
+    }
+
+    // Get user's domain memberships
+    const domainMemberships = await db
+      .select({
+        domainUser: domainUsers,
+        domain: {
+          id: domains.id,
+          name: domains.name,
+          displayName: domains.name, // domains table uses name as display name
+        },
+      })
+      .from(domainUsers)
+      .innerJoin(domains, eq(domains.id, domainUsers.domainId))
+      .where(eq(domainUsers.userDid, userDid));
+
+    // Get roles for each domain user
+    const domainUserIds = domainMemberships.map((dm) => dm.domainUser.id);
+    const userRoles = domainUserIds.length > 0
+      ? await db
+          .select({
+            domainUserId: domainUserRoles.domainUserId,
+            role: {
+              id: domainRoles.id,
+              name: domainRoles.name,
+              displayName: domainRoles.displayName,
+              permissions: domainRoles.permissions,
+            },
+          })
+          .from(domainUserRoles)
+          .innerJoin(domainRoles, eq(domainRoles.id, domainUserRoles.roleId))
+          .where(inArray(domainUserRoles.domainUserId, domainUserIds))
+      : [];
+
+    // Map roles by domain user ID
+    const rolesByDomainUser = new Map<string, typeof userRoles>();
+    for (const ur of userRoles) {
+      const existing = rolesByDomainUser.get(ur.domainUserId) || [];
+      existing.push(ur);
+      rolesByDomainUser.set(ur.domainUserId, existing);
+    }
+
+    // Get user's group memberships
+    const groupMemberships = await db
+      .select({
+        membership: domainGroupMembers,
+        group: {
+          id: domainGroups.id,
+          name: domainGroups.name,
+          description: domainGroups.description,
+          domainId: domainGroups.domainId,
+        },
+        domain: {
+          id: domains.id,
+          name: domains.name,
+        },
+      })
+      .from(domainGroupMembers)
+      .innerJoin(domainGroups, eq(domainGroups.id, domainGroupMembers.groupId))
+      .innerJoin(domains, eq(domains.id, domainGroups.domainId))
+      .where(eq(domainGroupMembers.userDid, userDid));
+
+    // Get user's organization memberships
+    const orgMemberships = await db
+      .select({
+        member: organizationMembers,
+        org: {
+          id: organizations.id,
+          name: organizations.name,
+          type: organizations.type,
+          avatar: organizations.avatar,
+        },
+      })
+      .from(organizationMembers)
+      .innerJoin(organizations, eq(organizations.id, organizationMembers.organizationId))
+      .where(eq(organizationMembers.userDid, userDid));
+
+    return c.json({
+      domains: domainMemberships.map((dm) => ({
+        id: dm.domainUser.id,
+        domainId: dm.domain.id,
+        domainName: dm.domain.name,
+        domainDisplayName: dm.domain.displayName,
+        role: dm.domainUser.role,
+        handle: dm.domainUser.handle,
+        isActive: dm.domainUser.isActive,
+        createdAt: dm.domainUser.createdAt,
+        roles: (rolesByDomainUser.get(dm.domainUser.id) || []).map((r) => r.role),
+      })),
+      groups: groupMemberships.map((gm) => ({
+        id: gm.membership.id,
+        groupId: gm.group.id,
+        groupName: gm.group.name,
+        groupDescription: gm.group.description,
+        domainId: gm.domain.id,
+        domainName: gm.domain.name,
+        createdAt: gm.membership.createdAt,
+      })),
+      organizations: orgMemberships.map((om) => ({
+        id: om.member.id,
+        orgId: om.org.id,
+        orgName: om.org.name,
+        orgType: om.org.type,
+        orgAvatar: om.org.avatar,
+        role: om.member.role,
+        permissions: om.member.permissions,
+        joinedAt: om.member.joinedAt,
+      })),
+    });
+  }
+);
+
+// Add user to domain
+adminRouter.post(
+  '/io.exprsn.admin.users.addToDomain',
+  requirePermission(ADMIN_PERMISSIONS.USERS_EDIT),
+  async (c) => {
+    const body = await c.req.json<{
+      userDid: string;
+      domainId: string;
+      role?: string;
+      handle?: string;
+    }>();
+    const adminUser = c.get('adminUser');
+
+    if (!body.userDid || !body.domainId) {
+      return c.json({ error: 'InvalidRequest', message: 'userDid and domainId are required' }, 400);
+    }
+
+    // Check domain exists
+    const [domain] = await db.select().from(domains).where(eq(domains.id, body.domainId)).limit(1);
+    if (!domain) {
+      return c.json({ error: 'NotFound', message: 'Domain not found' }, 404);
+    }
+
+    // Check user exists
+    const [user] = await db.select().from(users).where(eq(users.did, body.userDid)).limit(1);
+    if (!user) {
+      return c.json({ error: 'NotFound', message: 'User not found' }, 404);
+    }
+
+    // Check if already a member
+    const [existing] = await db
+      .select()
+      .from(domainUsers)
+      .where(and(eq(domainUsers.domainId, body.domainId), eq(domainUsers.userDid, body.userDid)))
+      .limit(1);
+
+    if (existing) {
+      return c.json({ error: 'Conflict', message: 'User is already a member of this domain' }, 409);
+    }
+
+    const domainUserId = nanoid();
+    await db.insert(domainUsers).values({
+      id: domainUserId,
+      domainId: body.domainId,
+      userDid: body.userDid,
+      role: body.role || 'member',
+      handle: body.handle || user.handle,
+      isActive: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    // Audit log
+    await db.insert(adminAuditLog).values({
+      id: nanoid(),
+      adminId: adminUser.id,
+      action: 'user.addToDomain',
+      targetType: 'user',
+      targetId: body.userDid,
+      details: { domainId: body.domainId, role: body.role || 'member' },
+      createdAt: new Date(),
+    });
+
+    return c.json({ success: true, domainUserId });
+  }
+);
+
+// Remove user from domain
+adminRouter.post(
+  '/io.exprsn.admin.users.removeFromDomain',
+  requirePermission(ADMIN_PERMISSIONS.USERS_EDIT),
+  async (c) => {
+    const body = await c.req.json<{
+      userDid: string;
+      domainId: string;
+    }>();
+    const adminUser = c.get('adminUser');
+
+    if (!body.userDid || !body.domainId) {
+      return c.json({ error: 'InvalidRequest', message: 'userDid and domainId are required' }, 400);
+    }
+
+    await db
+      .delete(domainUsers)
+      .where(and(eq(domainUsers.domainId, body.domainId), eq(domainUsers.userDid, body.userDid)));
+
+    // Audit log
+    await db.insert(adminAuditLog).values({
+      id: nanoid(),
+      adminId: adminUser.id,
+      action: 'user.removeFromDomain',
+      targetType: 'user',
+      targetId: body.userDid,
+      details: { domainId: body.domainId },
+      createdAt: new Date(),
+    });
+
+    return c.json({ success: true });
+  }
+);
+
+// Add user to organization
+adminRouter.post(
+  '/io.exprsn.admin.users.addToOrganization',
+  requirePermission(ADMIN_PERMISSIONS.USERS_EDIT),
+  async (c) => {
+    const body = await c.req.json<{
+      userDid: string;
+      organizationId: string;
+      role?: string;
+    }>();
+    const adminUser = c.get('adminUser');
+
+    if (!body.userDid || !body.organizationId) {
+      return c.json({ error: 'InvalidRequest', message: 'userDid and organizationId are required' }, 400);
+    }
+
+    // Check org exists
+    const [org] = await db
+      .select({ id: organizations.id, name: organizations.name, memberCount: organizations.memberCount })
+      .from(organizations)
+      .where(eq(organizations.id, body.organizationId))
+      .limit(1);
+    if (!org) {
+      return c.json({ error: 'NotFound', message: 'Organization not found' }, 404);
+    }
+
+    // Check user exists
+    const [user] = await db.select().from(users).where(eq(users.did, body.userDid)).limit(1);
+    if (!user) {
+      return c.json({ error: 'NotFound', message: 'User not found' }, 404);
+    }
+
+    // Check if already a member
+    const [existing] = await db
+      .select()
+      .from(organizationMembers)
+      .where(
+        and(
+          eq(organizationMembers.organizationId, body.organizationId),
+          eq(organizationMembers.userDid, body.userDid)
+        )
+      )
+      .limit(1);
+
+    if (existing) {
+      return c.json({ error: 'Conflict', message: 'User is already a member of this organization' }, 409);
+    }
+
+    const memberId = nanoid();
+    await db.insert(organizationMembers).values({
+      id: memberId,
+      organizationId: body.organizationId,
+      userDid: body.userDid,
+      role: body.role || 'member',
+      permissions: [],
+      joinedAt: new Date(),
+    });
+
+    // Update member count
+    await db
+      .update(organizations)
+      .set({ memberCount: org.memberCount + 1 })
+      .where(eq(organizations.id, body.organizationId));
+
+    // Audit log
+    await db.insert(adminAuditLog).values({
+      id: nanoid(),
+      adminId: adminUser.id,
+      action: 'user.addToOrganization',
+      targetType: 'user',
+      targetId: body.userDid,
+      details: { organizationId: body.organizationId, role: body.role || 'member' },
+      createdAt: new Date(),
+    });
+
+    return c.json({ success: true, memberId });
+  }
+);
+
+// Remove user from organization
+adminRouter.post(
+  '/io.exprsn.admin.users.removeFromOrganization',
+  requirePermission(ADMIN_PERMISSIONS.USERS_EDIT),
+  async (c) => {
+    const body = await c.req.json<{
+      userDid: string;
+      organizationId: string;
+    }>();
+    const adminUser = c.get('adminUser');
+
+    if (!body.userDid || !body.organizationId) {
+      return c.json({ error: 'InvalidRequest', message: 'userDid and organizationId are required' }, 400);
+    }
+
+    // Get org for member count update
+    const [org] = await db
+      .select({ memberCount: organizations.memberCount })
+      .from(organizations)
+      .where(eq(organizations.id, body.organizationId))
+      .limit(1);
+
+    await db
+      .delete(organizationMembers)
+      .where(
+        and(
+          eq(organizationMembers.organizationId, body.organizationId),
+          eq(organizationMembers.userDid, body.userDid)
+        )
+      );
+
+    // Update member count
+    if (org && org.memberCount > 0) {
+      await db
+        .update(organizations)
+        .set({ memberCount: org.memberCount - 1 })
+        .where(eq(organizations.id, body.organizationId));
+    }
+
+    // Audit log
+    await db.insert(adminAuditLog).values({
+      id: nanoid(),
+      adminId: adminUser.id,
+      action: 'user.removeFromOrganization',
+      targetType: 'user',
+      targetId: body.userDid,
+      details: { organizationId: body.organizationId },
+      createdAt: new Date(),
+    });
+
+    return c.json({ success: true });
+  }
+);
+
+// Assign role to user in domain
+adminRouter.post(
+  '/io.exprsn.admin.users.assignDomainRole',
+  requirePermission(ADMIN_PERMISSIONS.USERS_EDIT),
+  async (c) => {
+    const body = await c.req.json<{
+      userDid: string;
+      domainId: string;
+      roleId: string;
+    }>();
+    const adminUser = c.get('adminUser');
+
+    if (!body.userDid || !body.domainId || !body.roleId) {
+      return c.json({ error: 'InvalidRequest', message: 'userDid, domainId, and roleId are required' }, 400);
+    }
+
+    // Get domain user
+    const [domainUser] = await db
+      .select()
+      .from(domainUsers)
+      .where(and(eq(domainUsers.domainId, body.domainId), eq(domainUsers.userDid, body.userDid)))
+      .limit(1);
+
+    if (!domainUser) {
+      return c.json({ error: 'NotFound', message: 'User is not a member of this domain' }, 404);
+    }
+
+    // Check role exists
+    const [role] = await db
+      .select()
+      .from(domainRoles)
+      .where(and(eq(domainRoles.id, body.roleId), eq(domainRoles.domainId, body.domainId)))
+      .limit(1);
+
+    if (!role) {
+      return c.json({ error: 'NotFound', message: 'Role not found in this domain' }, 404);
+    }
+
+    // Check if already has this role
+    const [existing] = await db
+      .select()
+      .from(domainUserRoles)
+      .where(
+        and(eq(domainUserRoles.domainUserId, domainUser.id), eq(domainUserRoles.roleId, body.roleId))
+      )
+      .limit(1);
+
+    if (existing) {
+      return c.json({ error: 'Conflict', message: 'User already has this role' }, 409);
+    }
+
+    const userRoleId = nanoid();
+    await db.insert(domainUserRoles).values({
+      id: userRoleId,
+      domainUserId: domainUser.id,
+      roleId: body.roleId,
+      assignedBy: adminUser.userDid,
+      createdAt: new Date(),
+    });
+
+    // Audit log
+    await db.insert(adminAuditLog).values({
+      id: nanoid(),
+      adminId: adminUser.id,
+      action: 'user.assignDomainRole',
+      targetType: 'user',
+      targetId: body.userDid,
+      details: { domainId: body.domainId, roleId: body.roleId, roleName: role.name },
+      createdAt: new Date(),
+    });
+
+    return c.json({ success: true, userRoleId });
+  }
+);
+
+// Remove role from user in domain
+adminRouter.post(
+  '/io.exprsn.admin.users.removeDomainRole',
+  requirePermission(ADMIN_PERMISSIONS.USERS_EDIT),
+  async (c) => {
+    const body = await c.req.json<{
+      userDid: string;
+      domainId: string;
+      roleId: string;
+    }>();
+    const adminUser = c.get('adminUser');
+
+    if (!body.userDid || !body.domainId || !body.roleId) {
+      return c.json({ error: 'InvalidRequest', message: 'userDid, domainId, and roleId are required' }, 400);
+    }
+
+    // Get domain user
+    const [domainUser] = await db
+      .select()
+      .from(domainUsers)
+      .where(and(eq(domainUsers.domainId, body.domainId), eq(domainUsers.userDid, body.userDid)))
+      .limit(1);
+
+    if (!domainUser) {
+      return c.json({ error: 'NotFound', message: 'User is not a member of this domain' }, 404);
+    }
+
+    await db
+      .delete(domainUserRoles)
+      .where(
+        and(eq(domainUserRoles.domainUserId, domainUser.id), eq(domainUserRoles.roleId, body.roleId))
+      );
+
+    // Audit log
+    await db.insert(adminAuditLog).values({
+      id: nanoid(),
+      adminId: adminUser.id,
+      action: 'user.removeDomainRole',
+      targetType: 'user',
+      targetId: body.userDid,
+      details: { domainId: body.domainId, roleId: body.roleId },
+      createdAt: new Date(),
+    });
+
+    return c.json({ success: true });
+  }
+);
+
+// Add user to group
+adminRouter.post(
+  '/io.exprsn.admin.users.addToGroup',
+  requirePermission(ADMIN_PERMISSIONS.USERS_EDIT),
+  async (c) => {
+    const body = await c.req.json<{
+      userDid: string;
+      groupId: string;
+    }>();
+    const adminUser = c.get('adminUser');
+
+    if (!body.userDid || !body.groupId) {
+      return c.json({ error: 'InvalidRequest', message: 'userDid and groupId are required' }, 400);
+    }
+
+    // Check group exists
+    const [group] = await db
+      .select()
+      .from(domainGroups)
+      .where(eq(domainGroups.id, body.groupId))
+      .limit(1);
+
+    if (!group) {
+      return c.json({ error: 'NotFound', message: 'Group not found' }, 404);
+    }
+
+    // Check user exists
+    const [user] = await db.select().from(users).where(eq(users.did, body.userDid)).limit(1);
+    if (!user) {
+      return c.json({ error: 'NotFound', message: 'User not found' }, 404);
+    }
+
+    // Check if already a member
+    const [existing] = await db
+      .select()
+      .from(domainGroupMembers)
+      .where(
+        and(eq(domainGroupMembers.groupId, body.groupId), eq(domainGroupMembers.userDid, body.userDid))
+      )
+      .limit(1);
+
+    if (existing) {
+      return c.json({ error: 'Conflict', message: 'User is already a member of this group' }, 409);
+    }
+
+    const membershipId = nanoid();
+    await db.insert(domainGroupMembers).values({
+      id: membershipId,
+      groupId: body.groupId,
+      userDid: body.userDid,
+      addedBy: adminUser.userDid,
+      createdAt: new Date(),
+    });
+
+    // Update member count
+    await db
+      .update(domainGroups)
+      .set({ memberCount: group.memberCount + 1 })
+      .where(eq(domainGroups.id, body.groupId));
+
+    // Audit log
+    await db.insert(adminAuditLog).values({
+      id: nanoid(),
+      adminId: adminUser.id,
+      action: 'user.addToGroup',
+      targetType: 'user',
+      targetId: body.userDid,
+      details: { groupId: body.groupId, groupName: group.name },
+      createdAt: new Date(),
+    });
+
+    return c.json({ success: true, membershipId });
+  }
+);
+
+// Remove user from group
+adminRouter.post(
+  '/io.exprsn.admin.users.removeFromGroup',
+  requirePermission(ADMIN_PERMISSIONS.USERS_EDIT),
+  async (c) => {
+    const body = await c.req.json<{
+      userDid: string;
+      groupId: string;
+    }>();
+    const adminUser = c.get('adminUser');
+
+    if (!body.userDid || !body.groupId) {
+      return c.json({ error: 'InvalidRequest', message: 'userDid and groupId are required' }, 400);
+    }
+
+    // Get group for member count update
+    const [group] = await db
+      .select({ memberCount: domainGroups.memberCount })
+      .from(domainGroups)
+      .where(eq(domainGroups.id, body.groupId))
+      .limit(1);
+
+    await db
+      .delete(domainGroupMembers)
+      .where(
+        and(eq(domainGroupMembers.groupId, body.groupId), eq(domainGroupMembers.userDid, body.userDid))
+      );
+
+    // Update member count
+    if (group && group.memberCount > 0) {
+      await db
+        .update(domainGroups)
+        .set({ memberCount: group.memberCount - 1 })
+        .where(eq(domainGroups.id, body.groupId));
+    }
+
+    // Audit log
+    await db.insert(adminAuditLog).values({
+      id: nanoid(),
+      adminId: adminUser.id,
+      action: 'user.removeFromGroup',
+      targetType: 'user',
+      targetId: body.userDid,
+      details: { groupId: body.groupId },
+      createdAt: new Date(),
+    });
+
+    return c.json({ success: true });
+  }
+);
+
+// Get available domains for assignment
+adminRouter.get(
+  '/io.exprsn.admin.domains.listAll',
+  requirePermission(ADMIN_PERMISSIONS.USERS_VIEW),
+  async (c) => {
+    const q = c.req.query('q');
+    const limit = Math.min(parseInt(c.req.query('limit') || '50'), 100);
+
+    let conditions = [];
+    if (q) {
+      conditions.push(or(ilike(domains.name, `%${q}%`), ilike(domains.domain, `%${q}%`)));
+    }
+
+    const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+
+    const domainList = await db
+      .select({
+        id: domains.id,
+        name: domains.name,
+        displayName: domains.name, // Use name as displayName
+        userCount: domains.userCount,
+        status: domains.status,
+      })
+      .from(domains)
+      .where(whereClause)
+      .orderBy(domains.name)
+      .limit(limit);
+
+    return c.json({ domains: domainList });
+  }
+);
+
+// Get available organizations for assignment
+adminRouter.get(
+  '/io.exprsn.admin.organizations.listAll',
+  requirePermission(ADMIN_PERMISSIONS.USERS_VIEW),
+  async (c) => {
+    const q = c.req.query('q');
+    const limit = Math.min(parseInt(c.req.query('limit') || '50'), 100);
+
+    let conditions = [];
+    if (q) {
+      conditions.push(or(ilike(organizations.name, `%${q}%`), ilike(organizations.description, `%${q}%`)));
+    }
+
+    const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+
+    const orgList = await db
+      .select({
+        id: organizations.id,
+        name: organizations.name,
+        type: organizations.type,
+        avatar: organizations.avatar,
+        memberCount: organizations.memberCount,
+        verified: organizations.verified,
+      })
+      .from(organizations)
+      .where(whereClause)
+      .orderBy(organizations.name)
+      .limit(limit);
+
+    return c.json({ organizations: orgList });
+  }
+);
+
+// Get available roles for a domain
+adminRouter.get(
+  '/io.exprsn.admin.domains.getRoles',
+  requirePermission(ADMIN_PERMISSIONS.USERS_VIEW),
+  async (c) => {
+    const domainId = c.req.query('domainId');
+
+    if (!domainId) {
+      return c.json({ error: 'InvalidRequest', message: 'domainId is required' }, 400);
+    }
+
+    const roles = await db
+      .select({
+        id: domainRoles.id,
+        name: domainRoles.name,
+        displayName: domainRoles.displayName,
+        description: domainRoles.description,
+        isSystem: domainRoles.isSystem,
+        priority: domainRoles.priority,
+        permissions: domainRoles.permissions,
+      })
+      .from(domainRoles)
+      .where(eq(domainRoles.domainId, domainId))
+      .orderBy(domainRoles.priority);
+
+    return c.json({ roles });
+  }
+);
+
+// Get available groups for a domain
+adminRouter.get(
+  '/io.exprsn.admin.domains.getGroups',
+  requirePermission(ADMIN_PERMISSIONS.USERS_VIEW),
+  async (c) => {
+    const domainId = c.req.query('domainId');
+
+    if (!domainId) {
+      return c.json({ error: 'InvalidRequest', message: 'domainId is required' }, 400);
+    }
+
+    const groups = await db
+      .select({
+        id: domainGroups.id,
+        name: domainGroups.name,
+        description: domainGroups.description,
+        memberCount: domainGroups.memberCount,
+        isDefault: domainGroups.isDefault,
+      })
+      .from(domainGroups)
+      .where(eq(domainGroups.domainId, domainId))
+      .orderBy(domainGroups.name);
+
+    return c.json({ groups });
+  }
+);
+
+// ============================================
 // Organization Admin
 // ============================================
 
@@ -988,9 +1731,12 @@ adminRouter.get(
         type: org.type,
         description: org.description,
         avatar: org.avatar,
+        status: org.status,
         verified: org.verified,
         memberCount: org.memberCount,
         apiAccessEnabled: org.apiAccessEnabled,
+        domainId: org.domainId,
+        parentOrganizationId: org.parentOrganizationId,
         owner,
         createdAt: org.createdAt.toISOString(),
       })),
@@ -1066,8 +1812,16 @@ adminRouter.get(
         description: org.description,
         website: org.website,
         avatar: org.avatar,
+        status: org.status,
         verified: org.verified,
         memberCount: org.memberCount,
+        domainId: org.domainId,
+        parentOrganizationId: org.parentOrganizationId,
+        hierarchyPath: org.hierarchyPath,
+        hierarchyLevel: org.hierarchyLevel,
+        suspendedAt: org.suspendedAt?.toISOString(),
+        suspendedBy: org.suspendedBy,
+        suspendedReason: org.suspendedReason,
         rateLimitPerMinute: org.rateLimitPerMinute,
         burstLimit: org.burstLimit,
         dailyRequestLimit: org.dailyRequestLimit,
@@ -1102,12 +1856,16 @@ adminRouter.post(
     const body = await c.req.json<{
       id: string;
       verified?: boolean;
+      status?: 'active' | 'suspended' | 'pending';
       apiAccessEnabled?: boolean;
       rateLimitPerMinute?: number | null;
       burstLimit?: number | null;
       dailyRequestLimit?: number | null;
       allowedScopes?: string[] | null;
       webhooksEnabled?: boolean;
+      domainId?: string | null;
+      parentOrganizationId?: string | null;
+      suspendedReason?: string | null;
     }>();
     const adminUser = c.get('adminUser');
 
@@ -1130,12 +1888,26 @@ adminRouter.post(
     };
 
     if (body.verified !== undefined) updates.verified = body.verified;
+    if (body.status !== undefined) {
+      updates.status = body.status;
+      if (body.status === 'suspended') {
+        updates.suspendedAt = new Date();
+        updates.suspendedBy = adminUser.userDid;
+        updates.suspendedReason = body.suspendedReason ?? 'Administrative action';
+      } else if (body.status === 'active') {
+        updates.suspendedAt = null;
+        updates.suspendedBy = null;
+        updates.suspendedReason = null;
+      }
+    }
     if (body.apiAccessEnabled !== undefined) updates.apiAccessEnabled = body.apiAccessEnabled;
     if (body.rateLimitPerMinute !== undefined) updates.rateLimitPerMinute = body.rateLimitPerMinute;
     if (body.burstLimit !== undefined) updates.burstLimit = body.burstLimit;
     if (body.dailyRequestLimit !== undefined) updates.dailyRequestLimit = body.dailyRequestLimit;
     if (body.allowedScopes !== undefined) updates.allowedScopes = body.allowedScopes;
     if (body.webhooksEnabled !== undefined) updates.webhooksEnabled = body.webhooksEnabled;
+    if (body.domainId !== undefined) updates.domainId = body.domainId;
+    if (body.parentOrganizationId !== undefined) updates.parentOrganizationId = body.parentOrganizationId;
 
     await db.update(organizations).set(updates).where(eq(organizations.id, body.id));
 
@@ -1363,7 +2135,7 @@ adminRouter.post(
               userDid: memberAction.did,
               role,
               permissions,
-              invitedBy: adminUser.did,
+              invitedBy: adminUser.userDid,
               joinedAt: new Date(),
             });
 
@@ -1413,7 +2185,7 @@ adminRouter.post(
               .set({
                 status: 'suspended',
                 suspendedAt: new Date(),
-                suspendedBy: adminUser.did,
+                suspendedBy: adminUser.userDid,
                 suspendedReason: 'Admin action',
               })
               .where(
@@ -3460,7 +4232,7 @@ adminRouter.post(
 // ============================================
 
 import bcrypt from 'bcryptjs';
-import { actorRepos, sessions } from '../db/schema.js';
+import { actorRepos } from '../db/schema.js';
 
 // Set a new password for a user
 adminRouter.post(
@@ -4284,7 +5056,6 @@ adminRouter.post(
           .update(users)
           .set({
             verified: body.verified,
-            verifiedAt: body.verified ? new Date() : null,
           })
           .where(eq(users.did, userDid));
 
@@ -4550,9 +5321,12 @@ adminRouter.get(
         dnsVerifiedAt: domain.dnsVerifiedAt?.toISOString(),
         ownerOrgId: domain.ownerOrgId,
         ownerUserDid: domain.ownerUserDid,
+        plcConfig: domain.plcConfig,
+        federationConfig: domain.federationConfig,
         userCount: domain.userCount,
         groupCount: domain.groupCount,
         certificateCount: domain.certificateCount,
+        identityCount: domain.identityCount,
         verifiedAt: domain.verifiedAt?.toISOString(),
         createdAt: domain.createdAt.toISOString(),
         updatedAt: domain.updatedAt.toISOString(),
@@ -4589,6 +5363,13 @@ adminRouter.post(
       rateLimits?: Record<string, number>;
       ownerOrgId?: string;
       ownerUserDid?: string;
+      // Certificate options
+      autoCreateCertificates?: boolean;
+      certificateOptions?: {
+        organization?: string;
+        validityDays?: number;
+        additionalSans?: string[];
+      };
     }>();
 
     const { domains, domainActivityLog } = await import('../db/schema.js');
@@ -4611,6 +5392,75 @@ adminRouter.post(
 
     const domainId = nanoid();
     const dnsVerificationToken = `exprsn-verify=${nanoid(32)}`;
+    let intermediateCertId: string | undefined;
+    const certificatesCreated: { type: string; id: string; commonName: string }[] = [];
+
+    // Auto-create certificates if requested (default: true)
+    const shouldCreateCerts = body.autoCreateCertificates !== false;
+
+    if (shouldCreateCerts) {
+      try {
+        const { CertificateManager } = await import('../services/ca/index.js');
+        const certManager = new CertificateManager();
+
+        // 1. Ensure Root CA exists
+        await certManager.ensureRootCA();
+
+        // 2. Create Intermediate CA for this domain
+        const intermediateCA = await certManager.createIntermediateCA({
+          commonName: `${body.name} Intermediate CA`,
+          organization: body.certificateOptions?.organization || body.name,
+          validityDays: body.certificateOptions?.validityDays || 3650, // 10 years
+        });
+        intermediateCertId = intermediateCA.id;
+
+        // 3. Create Server certificate with SANs
+        const serverSans = [
+          `DNS:${body.domain}`,
+          `DNS:*.${body.domain}`,
+          `DNS:pds.${body.domain}`,
+          `DNS:api.${body.domain}`,
+          `DNS:relay.${body.domain}`,
+          ...(body.certificateOptions?.additionalSans?.map(san => `DNS:${san}`) || []),
+        ];
+
+        const serverCert = await certManager.issueEntityCertificate({
+          commonName: body.domain,
+          organization: body.certificateOptions?.organization || body.name,
+          type: 'server',
+          subjectAltNames: serverSans,
+          validityDays: body.certificateOptions?.validityDays || 365,
+          intermediateId: intermediateCA.id,
+          serviceId: `domain:${domainId}`,
+        });
+
+        certificatesCreated.push({
+          type: 'server',
+          id: serverCert.id,
+          commonName: body.domain,
+        });
+
+        // 4. Create Code Signing certificate
+        const codeSigningCert = await certManager.issueEntityCertificate({
+          commonName: `${body.name} Code Signing`,
+          organization: body.certificateOptions?.organization || body.name,
+          type: 'code_signing',
+          validityDays: body.certificateOptions?.validityDays || 365,
+          intermediateId: intermediateCA.id,
+          serviceId: `domain:${domainId}:code_signing`,
+        });
+
+        certificatesCreated.push({
+          type: 'code_signing',
+          id: codeSigningCert.id,
+          commonName: `${body.name} Code Signing`,
+        });
+      } catch (certError) {
+        console.error('Certificate creation error:', certError);
+        // Continue with domain creation even if cert creation fails
+        // The admin can manually create certificates later
+      }
+    }
 
     await db.insert(domains).values({
       id: domainId,
@@ -4625,6 +5475,7 @@ adminRouter.post(
       rateLimits: body.rateLimits as any,
       ownerOrgId: body.ownerOrgId,
       ownerUserDid: body.ownerUserDid,
+      intermediateCertId,
     });
 
     // Log activity
@@ -4634,7 +5485,12 @@ adminRouter.post(
       domainId,
       actorDid: adminDid,
       action: 'domain_created',
-      metadata: { name: body.name, domain: body.domain, type: body.type },
+      metadata: {
+        name: body.name,
+        domain: body.domain,
+        type: body.type,
+        certificatesCreated: certificatesCreated.length,
+      },
     });
 
     return c.json({
@@ -4645,7 +5501,9 @@ adminRouter.post(
         type: body.type,
         status: 'pending',
         dnsVerificationToken,
+        intermediateCertId,
       },
+      certificatesCreated,
     });
   }
 );
@@ -4665,6 +5523,8 @@ adminRouter.post(
       pdsEndpoint?: string;
       ownerOrgId?: string;
       ownerUserDid?: string;
+      plcConfig?: Record<string, unknown>;
+      federationConfig?: Record<string, unknown>;
     }>();
 
     if (!body.id) {
@@ -4692,6 +5552,18 @@ adminRouter.post(
     if (body.pdsEndpoint !== undefined) updates.pdsEndpoint = body.pdsEndpoint;
     if (body.ownerOrgId !== undefined) updates.ownerOrgId = body.ownerOrgId;
     if (body.ownerUserDid !== undefined) updates.ownerUserDid = body.ownerUserDid;
+    if (body.plcConfig) {
+      updates.plcConfig = {
+        ...(existing.plcConfig || {}),
+        ...body.plcConfig,
+      };
+    }
+    if (body.federationConfig) {
+      updates.federationConfig = {
+        ...(existing.federationConfig || {}),
+        ...body.federationConfig,
+      };
+    }
 
     await db.update(domains).set(updates).where(eq(domains.id, body.id));
 
@@ -4785,6 +5657,294 @@ adminRouter.post(
   }
 );
 
+async function syncDomainUserRoleAssignments(
+  domainId: string,
+  domainUserId: string,
+  userDid: string,
+  assignedBy: string | undefined,
+  roleIds?: string[],
+  legacyRole?: string
+) {
+  const { domainRoles, domainUserRoles, domainUsers } = await import('../db/schema.js');
+
+  const roles = await ensureSystemDomainRoles(domainId);
+  const roleSet = new Set(roles.map((role) => role.id));
+  let nextRoleIds = (roleIds || []).filter((roleId) => roleSet.has(roleId));
+
+  if (nextRoleIds.length === 0 && legacyRole) {
+    const matchingRole = roles.find((role) => role.name === legacyRole);
+    if (matchingRole) {
+      nextRoleIds = [matchingRole.id];
+    }
+  }
+
+  await db.delete(domainUserRoles).where(eq(domainUserRoles.domainUserId, domainUserId));
+
+  if (nextRoleIds.length > 0) {
+    await db.insert(domainUserRoles).values(
+      nextRoleIds.map((roleId) => ({
+        id: nanoid(),
+        domainUserId,
+        roleId,
+        assignedBy,
+        createdAt: new Date(),
+      }))
+    );
+  }
+
+  const access = await getEffectiveDomainAccess(domainId, userDid);
+  await db
+    .update(domainUsers)
+    .set({
+      role: getLegacyDomainRole(access),
+      updatedAt: new Date(),
+    })
+    .where(eq(domainUsers.id, domainUserId));
+}
+
+async function syncDomainGroupRoleAssignments(
+  domainId: string,
+  groupId: string,
+  assignedBy: string | undefined,
+  roleIds?: string[]
+) {
+  const { domainRoles, domainGroupRoles } = await import('../db/schema.js');
+
+  if (!roleIds) {
+    return;
+  }
+
+  const roles = await ensureSystemDomainRoles(domainId);
+  const roleSet = new Set(roles.map((role) => role.id));
+  const nextRoleIds = roleIds.filter((roleId) => roleSet.has(roleId));
+
+  await db.delete(domainGroupRoles).where(eq(domainGroupRoles.groupId, groupId));
+
+  if (nextRoleIds.length > 0) {
+    await db.insert(domainGroupRoles).values(
+      nextRoleIds.map((roleId) => ({
+        id: nanoid(),
+        groupId,
+        roleId,
+        assignedBy,
+        createdAt: new Date(),
+      }))
+    );
+  }
+}
+
+async function serializeDomainUser(
+  domainId: string,
+  base: {
+    id: string;
+    userDid: string;
+    role: string;
+    permissions: string[] | null;
+    handle: string | null;
+    isActive: boolean;
+    createdAt: Date;
+    user: {
+      did?: string | null;
+      handle: string | null;
+      displayName?: string | null;
+      avatar?: string | null;
+    } | null;
+  }
+) {
+  const access = await getEffectiveDomainAccess(domainId, base.userDid);
+
+  return {
+    id: base.id,
+    userDid: base.userDid,
+    role: getLegacyDomainRole(access),
+    permissions: access?.effectivePermissions || [],
+    directPermissions: access?.directPermissions || ((base.permissions || []) as string[]),
+    assignedRoles: access?.assignedRoles || [],
+    groups: access?.groups || [],
+    effectivePermissions: access?.effectivePermissions || [],
+    handle: base.handle || undefined,
+    isActive: base.isActive,
+    source: access?.source || 'domain',
+    createdAt: base.createdAt.toISOString(),
+    user: {
+      did: base.user?.did || base.userDid,
+      handle: base.user?.handle || '',
+      displayName: base.user?.displayName || undefined,
+      avatar: base.user?.avatar || undefined,
+    },
+  };
+}
+
+async function serializeInheritedAdmin(
+  domainId: string,
+  inheritedAdmin: Awaited<ReturnType<typeof listInheritedGlobalAdmins>>[number]
+) {
+  const access = await getEffectiveDomainAccess(domainId, inheritedAdmin.admin.userDid);
+
+  return {
+    id: `global:${inheritedAdmin.admin.id}`,
+    userDid: inheritedAdmin.admin.userDid,
+    role: 'admin',
+    permissions: access?.effectivePermissions || [],
+    directPermissions: access?.directPermissions || [],
+    assignedRoles: access?.assignedRoles || [],
+    groups: access?.groups || [],
+    effectivePermissions: access?.effectivePermissions || [],
+    handle: undefined,
+    isActive: true,
+    source: 'global_inherited' as const,
+    createdAt: inheritedAdmin.admin.createdAt.toISOString(),
+    user: {
+      did: inheritedAdmin.user?.did || inheritedAdmin.admin.userDid,
+      handle: inheritedAdmin.user?.handle || '',
+      displayName: inheritedAdmin.user?.displayName || undefined,
+      avatar: inheritedAdmin.user?.avatar || undefined,
+    },
+  };
+}
+
+async function serializeDomainGroup(
+  domainId: string,
+  group: {
+    id: string;
+    name: string;
+    description: string | null;
+    permissions: string[] | null;
+    memberCount: number;
+    isDefault: boolean;
+    createdAt: Date;
+    updatedAt: Date;
+  }
+) {
+  const { domainGroupRoles, domainRoles } = await import('../db/schema.js');
+
+  const assignedRoles = await db
+    .select({ role: domainRoles })
+    .from(domainGroupRoles)
+    .innerJoin(domainRoles, eq(domainRoles.id, domainGroupRoles.roleId))
+    .where(eq(domainGroupRoles.groupId, group.id));
+
+  return {
+    id: group.id,
+    name: group.name,
+    description: group.description || undefined,
+    permissions: (group.permissions || []) as string[],
+    directPermissions: (group.permissions || []) as string[],
+    assignedRoles: assignedRoles.map(({ role }) => ({
+      id: role.id,
+      name: role.name,
+      displayName: role.displayName,
+      description: role.description || undefined,
+      isSystem: role.isSystem,
+      priority: role.priority,
+      permissions: (role.permissions || []) as string[],
+    })),
+    memberCount: group.memberCount,
+    isDefault: group.isDefault,
+    createdAt: group.createdAt.toISOString(),
+    updatedAt: group.updatedAt.toISOString(),
+  };
+}
+
+async function refreshDomainGroupMemberCounts(groupIds: string[]) {
+  if (groupIds.length === 0) {
+    return;
+  }
+
+  const { domainGroupMembers, domainGroups } = await import('../db/schema.js');
+  const uniqueGroupIds = [...new Set(groupIds)];
+
+  for (const groupId of uniqueGroupIds) {
+    const [memberCountResult] = await db
+      .select({ count: count() })
+      .from(domainGroupMembers)
+      .where(eq(domainGroupMembers.groupId, groupId));
+
+    await db
+      .update(domainGroups)
+      .set({
+        memberCount: memberCountResult?.count || 0,
+        updatedAt: new Date(),
+      })
+      .where(eq(domainGroups.id, groupId));
+  }
+}
+
+const DEFAULT_DOMAIN_SSO_POLICIES = {
+  sessionTimeout: 24,
+  sessionTimeoutUnit: 'hours',
+  idleTimeout: 30,
+  idleTimeoutUnit: 'minutes',
+  maxConcurrentSessions: 0,
+  singleSessionEnforcement: false,
+  mfaRequired: false,
+  mfaGracePeriod: 7,
+  mfaMethods: ['totp'],
+  deviceTrustEnabled: false,
+  allowUnknownDevices: true,
+  requireDeviceApproval: false,
+  ipRestrictionEnabled: false,
+  allowedIPs: [],
+  blockedIPs: [],
+  riskBasedAuthEnabled: false,
+  highRiskActions: ['password_reset', 'admin_action'],
+  ssoEnforced: false,
+  passwordLoginAllowed: true,
+  passwordLoginAdminsOnly: false,
+};
+
+function getDomainSsoFeatureState(features: unknown) {
+  const featureMap = ((features || {}) as unknown) as Record<string, unknown>;
+  const sso = ((featureMap as any).sso || {}) as Record<string, unknown>;
+
+  return {
+    emailDomains: (sso.emailDomains || {}) as Record<string, Record<string, unknown>>,
+    policies: {
+      ...DEFAULT_DOMAIN_SSO_POLICIES,
+      ...(((sso.policies || {}) as Record<string, unknown>) || {}),
+    },
+  };
+}
+
+function mergeDomainSsoFeatureState(
+  features: unknown,
+  updates: {
+    emailDomains?: Record<string, Record<string, unknown>>;
+    policies?: Record<string, unknown>;
+  }
+) {
+  const featureMap = { ...(((features || {}) as unknown) as Record<string, unknown>) };
+  const existingSso = ((featureMap as any).sso || {}) as Record<string, unknown>;
+
+  return {
+    ...featureMap,
+    sso: {
+      ...existingSso,
+      ...(updates.emailDomains ? { emailDomains: updates.emailDomains } : {}),
+      ...(updates.policies ? { policies: updates.policies } : {}),
+    },
+  };
+}
+
+function slugifyProviderKey(name: string) {
+  return (
+    name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 40) || 'provider'
+  );
+}
+
+// Domain permission catalog
+adminRouter.get(
+  '/io.exprsn.admin.domains.permissions.catalog',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_VIEW),
+  async (c) => {
+    return c.json({ permissions: getDomainPermissionCatalog() });
+  }
+);
+
 // List domain users
 adminRouter.get(
   '/io.exprsn.admin.domains.users.list',
@@ -4792,6 +5952,7 @@ adminRouter.get(
   async (c) => {
     const domainId = c.req.query('domainId');
     const role = c.req.query('role');
+    const includeInherited = c.req.query('includeInherited') === 'true';
     const limit = Math.min(parseInt(c.req.query('limit') || '50'), 100);
 
     if (!domainId) {
@@ -4800,10 +5961,7 @@ adminRouter.get(
 
     const { domainUsers } = await import('../db/schema.js');
 
-    let conditions = [eq(domainUsers.domainId, domainId)];
-    if (role) {
-      conditions.push(eq(domainUsers.role, role));
-    }
+    const conditions = [eq(domainUsers.domainId, domainId)];
 
     const userList = await db
       .select({
@@ -4826,17 +5984,25 @@ adminRouter.get(
       .orderBy(desc(domainUsers.createdAt))
       .limit(limit);
 
+    const serializedUsers = await Promise.all(
+      userList.map((user) => serializeDomainUser(domainId, user))
+    );
+
+    let inheritedAdmins: Awaited<ReturnType<typeof serializeInheritedAdmin>>[] = [];
+    if (includeInherited) {
+      const inheritedAdminRows = await listInheritedGlobalAdmins(domainId);
+      inheritedAdmins = await Promise.all(
+        inheritedAdminRows.map((admin) => serializeInheritedAdmin(domainId, admin))
+      );
+    }
+
+    const combinedUsers = [...serializedUsers, ...inheritedAdmins]
+      .filter((user) => !role || user.role === role)
+      .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+      .slice(0, limit);
+
     return c.json({
-      users: userList.map((u) => ({
-        id: u.id,
-        userDid: u.userDid,
-        role: u.role,
-        permissions: u.permissions,
-        handle: u.handle,
-        isActive: u.isActive,
-        createdAt: u.createdAt.toISOString(),
-        user: u.user,
-      })),
+      users: combinedUsers,
     });
   }
 );
@@ -4848,16 +6014,33 @@ adminRouter.post(
   async (c) => {
     const body = await c.req.json<{
       domainId: string;
-      userDid: string;
+      userDid?: string;
+      userHandle?: string;
       role: 'admin' | 'moderator' | 'member';
       permissions?: string[];
+      directPermissions?: string[];
+      roleIds?: string[];
+      groupIds?: string[];
     }>();
 
-    if (!body.domainId || !body.userDid || !body.role) {
+    if (!body.domainId || (!body.userDid && !body.userHandle) || !body.role) {
       return c.json({ error: 'InvalidRequest', message: 'Missing required fields' }, 400);
     }
 
-    const { domains, domainUsers, domainActivityLog } = await import('../db/schema.js');
+    const { domains, domainUsers, domainActivityLog, domainGroupMembers, domainGroups } = await import('../db/schema.js');
+
+    let userDid = body.userDid;
+    if (!userDid && body.userHandle) {
+      const [user] = await db
+        .select({ did: users.did })
+        .from(users)
+        .where(eq(users.handle, body.userHandle))
+        .limit(1);
+      if (!user) {
+        return c.json({ error: 'NotFound', message: 'User not found' }, 404);
+      }
+      userDid = user.did;
+    }
 
     // Check domain exists
     const [domain] = await db
@@ -4876,7 +6059,7 @@ adminRouter.post(
       .from(domainUsers)
       .where(and(
         eq(domainUsers.domainId, body.domainId),
-        eq(domainUsers.userDid, body.userDid)
+        eq(domainUsers.userDid, userDid!)
       ))
       .limit(1);
 
@@ -4888,10 +6071,40 @@ adminRouter.post(
     await db.insert(domainUsers).values({
       id: userId,
       domainId: body.domainId,
-      userDid: body.userDid,
+      userDid: userDid!,
       role: body.role,
-      permissions: body.permissions || [],
+      permissions: body.directPermissions || body.permissions || [],
     });
+
+    const adminDid = c.get('did');
+    await syncDomainUserRoleAssignments(
+      body.domainId,
+      userId,
+      userDid!,
+      adminDid,
+      body.roleIds,
+      body.role
+    );
+
+    if (body.groupIds && body.groupIds.length > 0) {
+      const allowedGroups = await db
+        .select({ id: domainGroups.id })
+        .from(domainGroups)
+        .where(and(eq(domainGroups.domainId, body.domainId), inArray(domainGroups.id, body.groupIds)));
+
+      if (allowedGroups.length > 0) {
+        await db.insert(domainGroupMembers).values(
+          allowedGroups.map((group) => ({
+            id: nanoid(),
+            groupId: group.id,
+            userDid: userDid!,
+            addedBy: adminDid,
+            createdAt: new Date(),
+          }))
+        ).onConflictDoNothing();
+        await refreshDomainGroupMemberCounts(allowedGroups.map((group) => group.id));
+      }
+    }
 
     // Update domain user count
     await db.update(domains).set({
@@ -4900,15 +6113,14 @@ adminRouter.post(
     }).where(eq(domains.id, body.domainId));
 
     // Log activity
-    const adminDid = c.get('did');
     await db.insert(domainActivityLog).values({
       id: nanoid(),
       domainId: body.domainId,
       actorDid: adminDid,
       action: 'user_added',
       targetType: 'user',
-      targetId: body.userDid,
-      metadata: { role: body.role },
+      targetId: userDid!,
+      metadata: { role: body.role, roleIds: body.roleIds || [], groupIds: body.groupIds || [] },
     });
 
     return c.json({ success: true, id: userId });
@@ -4926,7 +6138,16 @@ adminRouter.post(
       return c.json({ error: 'InvalidRequest', message: 'Missing required fields' }, 400);
     }
 
-    const { domains, domainUsers, domainActivityLog } = await import('../db/schema.js');
+    const { domains, domainUsers, domainActivityLog, domainGroupMembers, domainGroups } = await import('../db/schema.js');
+
+    const groupMemberships = await db
+      .select({
+        membershipId: domainGroupMembers.id,
+        groupId: domainGroups.id,
+      })
+      .from(domainGroupMembers)
+      .innerJoin(domainGroups, eq(domainGroups.id, domainGroupMembers.groupId))
+      .where(and(eq(domainGroups.domainId, body.domainId), eq(domainGroupMembers.userDid, body.userDid)));
 
     await db.delete(domainUsers).where(
       and(
@@ -4934,6 +6155,17 @@ adminRouter.post(
         eq(domainUsers.userDid, body.userDid)
       )
     );
+
+    if (groupMemberships.length > 0) {
+      await db.delete(domainGroupMembers).where(
+        inArray(
+          domainGroupMembers.id,
+          groupMemberships.map((membership) => membership.membershipId)
+        )
+      );
+
+      await refreshDomainGroupMemberCounts(groupMemberships.map((membership) => membership.groupId));
+    }
 
     // Update domain user count
     await db.update(domains).set({
@@ -4966,17 +6198,35 @@ adminRouter.post(
       userDid: string;
       role: 'admin' | 'moderator' | 'member';
       permissions?: string[];
+      directPermissions?: string[];
+      roleIds?: string[];
+      groupIds?: string[];
     }>();
 
     if (!body.domainId || !body.userDid || !body.role) {
       return c.json({ error: 'InvalidRequest', message: 'Missing required fields' }, 400);
     }
 
-    const { domainUsers, domainActivityLog } = await import('../db/schema.js');
+    const { domainUsers, domainActivityLog, domainGroupMembers, domainGroups } = await import('../db/schema.js');
+
+    const [existingUser] = await db
+      .select({ id: domainUsers.id })
+      .from(domainUsers)
+      .where(
+        and(
+          eq(domainUsers.domainId, body.domainId),
+          eq(domainUsers.userDid, body.userDid)
+        )
+      )
+      .limit(1);
+
+    if (!existingUser) {
+      return c.json({ error: 'NotFound', message: 'User not assigned to domain' }, 404);
+    }
 
     await db.update(domainUsers).set({
       role: body.role,
-      permissions: body.permissions,
+      permissions: body.directPermissions || body.permissions || [],
       updatedAt: new Date(),
     }).where(
       and(
@@ -4985,8 +6235,63 @@ adminRouter.post(
       )
     );
 
-    // Log activity
     const adminDid = c.get('did');
+    await syncDomainUserRoleAssignments(
+      body.domainId,
+      existingUser.id,
+      body.userDid,
+      adminDid,
+      body.roleIds,
+      body.role
+    );
+
+    if (body.groupIds) {
+      const existingMemberships = await db
+        .select({
+          membershipId: domainGroupMembers.id,
+          groupId: domainGroups.id,
+        })
+        .from(domainGroupMembers)
+        .innerJoin(domainGroups, eq(domainGroups.id, domainGroupMembers.groupId))
+        .where(and(eq(domainGroups.domainId, body.domainId), eq(domainGroupMembers.userDid, body.userDid)));
+
+      const affectedGroupIds = new Set(existingMemberships.map((membership) => membership.groupId));
+
+      if (existingMemberships.length > 0) {
+        await db.delete(domainGroupMembers).where(
+          inArray(
+            domainGroupMembers.id,
+            existingMemberships.map((membership) => membership.membershipId)
+          )
+        );
+      }
+
+      if (body.groupIds.length > 0) {
+        const allowedGroups = await db
+          .select({ id: domainGroups.id })
+          .from(domainGroups)
+          .where(and(eq(domainGroups.domainId, body.domainId), inArray(domainGroups.id, body.groupIds)));
+
+        if (allowedGroups.length > 0) {
+          for (const group of allowedGroups) {
+            affectedGroupIds.add(group.id);
+          }
+          await db.insert(domainGroupMembers).values(
+            allowedGroups.map((group) => ({
+              id: nanoid(),
+              groupId: group.id,
+              userDid: body.userDid,
+              addedBy: adminDid,
+              createdAt: new Date(),
+            }))
+          ).onConflictDoNothing();
+        }
+      }
+
+      await refreshDomainGroupMemberCounts([...affectedGroupIds]);
+    }
+
+    // Log activity
     await db.insert(domainActivityLog).values({
       id: nanoid(),
       domainId: body.domainId,
@@ -4994,7 +6299,7 @@ adminRouter.post(
       action: 'user_role_updated',
       targetType: 'user',
       targetId: body.userDid,
-      metadata: { role: body.role },
+      metadata: { role: body.role, roleIds: body.roleIds || [], groupIds: body.groupIds },
     });
 
     return c.json({ success: true });
@@ -5021,15 +6326,7 @@ adminRouter.get(
       .orderBy(desc(domainGroups.createdAt));
 
     return c.json({
-      groups: groups.map((g) => ({
-        id: g.id,
-        name: g.name,
-        description: g.description,
-        permissions: g.permissions,
-        memberCount: g.memberCount,
-        isDefault: g.isDefault,
-        createdAt: g.createdAt.toISOString(),
-      })),
+      groups: await Promise.all(groups.map((group) => serializeDomainGroup(domainId, group))),
     });
   }
 );
@@ -5044,7 +6341,9 @@ adminRouter.post(
       name: string;
       description?: string;
       permissions?: string[];
+      directPermissions?: string[];
       isDefault?: boolean;
+      roleIds?: string[];
     }>();
 
     if (!body.domainId || !body.name) {
@@ -5059,9 +6358,12 @@ adminRouter.post(
       domainId: body.domainId,
       name: body.name,
       description: body.description,
-      permissions: body.permissions || [],
+      permissions: body.directPermissions || body.permissions || [],
       isDefault: body.isDefault || false,
     });
+
+    const adminDid = c.get('did');
+    await syncDomainGroupRoleAssignments(body.domainId, groupId, adminDid, body.roleIds);
 
     // Update domain group count
     await db.update(domains).set({
@@ -5070,7 +6372,6 @@ adminRouter.post(
     }).where(eq(domains.id, body.domainId));
 
     // Log activity
-    const adminDid = c.get('did');
     await db.insert(domainActivityLog).values({
       id: nanoid(),
       domainId: body.domainId,
@@ -5078,7 +6379,7 @@ adminRouter.post(
       action: 'group_created',
       targetType: 'group',
       targetId: groupId,
-      metadata: { name: body.name },
+      metadata: { name: body.name, roleIds: body.roleIds || [] },
     });
 
     return c.json({ success: true, id: groupId });
@@ -5092,10 +6393,13 @@ adminRouter.post(
   async (c) => {
     const body = await c.req.json<{
       groupId: string;
+      domainId?: string;
       name?: string;
       description?: string;
       permissions?: string[];
+      directPermissions?: string[];
       isDefault?: boolean;
+      roleIds?: string[];
     }>();
 
     if (!body.groupId) {
@@ -5104,13 +6408,29 @@ adminRouter.post(
 
     const { domainGroups } = await import('../db/schema.js');
 
+    const [existingGroup] = await db
+      .select()
+      .from(domainGroups)
+      .where(eq(domainGroups.id, body.groupId))
+      .limit(1);
+
+    if (!existingGroup) {
+      return c.json({ error: 'NotFound', message: 'Group not found' }, 404);
+    }
+
     const updates: any = { updatedAt: new Date() };
     if (body.name) updates.name = body.name;
     if (body.description !== undefined) updates.description = body.description;
-    if (body.permissions) updates.permissions = body.permissions;
+    if (body.permissions || body.directPermissions) updates.permissions = body.directPermissions || body.permissions;
     if (body.isDefault !== undefined) updates.isDefault = body.isDefault;
 
     await db.update(domainGroups).set(updates).where(eq(domainGroups.id, body.groupId));
+    await syncDomainGroupRoleAssignments(
+      existingGroup.domainId,
+      body.groupId,
+      c.get('did'),
+      body.roleIds
+    );
 
     return c.json({ success: true });
   }
@@ -5149,6 +6469,1981 @@ adminRouter.post(
     });
 
     return c.json({ success: true });
+  }
+);
+
+// List domain group members
+adminRouter.get(
+  '/io.exprsn.admin.domains.groups.members.list',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_VIEW),
+  async (c) => {
+    const groupId = c.req.query('groupId');
+
+    if (!groupId) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing groupId' }, 400);
+    }
+
+    const { domainGroups, domainGroupMembers } = await import('../db/schema.js');
+
+    const [group] = await db
+      .select()
+      .from(domainGroups)
+      .where(eq(domainGroups.id, groupId))
+      .limit(1);
+
+    if (!group) {
+      return c.json({ error: 'NotFound', message: 'Group not found' }, 404);
+    }
+
+    const members = await db
+      .select({
+        userDid: domainGroupMembers.userDid,
+        createdAt: domainGroupMembers.createdAt,
+        user: {
+          did: users.did,
+          handle: users.handle,
+          displayName: users.displayName,
+          avatar: users.avatar,
+        },
+      })
+      .from(domainGroupMembers)
+      .leftJoin(users, eq(users.did, domainGroupMembers.userDid))
+      .where(eq(domainGroupMembers.groupId, groupId))
+      .orderBy(desc(domainGroupMembers.createdAt));
+
+    const serializedMembers = await Promise.all(
+      members.map(async (member) => {
+        const access = await getEffectiveDomainAccess(group.domainId, member.userDid);
+        return {
+          userDid: member.userDid,
+          createdAt: member.createdAt.toISOString(),
+          role: getLegacyDomainRole(access),
+          effectivePermissions: access?.effectivePermissions || [],
+          user: member.user,
+        };
+      })
+    );
+
+    return c.json({ members: serializedMembers });
+  }
+);
+
+// Add user to domain group
+adminRouter.post(
+  '/io.exprsn.admin.domains.groups.members.add',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
+  async (c) => {
+    const body = await c.req.json<{ groupId: string; userDid: string }>();
+
+    if (!body.groupId || !body.userDid) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing required fields' }, 400);
+    }
+
+    const { domainGroups, domainGroupMembers, domainUsers } = await import('../db/schema.js');
+
+    const [group] = await db
+      .select()
+      .from(domainGroups)
+      .where(eq(domainGroups.id, body.groupId))
+      .limit(1);
+
+    if (!group) {
+      return c.json({ error: 'NotFound', message: 'Group not found' }, 404);
+    }
+
+    const [domainUser] = await db
+      .select({ id: domainUsers.id })
+      .from(domainUsers)
+      .where(and(eq(domainUsers.domainId, group.domainId), eq(domainUsers.userDid, body.userDid)))
+      .limit(1);
+
+    if (!domainUser) {
+      return c.json({ error: 'InvalidRequest', message: 'User must belong to the domain before joining a group' }, 400);
+    }
+
+    await db.insert(domainGroupMembers).values({
+      id: nanoid(),
+      groupId: body.groupId,
+      userDid: body.userDid,
+      addedBy: c.get('did'),
+      createdAt: new Date(),
+    }).onConflictDoNothing();
+
+    const [memberCountResult] = await db
+      .select({ count: count() })
+      .from(domainGroupMembers)
+      .where(eq(domainGroupMembers.groupId, body.groupId));
+
+    await db
+      .update(domainGroups)
+      .set({
+        memberCount: memberCountResult?.count || 0,
+        updatedAt: new Date(),
+      })
+      .where(eq(domainGroups.id, body.groupId));
+
+    return c.json({ success: true });
+  }
+);
+
+// Remove user from domain group
+adminRouter.post(
+  '/io.exprsn.admin.domains.groups.members.remove',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
+  async (c) => {
+    const body = await c.req.json<{ groupId: string; userDid: string }>();
+
+    if (!body.groupId || !body.userDid) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing required fields' }, 400);
+    }
+
+    const { domainGroups, domainGroupMembers } = await import('../db/schema.js');
+
+    await db
+      .delete(domainGroupMembers)
+      .where(and(eq(domainGroupMembers.groupId, body.groupId), eq(domainGroupMembers.userDid, body.userDid)));
+
+    const [memberCountResult] = await db
+      .select({ count: count() })
+      .from(domainGroupMembers)
+      .where(eq(domainGroupMembers.groupId, body.groupId));
+
+    await db
+      .update(domainGroups)
+      .set({
+        memberCount: memberCountResult?.count || 0,
+        updatedAt: new Date(),
+      })
+      .where(eq(domainGroups.id, body.groupId));
+
+    return c.json({ success: true });
+  }
+);
+
+// Bulk replace domain group membership
+adminRouter.post(
+  '/io.exprsn.admin.domains.groups.members.bulkSet',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
+  async (c) => {
+    const body = await c.req.json<{ groupId: string; userDids: string[] }>();
+
+    if (!body.groupId || !Array.isArray(body.userDids)) {
+      return c.json({ error: 'InvalidRequest', message: 'groupId and userDids are required' }, 400);
+    }
+
+    const { domainGroups, domainGroupMembers, domainUsers } = await import('../db/schema.js');
+
+    const [group] = await db
+      .select()
+      .from(domainGroups)
+      .where(eq(domainGroups.id, body.groupId))
+      .limit(1);
+
+    if (!group) {
+      return c.json({ error: 'NotFound', message: 'Group not found' }, 404);
+    }
+
+    const allowedUsers = body.userDids.length
+      ? await db
+          .select({ userDid: domainUsers.userDid })
+          .from(domainUsers)
+          .where(and(eq(domainUsers.domainId, group.domainId), inArray(domainUsers.userDid, body.userDids)))
+      : [];
+
+    await db.delete(domainGroupMembers).where(eq(domainGroupMembers.groupId, body.groupId));
+
+    if (allowedUsers.length > 0) {
+      await db.insert(domainGroupMembers).values(
+        allowedUsers.map((user) => ({
+          id: nanoid(),
+          groupId: body.groupId,
+          userDid: user.userDid,
+          addedBy: c.get('did'),
+          createdAt: new Date(),
+        }))
+      );
+    }
+
+    await db
+      .update(domainGroups)
+      .set({
+        memberCount: allowedUsers.length,
+        updatedAt: new Date(),
+      })
+      .where(eq(domainGroups.id, body.groupId));
+
+    return c.json({ success: true, memberCount: allowedUsers.length });
+  }
+);
+
+// Permission catalog for domain roles
+adminRouter.get(
+  '/io.exprsn.admin.domains.roles.permissions',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_VIEW),
+  async (c) => {
+    return c.json({ permissions: getDomainPermissionCatalog() });
+  }
+);
+
+// List domain roles
+adminRouter.get(
+  '/io.exprsn.admin.domains.roles.list',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_VIEW),
+  async (c) => {
+    const domainId = c.req.query('domainId');
+
+    if (!domainId) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing domainId' }, 400);
+    }
+
+    const { domainRoles, domainUserRoles, domainGroupRoles } = await import('../db/schema.js');
+    const roles = await ensureSystemDomainRoles(domainId);
+
+    const userAssignments = await db
+      .select({
+        roleId: domainUserRoles.roleId,
+        count: count(),
+      })
+      .from(domainUserRoles)
+      .innerJoin(domainRoles, eq(domainRoles.id, domainUserRoles.roleId))
+      .where(eq(domainRoles.domainId, domainId))
+      .groupBy(domainUserRoles.roleId);
+
+    const groupAssignments = await db
+      .select({
+        roleId: domainGroupRoles.roleId,
+        count: count(),
+      })
+      .from(domainGroupRoles)
+      .innerJoin(domainRoles, eq(domainRoles.id, domainGroupRoles.roleId))
+      .where(eq(domainRoles.domainId, domainId))
+      .groupBy(domainGroupRoles.roleId);
+
+    const usageMap = new Map<string, number>();
+    for (const assignment of userAssignments) {
+      usageMap.set(assignment.roleId, assignment.count);
+    }
+    for (const assignment of groupAssignments) {
+      usageMap.set(assignment.roleId, (usageMap.get(assignment.roleId) || 0) + assignment.count);
+    }
+
+    const sortedRoles = [...roles].sort((a, b) => b.priority - a.priority || a.name.localeCompare(b.name));
+
+    return c.json({
+      roles: sortedRoles.map((role) => ({
+        id: role.id,
+        name: role.name,
+        displayName: role.displayName,
+        description: role.description || '',
+        isSystem: role.isSystem,
+        priority: role.priority,
+        permissions: role.permissions || [],
+        userCount: usageMap.get(role.id) || 0,
+        createdAt: role.createdAt.toISOString(),
+      })),
+    });
+  }
+);
+
+// Create domain role
+adminRouter.post(
+  '/io.exprsn.admin.domains.roles.create',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
+  async (c) => {
+    const body = await c.req.json<{
+      domainId: string;
+      name: string;
+      displayName?: string;
+      description?: string;
+      permissions?: string[];
+      priority?: number;
+    }>();
+
+    if (!body.domainId || !body.name) {
+      return c.json({ error: 'InvalidRequest', message: 'domainId and name are required' }, 400);
+    }
+
+    const { domainRoles } = await import('../db/schema.js');
+    await ensureSystemDomainRoles(body.domainId);
+
+    const roleId = nanoid();
+    await db.insert(domainRoles).values({
+      id: roleId,
+      domainId: body.domainId,
+      name: body.name,
+      displayName: body.displayName || body.name,
+      description: body.description,
+      isSystem: false,
+      priority: body.priority ?? 50,
+      permissions: body.permissions || [],
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    return c.json({ id: roleId });
+  }
+);
+
+// Update domain role
+adminRouter.post(
+  '/io.exprsn.admin.domains.roles.update',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
+  async (c) => {
+    const body = await c.req.json<{
+      domainId: string;
+      roleId: string;
+      name?: string;
+      displayName?: string;
+      description?: string;
+      permissions?: string[];
+      priority?: number;
+    }>();
+
+    if (!body.domainId || !body.roleId) {
+      return c.json({ error: 'InvalidRequest', message: 'domainId and roleId are required' }, 400);
+    }
+
+    const { domainRoles } = await import('../db/schema.js');
+    const [role] = await db
+      .select()
+      .from(domainRoles)
+      .where(and(eq(domainRoles.id, body.roleId), eq(domainRoles.domainId, body.domainId)))
+      .limit(1);
+
+    if (!role) {
+      return c.json({ error: 'NotFound', message: 'Role not found' }, 404);
+    }
+
+    if (role.isSystem) {
+      return c.json({ error: 'Forbidden', message: 'System roles cannot be modified' }, 403);
+    }
+
+    const updates: Record<string, unknown> = { updatedAt: new Date() };
+    if (body.name !== undefined) updates.name = body.name;
+    if (body.displayName !== undefined) updates.displayName = body.displayName;
+    if (body.description !== undefined) updates.description = body.description;
+    if (body.permissions !== undefined) updates.permissions = body.permissions;
+    if (body.priority !== undefined) updates.priority = body.priority;
+
+    await db.update(domainRoles).set(updates).where(eq(domainRoles.id, body.roleId));
+    return c.json({ success: true });
+  }
+);
+
+// Delete domain role
+adminRouter.post(
+  '/io.exprsn.admin.domains.roles.delete',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
+  async (c) => {
+    const body = await c.req.json<{ domainId: string; roleId: string }>();
+
+    if (!body.domainId || !body.roleId) {
+      return c.json({ error: 'InvalidRequest', message: 'domainId and roleId are required' }, 400);
+    }
+
+    const { domainRoles } = await import('../db/schema.js');
+    const [role] = await db
+      .select()
+      .from(domainRoles)
+      .where(and(eq(domainRoles.id, body.roleId), eq(domainRoles.domainId, body.domainId)))
+      .limit(1);
+
+    if (!role) {
+      return c.json({ error: 'NotFound', message: 'Role not found' }, 404);
+    }
+
+    if (role.isSystem) {
+      return c.json({ error: 'Forbidden', message: 'System roles cannot be deleted' }, 403);
+    }
+
+    await db.delete(domainRoles).where(eq(domainRoles.id, body.roleId));
+    return c.json({ success: true });
+  }
+);
+
+// Assign role to domain user
+adminRouter.post(
+  '/io.exprsn.admin.domains.roles.assignUser',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
+  async (c) => {
+    const body = await c.req.json<{ domainId: string; userDid: string; roleIds: string[] }>();
+
+    if (!body.domainId || !body.userDid || !Array.isArray(body.roleIds)) {
+      return c.json({ error: 'InvalidRequest', message: 'domainId, userDid, and roleIds are required' }, 400);
+    }
+
+    const { domainUsers } = await import('../db/schema.js');
+    const [domainUser] = await db
+      .select()
+      .from(domainUsers)
+      .where(and(eq(domainUsers.domainId, body.domainId), eq(domainUsers.userDid, body.userDid)))
+      .limit(1);
+
+    if (!domainUser) {
+      return c.json({ error: 'NotFound', message: 'Domain user not found' }, 404);
+    }
+
+    await syncDomainUserRoleAssignments(
+      body.domainId,
+      domainUser.id,
+      body.userDid,
+      c.get('did'),
+      body.roleIds
+    );
+
+    return c.json({ success: true });
+  }
+);
+
+// Assign role to domain group
+adminRouter.post(
+  '/io.exprsn.admin.domains.roles.assignGroup',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
+  async (c) => {
+    const body = await c.req.json<{ domainId: string; groupId: string; roleIds: string[] }>();
+
+    if (!body.domainId || !body.groupId || !Array.isArray(body.roleIds)) {
+      return c.json({ error: 'InvalidRequest', message: 'domainId, groupId, and roleIds are required' }, 400);
+    }
+
+    await syncDomainGroupRoleAssignments(body.domainId, body.groupId, c.get('did'), body.roleIds);
+    return c.json({ success: true });
+  }
+);
+
+// Effective access for a user within a domain
+adminRouter.get(
+  '/io.exprsn.admin.domains.users.access',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_VIEW),
+  async (c) => {
+    const domainId = c.req.query('domainId');
+    const userDid = c.req.query('userDid');
+
+    if (!domainId || !userDid) {
+      return c.json({ error: 'InvalidRequest', message: 'domainId and userDid are required' }, 400);
+    }
+
+    const access = await getEffectiveDomainAccess(domainId, userDid);
+    if (!access) {
+      return c.json({ error: 'NotFound', message: 'Access record not found' }, 404);
+    }
+
+    return c.json({ access });
+  }
+);
+
+// List organizations for a domain
+adminRouter.get(
+  '/io.exprsn.admin.domains.organizations.list',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_VIEW),
+  async (c) => {
+    const domainId = c.req.query('domainId');
+    const search = c.req.query('search');
+    const status = c.req.query('status');
+    const limit = Math.min(parseInt(c.req.query('limit') || '25', 10), 100);
+    const offset = parseInt(c.req.query('offset') || '0', 10);
+
+    if (!domainId) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing domainId' }, 400);
+    }
+
+    const conditions = [eq(organizations.domainId, domainId)];
+    if (search) {
+      conditions.push(
+        or(
+          ilike(organizations.name, `%${search}%`),
+          ilike(organizations.handle, `%${search}%`),
+          ilike(organizations.description, `%${search}%`)
+        )!
+      );
+    }
+    if (status) {
+      const statuses = status.split(',').filter(Boolean);
+      if (statuses.length === 1) {
+        conditions.push(eq(organizations.status, statuses[0]!));
+      } else if (statuses.length > 1) {
+        conditions.push(inArray(organizations.status, statuses));
+      }
+    }
+
+    const [rows, totalRows] = await Promise.all([
+      db
+        .select()
+        .from(organizations)
+        .where(and(...conditions))
+        .orderBy(desc(organizations.createdAt))
+        .limit(limit)
+        .offset(offset),
+      db
+        .select({ total: count() })
+        .from(organizations)
+        .where(and(...conditions)),
+    ]);
+
+    return c.json({
+      organizations: rows.map((organization) => ({
+        id: organization.id,
+        name: organization.name,
+        handle: organization.handle || '',
+        description: organization.description || undefined,
+        memberCount: organization.memberCount,
+        verified: organization.verified,
+        status: organization.status,
+        avatar: organization.avatar || undefined,
+        createdAt: organization.createdAt.toISOString(),
+      })),
+      total: totalRows[0]?.total || 0,
+    });
+  }
+);
+
+// Domain SSO config summary
+adminRouter.get(
+  '/io.exprsn.admin.domains.sso.config.get',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_VIEW),
+  async (c) => {
+    const domainId = c.req.query('domainId');
+
+    if (!domainId) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing domainId' }, 400);
+    }
+
+    const { domainSsoConfig, externalIdentities, externalIdentityProviders, ssoAuditLog } = await import('../db/schema.js');
+    const [config] = await db
+      .select()
+      .from(domainSsoConfig)
+      .where(eq(domainSsoConfig.domainId, domainId))
+      .limit(1);
+
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const [loginCount, linkedUsers] = await Promise.all([
+      db
+        .select({ count: count() })
+        .from(ssoAuditLog)
+        .where(and(eq(ssoAuditLog.domainId, domainId), gte(ssoAuditLog.createdAt, since), eq(ssoAuditLog.success, true))),
+      db
+        .select({ count: count() })
+        .from(externalIdentities)
+        .innerJoin(externalIdentityProviders, eq(externalIdentityProviders.id, externalIdentities.providerId))
+        .where(eq(externalIdentityProviders.domainId, domainId)),
+    ]);
+
+    return c.json({
+      config: {
+        enabled: config ? config.ssoMode !== 'disabled' : false,
+        enforced: config?.ssoMode === 'required',
+        jitProvisioning: config?.jitProvisioning ?? true,
+        ssoMode: config?.ssoMode || 'disabled',
+        primaryIdpId: config?.primaryIdpId || undefined,
+        allowedIdpIds: (config?.allowedIdpIds || []) as string[],
+        allowedEmailDomains: (config?.allowedEmailDomains || []) as string[],
+      },
+      stats: {
+        logins24h: loginCount[0]?.count || 0,
+        linkedUsers: linkedUsers[0]?.count || 0,
+      },
+    });
+  }
+);
+
+// Domain SSO config update
+adminRouter.post(
+  '/io.exprsn.admin.domains.sso.config.update',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
+  async (c) => {
+    const body = await c.req.json<{
+      domainId: string;
+      enabled?: boolean;
+      enforced?: boolean;
+      jitProvisioning?: boolean;
+    }>();
+
+    if (!body.domainId) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing domainId' }, 400);
+    }
+
+    const { domainSsoConfig } = await import('../db/schema.js');
+    const [existing] = await db
+      .select()
+      .from(domainSsoConfig)
+      .where(eq(domainSsoConfig.domainId, body.domainId))
+      .limit(1);
+
+    const ssoMode =
+      body.enabled === false
+        ? 'disabled'
+        : body.enforced
+          ? 'required'
+          : existing?.ssoMode === 'required' && body.enforced === false
+            ? 'optional'
+            : existing?.ssoMode === 'disabled'
+              ? 'optional'
+              : existing?.ssoMode || 'optional';
+
+    if (existing) {
+      await db
+        .update(domainSsoConfig)
+        .set({
+          ssoMode,
+          jitProvisioning: body.jitProvisioning ?? existing.jitProvisioning,
+          updatedAt: new Date(),
+          updatedBy: c.get('did'),
+        })
+        .where(eq(domainSsoConfig.domainId, body.domainId));
+    } else {
+      await db.insert(domainSsoConfig).values({
+        id: nanoid(),
+        domainId: body.domainId,
+        ssoMode,
+        jitProvisioning: body.jitProvisioning ?? true,
+        defaultRole: 'member',
+        emailDomainVerification: true,
+        allowedIdpIds: [],
+        allowedEmailDomains: [],
+        forceReauthAfterHours: 24,
+        updatedBy: c.get('did'),
+      });
+    }
+
+    return c.json({ success: true });
+  }
+);
+
+// List external SSO providers for a domain
+adminRouter.get(
+  '/io.exprsn.admin.domains.sso.providers.list',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_VIEW),
+  async (c) => {
+    const domainId = c.req.query('domainId');
+
+    if (!domainId) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing domainId' }, 400);
+    }
+
+    const { domainSsoConfig, externalIdentityProviders, externalIdentities } = await import('../db/schema.js');
+    const [config, providers, assignmentCounts] = await Promise.all([
+      db
+        .select()
+        .from(domainSsoConfig)
+        .where(eq(domainSsoConfig.domainId, domainId))
+        .limit(1),
+      db
+        .select()
+        .from(externalIdentityProviders)
+        .where(eq(externalIdentityProviders.domainId, domainId))
+        .orderBy(asc(externalIdentityProviders.priority), desc(externalIdentityProviders.createdAt)),
+      db
+        .select({
+          providerId: externalIdentities.providerId,
+          count: count(),
+        })
+        .from(externalIdentities)
+        .groupBy(externalIdentities.providerId),
+    ]);
+
+    const usageMap = new Map(assignmentCounts.map((row) => [row.providerId, row.count]));
+    const primaryIdpId = config[0]?.primaryIdpId;
+
+    return c.json({
+      providers: providers.map((provider) => ({
+        id: provider.id,
+        name: provider.displayName || provider.name,
+        type: provider.type as 'oidc' | 'saml' | 'oauth2',
+        status: provider.status === 'active' ? 'active' : provider.status === 'inactive' ? 'inactive' : 'error',
+        isPrimary: provider.id === primaryIdpId,
+        issuer: provider.issuer || undefined,
+        clientId: provider.clientId || undefined,
+        entityId: provider.idpEntityId || undefined,
+        lastSync: undefined,
+        userCount: usageMap.get(provider.id) || 0,
+        logo: provider.iconUrl || undefined,
+      })),
+    });
+  }
+);
+
+// Get external SSO provider details
+adminRouter.get(
+  '/io.exprsn.admin.domains.sso.providers.get',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_VIEW),
+  async (c) => {
+    const domainId = c.req.query('domainId');
+    const providerId = c.req.query('providerId');
+
+    if (!domainId || !providerId) {
+      return c.json({ error: 'InvalidRequest', message: 'domainId and providerId are required' }, 400);
+    }
+
+    const { domainSsoConfig, externalIdentityProviders } = await import('../db/schema.js');
+    const [[provider], [config]] = await Promise.all([
+      db
+        .select()
+        .from(externalIdentityProviders)
+        .where(and(eq(externalIdentityProviders.id, providerId), eq(externalIdentityProviders.domainId, domainId)))
+        .limit(1),
+      db
+        .select()
+        .from(domainSsoConfig)
+        .where(eq(domainSsoConfig.domainId, domainId))
+        .limit(1),
+    ]);
+
+    if (!provider) {
+      return c.json({ error: 'NotFound', message: 'Provider not found' }, 404);
+    }
+
+    const claimMapping = (provider.claimMapping || {}) as Record<string, string>;
+
+    return c.json({
+      provider: {
+        id: provider.id,
+        name: provider.displayName || provider.name,
+        type: provider.type as 'oidc' | 'saml' | 'oauth2',
+        status: provider.status === 'active' ? 'active' : provider.status === 'inactive' ? 'inactive' : 'error',
+        isPrimary: config?.primaryIdpId === provider.id,
+        enabled: provider.status === 'active',
+        clientId: provider.clientId || '',
+        clientSecret: provider.clientSecret || '',
+        issuer: provider.issuer || '',
+        authorizationUrl: provider.authorizationEndpoint || '',
+        tokenUrl: provider.tokenEndpoint || '',
+        userInfoUrl: provider.userinfoEndpoint || '',
+        scopes: (provider.scopes || []) as string[],
+        entityId: provider.idpEntityId || '',
+        ssoUrl: provider.ssoUrl || '',
+        certificate: provider.idpCertificate || '',
+        signRequests: false,
+        attributeMapping: {
+          email: claimMapping.email || 'email',
+          name: claimMapping.name || 'name',
+          avatar: claimMapping.picture || claimMapping.avatar || '',
+          groups: claimMapping.groups || '',
+        },
+        jitConfig: (provider.jitConfig || {}) as Record<string, unknown>,
+        createdAt: provider.createdAt.toISOString(),
+        updatedAt: provider.updatedAt.toISOString(),
+      },
+    });
+  }
+);
+
+// Create external SSO provider
+adminRouter.post(
+  '/io.exprsn.admin.domains.sso.providers.add',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
+  async (c) => {
+    const body = await c.req.json<Record<string, any>>();
+    const domainId = body.domainId as string | undefined;
+
+    if (!domainId || !body.name || !body.type) {
+      return c.json({ error: 'InvalidRequest', message: 'domainId, name, and type are required' }, 400);
+    }
+
+    const { externalIdentityProviders } = await import('../db/schema.js');
+    const providerId = nanoid();
+    const providerKey = `${slugifyProviderKey(body.name)}-${nanoid(6).toLowerCase()}`;
+
+    const existingProviders = await db
+      .select({ priority: externalIdentityProviders.priority })
+      .from(externalIdentityProviders)
+      .where(eq(externalIdentityProviders.domainId, domainId))
+      .orderBy(desc(externalIdentityProviders.priority))
+      .limit(1);
+
+    const claimMapping = body.attributeMapping
+      ? {
+          email: body.attributeMapping.email,
+          name: body.attributeMapping.name,
+          picture: body.attributeMapping.avatar,
+          groups: body.attributeMapping.groups,
+        }
+      : undefined;
+
+    await db.insert(externalIdentityProviders).values({
+      id: providerId,
+      domainId,
+      name: body.name,
+      displayName: body.name,
+      providerKey,
+      type: body.type,
+      clientId: body.clientId || null,
+      clientSecret: body.clientSecret || null,
+      issuer: body.issuer || null,
+      authorizationEndpoint: body.authorizationUrl || null,
+      tokenEndpoint: body.tokenUrl || null,
+      userinfoEndpoint: body.userInfoUrl || null,
+      scopes: body.scopes || ['openid', 'profile', 'email'],
+      idpEntityId: body.entityId || null,
+      ssoUrl: body.ssoUrl || null,
+      idpCertificate: body.certificate || null,
+      claimMapping,
+      status: body.enabled === false ? 'inactive' : 'active',
+      priority: (existingProviders[0]?.priority || 0) + 1,
+      jitConfig: body.jitConfig || null,
+      updatedAt: new Date(),
+    });
+
+    return c.json({ id: providerId });
+  }
+);
+
+// Update external SSO provider
+adminRouter.post(
+  '/io.exprsn.admin.domains.sso.providers.update',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
+  async (c) => {
+    const body = await c.req.json<Record<string, any>>();
+    const domainId = body.domainId as string | undefined;
+    const providerId = body.providerId as string | undefined;
+
+    if (!domainId || !providerId) {
+      return c.json({ error: 'InvalidRequest', message: 'domainId and providerId are required' }, 400);
+    }
+
+    const { externalIdentityProviders } = await import('../db/schema.js');
+    const [provider] = await db
+      .select()
+      .from(externalIdentityProviders)
+      .where(and(eq(externalIdentityProviders.id, providerId), eq(externalIdentityProviders.domainId, domainId)))
+      .limit(1);
+
+    if (!provider) {
+      return c.json({ error: 'NotFound', message: 'Provider not found' }, 404);
+    }
+
+    const claimMapping = body.attributeMapping
+      ? {
+          email: body.attributeMapping.email,
+          name: body.attributeMapping.name,
+          picture: body.attributeMapping.avatar,
+          groups: body.attributeMapping.groups,
+        }
+      : provider.claimMapping;
+
+    await db
+      .update(externalIdentityProviders)
+      .set({
+        name: body.name ?? provider.name,
+        displayName: body.name ?? provider.displayName,
+        clientId: body.clientId ?? provider.clientId,
+        clientSecret: body.clientSecret ?? provider.clientSecret,
+        issuer: body.issuer ?? provider.issuer,
+        authorizationEndpoint: body.authorizationUrl ?? provider.authorizationEndpoint,
+        tokenEndpoint: body.tokenUrl ?? provider.tokenEndpoint,
+        userinfoEndpoint: body.userInfoUrl ?? provider.userinfoEndpoint,
+        scopes: body.scopes ?? provider.scopes,
+        idpEntityId: body.entityId ?? provider.idpEntityId,
+        ssoUrl: body.ssoUrl ?? provider.ssoUrl,
+        idpCertificate: body.certificate ?? provider.idpCertificate,
+        claimMapping,
+        status: body.enabled === undefined
+          ? body.status ?? provider.status
+          : body.enabled
+            ? 'active'
+            : 'inactive',
+        jitConfig: body.jitConfig ?? provider.jitConfig,
+        updatedAt: new Date(),
+      })
+      .where(eq(externalIdentityProviders.id, providerId));
+
+    return c.json({ success: true });
+  }
+);
+
+// Remove external SSO provider
+adminRouter.post(
+  '/io.exprsn.admin.domains.sso.providers.remove',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
+  async (c) => {
+    const body = await c.req.json<{ domainId: string; providerId: string }>();
+
+    if (!body.domainId || !body.providerId) {
+      return c.json({ error: 'InvalidRequest', message: 'domainId and providerId are required' }, 400);
+    }
+
+    const { domainSsoConfig, externalIdentityProviders } = await import('../db/schema.js');
+    await db
+      .delete(externalIdentityProviders)
+      .where(and(eq(externalIdentityProviders.id, body.providerId), eq(externalIdentityProviders.domainId, body.domainId)));
+
+    const [config] = await db
+      .select()
+      .from(domainSsoConfig)
+      .where(eq(domainSsoConfig.domainId, body.domainId))
+      .limit(1);
+
+    if (config) {
+      await db
+        .update(domainSsoConfig)
+        .set({
+          primaryIdpId: config.primaryIdpId === body.providerId ? null : config.primaryIdpId,
+          allowedIdpIds: (config.allowedIdpIds || []).filter((id) => id !== body.providerId),
+          updatedAt: new Date(),
+          updatedBy: c.get('did'),
+        })
+        .where(eq(domainSsoConfig.domainId, body.domainId));
+    }
+
+    return c.json({ success: true });
+  }
+);
+
+// Toggle external SSO provider
+adminRouter.post(
+  '/io.exprsn.admin.domains.sso.providers.toggle',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
+  async (c) => {
+    const body = await c.req.json<{ domainId: string; providerId: string; enabled: boolean }>();
+
+    if (!body.domainId || !body.providerId || body.enabled === undefined) {
+      return c.json({ error: 'InvalidRequest', message: 'domainId, providerId, and enabled are required' }, 400);
+    }
+
+    const { externalIdentityProviders } = await import('../db/schema.js');
+    await db
+      .update(externalIdentityProviders)
+      .set({
+        status: body.enabled ? 'active' : 'inactive',
+        updatedAt: new Date(),
+      })
+      .where(and(eq(externalIdentityProviders.id, body.providerId), eq(externalIdentityProviders.domainId, body.domainId)));
+
+    return c.json({ success: true });
+  }
+);
+
+// Set primary external SSO provider
+adminRouter.post(
+  '/io.exprsn.admin.domains.sso.providers.setPrimary',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
+  async (c) => {
+    const body = await c.req.json<{ domainId: string; providerId: string }>();
+
+    if (!body.domainId || !body.providerId) {
+      return c.json({ error: 'InvalidRequest', message: 'domainId and providerId are required' }, 400);
+    }
+
+    const { domainSsoConfig } = await import('../db/schema.js');
+    const [config] = await db
+      .select()
+      .from(domainSsoConfig)
+      .where(eq(domainSsoConfig.domainId, body.domainId))
+      .limit(1);
+
+    if (config) {
+      await db
+        .update(domainSsoConfig)
+        .set({
+          primaryIdpId: body.providerId,
+          allowedIdpIds: Array.from(new Set([...(config.allowedIdpIds || []), body.providerId])),
+          updatedAt: new Date(),
+          updatedBy: c.get('did'),
+        })
+        .where(eq(domainSsoConfig.domainId, body.domainId));
+    } else {
+      await db.insert(domainSsoConfig).values({
+        id: nanoid(),
+        domainId: body.domainId,
+        ssoMode: 'optional',
+        primaryIdpId: body.providerId,
+        allowedIdpIds: [body.providerId],
+        jitProvisioning: true,
+        defaultRole: 'member',
+        emailDomainVerification: true,
+        allowedEmailDomains: [],
+        forceReauthAfterHours: 24,
+        updatedBy: c.get('did'),
+      });
+    }
+
+    return c.json({ success: true });
+  }
+);
+
+// Test external SSO provider configuration
+adminRouter.post(
+  '/io.exprsn.admin.domains.sso.providers.test',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_VIEW),
+  async (c) => {
+    const body = await c.req.json<{ domainId: string; providerId: string }>();
+
+    if (!body.domainId || !body.providerId) {
+      return c.json({ error: 'InvalidRequest', message: 'domainId and providerId are required' }, 400);
+    }
+
+    const { externalIdentityProviders } = await import('../db/schema.js');
+    const [provider] = await db
+      .select()
+      .from(externalIdentityProviders)
+      .where(and(eq(externalIdentityProviders.id, body.providerId), eq(externalIdentityProviders.domainId, body.domainId)))
+      .limit(1);
+
+    if (!provider) {
+      return c.json({ error: 'NotFound', message: 'Provider not found' }, 404);
+    }
+
+    const startedAt = Date.now();
+    const hasMinimumConfig = provider.type === 'saml'
+      ? !!provider.ssoUrl && !!provider.idpCertificate
+      : !!provider.clientId && (!!provider.issuer || !!provider.authorizationEndpoint) && !!provider.tokenEndpoint;
+
+    return c.json({
+      success: hasMinimumConfig,
+      responseTime: Date.now() - startedAt,
+      error: hasMinimumConfig ? undefined : 'Provider configuration is incomplete',
+    });
+  }
+);
+
+// Stats for one external SSO provider
+adminRouter.get(
+  '/io.exprsn.admin.domains.sso.providers.stats',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_VIEW),
+  async (c) => {
+    const domainId = c.req.query('domainId');
+    const providerId = c.req.query('providerId');
+
+    if (!domainId || !providerId) {
+      return c.json({ error: 'InvalidRequest', message: 'domainId and providerId are required' }, 400);
+    }
+
+    const { externalIdentities, ssoAuditLog } = await import('../db/schema.js');
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const [linkedUsers, loginCount, lastLogin] = await Promise.all([
+      db
+        .select({ count: count() })
+        .from(externalIdentities)
+        .where(eq(externalIdentities.providerId, providerId)),
+      db
+        .select({ count: count() })
+        .from(ssoAuditLog)
+        .where(and(eq(ssoAuditLog.domainId, domainId), eq(ssoAuditLog.providerId, providerId), gte(ssoAuditLog.createdAt, since), eq(ssoAuditLog.success, true))),
+      db
+        .select({ createdAt: ssoAuditLog.createdAt })
+        .from(ssoAuditLog)
+        .where(and(eq(ssoAuditLog.domainId, domainId), eq(ssoAuditLog.providerId, providerId), eq(ssoAuditLog.success, true)))
+        .orderBy(desc(ssoAuditLog.createdAt))
+        .limit(1),
+    ]);
+
+    return c.json({
+      stats: {
+        logins24h: loginCount[0]?.count || 0,
+        linkedUsers: linkedUsers[0]?.count || 0,
+        lastLogin: lastLogin[0]?.createdAt?.toISOString(),
+      },
+    });
+  }
+);
+
+// Linked users for one external SSO provider
+adminRouter.get(
+  '/io.exprsn.admin.domains.sso.providers.users',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_VIEW),
+  async (c) => {
+    const domainId = c.req.query('domainId');
+    const providerId = c.req.query('providerId');
+
+    if (!domainId || !providerId) {
+      return c.json({ error: 'InvalidRequest', message: 'domainId and providerId are required' }, 400);
+    }
+
+    const { externalIdentities, externalIdentityProviders, ssoAuditLog } = await import('../db/schema.js');
+    const linkedUsers = await db
+      .select({
+        identity: externalIdentities,
+        user: {
+          did: users.did,
+          handle: users.handle,
+          displayName: users.displayName,
+        },
+      })
+      .from(externalIdentities)
+      .innerJoin(externalIdentityProviders, eq(externalIdentityProviders.id, externalIdentities.providerId))
+      .leftJoin(users, eq(users.did, externalIdentities.userDid))
+      .where(and(eq(externalIdentityProviders.domainId, domainId), eq(externalIdentities.providerId, providerId)))
+      .orderBy(desc(externalIdentities.linkedAt));
+
+    const lastLogins = await db
+      .select({
+        userDid: ssoAuditLog.userDid,
+        createdAt: ssoAuditLog.createdAt,
+      })
+      .from(ssoAuditLog)
+      .where(and(eq(ssoAuditLog.domainId, domainId), eq(ssoAuditLog.providerId, providerId), eq(ssoAuditLog.success, true)))
+      .orderBy(desc(ssoAuditLog.createdAt));
+
+    const lastLoginMap = new Map<string, string>();
+    for (const row of lastLogins) {
+      if (row.userDid && !lastLoginMap.has(row.userDid)) {
+        lastLoginMap.set(row.userDid, row.createdAt.toISOString());
+      }
+    }
+
+    return c.json({
+      users: linkedUsers.map(({ identity, user }) => ({
+        id: identity.userDid,
+        displayName: user?.displayName || user?.handle || identity.displayName || identity.email || identity.externalId,
+        email: identity.email || '',
+        externalId: identity.externalId,
+        linkedAt: identity.linkedAt.toISOString(),
+        lastLogin: lastLoginMap.get(identity.userDid),
+      })),
+    });
+  }
+);
+
+// Domain SSO email domain list
+adminRouter.get(
+  '/io.exprsn.admin.domains.sso.emailDomains.list',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_VIEW),
+  async (c) => {
+    const domainId = c.req.query('domainId');
+
+    if (!domainId) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing domainId' }, 400);
+    }
+
+    const { domainSsoConfig, domains, externalIdentityProviders } = await import('../db/schema.js');
+    const [[config], [domain], providers] = await Promise.all([
+      db
+        .select()
+        .from(domainSsoConfig)
+        .where(eq(domainSsoConfig.domainId, domainId))
+        .limit(1),
+      db
+        .select()
+        .from(domains)
+        .where(eq(domains.id, domainId))
+        .limit(1),
+      db
+        .select()
+        .from(externalIdentityProviders)
+        .where(eq(externalIdentityProviders.domainId, domainId)),
+    ]);
+
+    const featureState = getDomainSsoFeatureState(domain?.features);
+    const metadata = featureState.emailDomains;
+    const domainsFromConfig = (config?.allowedEmailDomains || []) as string[];
+    const domainsFromProviders = providers
+      .map((provider) => provider.requiredEmailDomain)
+      .filter((value): value is string => !!value);
+    const allDomains = [...new Set([...domainsFromConfig, ...domainsFromProviders])];
+
+    return c.json({
+      domains: allDomains.map((emailDomain) => {
+        const domainMeta = metadata[emailDomain] || {};
+        const provider = providers.find((item) => item.requiredEmailDomain === emailDomain);
+
+        return {
+          id: emailDomain,
+          domain: emailDomain,
+          verified: domainMeta.verified === true,
+          verificationMethod: 'dns' as const,
+          verificationToken: (domainMeta.verificationToken as string | undefined) || undefined,
+          autoJoin: domainMeta.autoJoin === true,
+          defaultRole: (domainMeta.defaultRole as string | undefined) || config?.defaultRole || 'member',
+          providerId: (domainMeta.providerId as string | undefined) || provider?.id || undefined,
+          providerName: provider?.displayName || provider?.name || undefined,
+          createdAt: (domainMeta.createdAt as string | undefined) || config?.createdAt?.toISOString() || new Date().toISOString(),
+          verifiedAt: domainMeta.verifiedAt as string | undefined,
+        };
+      }),
+    });
+  }
+);
+
+// Add domain SSO email domain
+adminRouter.post(
+  '/io.exprsn.admin.domains.sso.emailDomains.add',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
+  async (c) => {
+    const body = await c.req.json<{ domainId: string; domain: string; autoJoin?: boolean; defaultRole?: string; providerId?: string }>();
+
+    if (!body.domainId || !body.domain) {
+      return c.json({ error: 'InvalidRequest', message: 'domainId and domain are required' }, 400);
+    }
+
+    const { domainSsoConfig, domains, externalIdentityProviders } = await import('../db/schema.js');
+    const normalizedDomain = body.domain.toLowerCase().trim();
+    const [[config], [domain]] = await Promise.all([
+      db
+        .select()
+        .from(domainSsoConfig)
+        .where(eq(domainSsoConfig.domainId, body.domainId))
+        .limit(1),
+      db
+        .select()
+        .from(domains)
+        .where(eq(domains.id, body.domainId))
+        .limit(1),
+    ]);
+
+    const allowedEmailDomains = Array.from(new Set([...(config?.allowedEmailDomains || []), normalizedDomain]));
+    if (config) {
+      await db
+        .update(domainSsoConfig)
+        .set({
+          allowedEmailDomains,
+          updatedAt: new Date(),
+          updatedBy: c.get('did'),
+        })
+        .where(eq(domainSsoConfig.domainId, body.domainId));
+    } else {
+      await db.insert(domainSsoConfig).values({
+        id: nanoid(),
+        domainId: body.domainId,
+        ssoMode: 'optional',
+        allowedIdpIds: [],
+        jitProvisioning: true,
+        defaultRole: body.defaultRole || 'member',
+        emailDomainVerification: true,
+        allowedEmailDomains,
+        forceReauthAfterHours: 24,
+        updatedBy: c.get('did'),
+      });
+    }
+
+    const featureState = getDomainSsoFeatureState(domain?.features);
+    const verificationToken = nanoid(24);
+    const emailDomainMetadata = {
+      ...featureState.emailDomains,
+      [normalizedDomain]: {
+        ...(featureState.emailDomains[normalizedDomain] || {}),
+        autoJoin: body.autoJoin === true,
+        defaultRole: body.defaultRole || config?.defaultRole || 'member',
+        providerId: body.providerId || undefined,
+        verificationToken,
+        verified: false,
+        createdAt: new Date().toISOString(),
+      },
+    };
+
+    await db
+      .update(domains)
+      .set({
+        features: mergeDomainSsoFeatureState(domain?.features, {
+          emailDomains: emailDomainMetadata,
+        }) as any,
+        updatedAt: new Date(),
+      })
+      .where(eq(domains.id, body.domainId));
+
+    if (body.providerId) {
+      await db
+        .update(externalIdentityProviders)
+        .set({
+          requiredEmailDomain: normalizedDomain,
+          updatedAt: new Date(),
+        })
+        .where(and(eq(externalIdentityProviders.id, body.providerId), eq(externalIdentityProviders.domainId, body.domainId)));
+    }
+
+    return c.json({ id: normalizedDomain, verificationToken });
+  }
+);
+
+// Update domain SSO email domain
+adminRouter.post(
+  '/io.exprsn.admin.domains.sso.emailDomains.update',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
+  async (c) => {
+    const body = await c.req.json<{ domainId: string; emailDomainId: string; autoJoin?: boolean; defaultRole?: string; providerId?: string }>();
+
+    if (!body.domainId || !body.emailDomainId) {
+      return c.json({ error: 'InvalidRequest', message: 'domainId and emailDomainId are required' }, 400);
+    }
+
+    const { domains, externalIdentityProviders } = await import('../db/schema.js');
+    const [domain] = await db
+      .select()
+      .from(domains)
+      .where(eq(domains.id, body.domainId))
+      .limit(1);
+
+    if (!domain) {
+      return c.json({ error: 'NotFound', message: 'Domain not found' }, 404);
+    }
+
+    const featureState = getDomainSsoFeatureState(domain.features);
+    const domainMeta = featureState.emailDomains[body.emailDomainId] || {};
+    const nextProviderId = (
+      body.providerId === undefined ? domainMeta.providerId : body.providerId
+    ) as string | undefined;
+
+    const emailDomainMetadata = {
+      ...featureState.emailDomains,
+      [body.emailDomainId]: {
+        ...domainMeta,
+        ...(body.autoJoin !== undefined ? { autoJoin: body.autoJoin } : {}),
+        ...(body.defaultRole !== undefined ? { defaultRole: body.defaultRole } : {}),
+        ...(body.providerId !== undefined ? { providerId: body.providerId || undefined } : {}),
+      },
+    };
+
+    await db
+      .update(domains)
+      .set({
+        features: mergeDomainSsoFeatureState(domain.features, {
+          emailDomains: emailDomainMetadata,
+        }) as any,
+        updatedAt: new Date(),
+      })
+      .where(eq(domains.id, body.domainId));
+
+    if (body.providerId !== undefined) {
+      await db
+        .update(externalIdentityProviders)
+        .set({
+          requiredEmailDomain: null,
+          updatedAt: new Date(),
+        })
+        .where(and(eq(externalIdentityProviders.domainId, body.domainId), eq(externalIdentityProviders.requiredEmailDomain, body.emailDomainId)));
+
+      if (nextProviderId) {
+        await db
+          .update(externalIdentityProviders)
+          .set({
+            requiredEmailDomain: body.emailDomainId,
+            updatedAt: new Date(),
+          })
+          .where(and(eq(externalIdentityProviders.id, nextProviderId), eq(externalIdentityProviders.domainId, body.domainId)));
+      }
+    }
+
+    return c.json({ success: true });
+  }
+);
+
+// Verify domain SSO email domain
+adminRouter.post(
+  '/io.exprsn.admin.domains.sso.emailDomains.verify',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
+  async (c) => {
+    const body = await c.req.json<{ domainId: string; emailDomainId: string }>();
+
+    if (!body.domainId || !body.emailDomainId) {
+      return c.json({ error: 'InvalidRequest', message: 'domainId and emailDomainId are required' }, 400);
+    }
+
+    const { domains } = await import('../db/schema.js');
+    const [domain] = await db
+      .select()
+      .from(domains)
+      .where(eq(domains.id, body.domainId))
+      .limit(1);
+
+    if (!domain) {
+      return c.json({ error: 'NotFound', message: 'Domain not found' }, 404);
+    }
+
+    const featureState = getDomainSsoFeatureState(domain.features);
+    const domainMeta = featureState.emailDomains[body.emailDomainId] || {};
+    const emailDomainMetadata = {
+      ...featureState.emailDomains,
+      [body.emailDomainId]: {
+        ...domainMeta,
+        verified: true,
+        verifiedAt: new Date().toISOString(),
+      },
+    };
+
+    await db
+      .update(domains)
+      .set({
+        features: mergeDomainSsoFeatureState(domain.features, {
+          emailDomains: emailDomainMetadata,
+        }) as any,
+        updatedAt: new Date(),
+      })
+      .where(eq(domains.id, body.domainId));
+
+    return c.json({ success: true, verified: true });
+  }
+);
+
+// Remove domain SSO email domain
+adminRouter.post(
+  '/io.exprsn.admin.domains.sso.emailDomains.remove',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
+  async (c) => {
+    const body = await c.req.json<{ domainId: string; emailDomainId: string }>();
+
+    if (!body.domainId || !body.emailDomainId) {
+      return c.json({ error: 'InvalidRequest', message: 'domainId and emailDomainId are required' }, 400);
+    }
+
+    const { domainSsoConfig, domains, externalIdentityProviders } = await import('../db/schema.js');
+    const [[config], [domain]] = await Promise.all([
+      db
+        .select()
+        .from(domainSsoConfig)
+        .where(eq(domainSsoConfig.domainId, body.domainId))
+        .limit(1),
+      db
+        .select()
+        .from(domains)
+        .where(eq(domains.id, body.domainId))
+        .limit(1),
+    ]);
+
+    if (config) {
+      await db
+        .update(domainSsoConfig)
+        .set({
+          allowedEmailDomains: (config.allowedEmailDomains || []).filter((domainName) => domainName !== body.emailDomainId),
+          updatedAt: new Date(),
+          updatedBy: c.get('did'),
+        })
+        .where(eq(domainSsoConfig.domainId, body.domainId));
+    }
+
+    if (domain) {
+      const featureState = getDomainSsoFeatureState(domain.features);
+      const emailDomainMetadata = { ...featureState.emailDomains };
+      delete emailDomainMetadata[body.emailDomainId];
+
+      await db
+        .update(domains)
+        .set({
+          features: mergeDomainSsoFeatureState(domain.features, {
+            emailDomains: emailDomainMetadata,
+          }) as any,
+          updatedAt: new Date(),
+        })
+        .where(eq(domains.id, body.domainId));
+    }
+
+    await db
+      .update(externalIdentityProviders)
+      .set({
+        requiredEmailDomain: null,
+        updatedAt: new Date(),
+      })
+      .where(and(eq(externalIdentityProviders.domainId, body.domainId), eq(externalIdentityProviders.requiredEmailDomain, body.emailDomainId)));
+
+    return c.json({ success: true });
+  }
+);
+
+// Domain SSO policies
+adminRouter.get(
+  '/io.exprsn.admin.domains.sso.policies.get',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_VIEW),
+  async (c) => {
+    const domainId = c.req.query('domainId');
+
+    if (!domainId) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing domainId' }, 400);
+    }
+
+    const { domains, domainSsoConfig } = await import('../db/schema.js');
+    const [[domain], [config]] = await Promise.all([
+      db
+        .select()
+        .from(domains)
+        .where(eq(domains.id, domainId))
+        .limit(1),
+      db
+        .select()
+        .from(domainSsoConfig)
+        .where(eq(domainSsoConfig.domainId, domainId))
+        .limit(1),
+    ]);
+
+    const featureState = getDomainSsoFeatureState(domain?.features);
+
+    return c.json({
+      policies: {
+        ...featureState.policies,
+        ssoEnforced: config?.ssoMode === 'required' || featureState.policies.ssoEnforced,
+      },
+    });
+  }
+);
+
+adminRouter.post(
+  '/io.exprsn.admin.domains.sso.policies.update',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
+  async (c) => {
+    const body = await c.req.json<Record<string, any>>();
+    const domainId = body.domainId as string | undefined;
+
+    if (!domainId) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing domainId' }, 400);
+    }
+
+    const { domains, domainSsoConfig } = await import('../db/schema.js');
+    const [[domain], [config]] = await Promise.all([
+      db
+        .select()
+        .from(domains)
+        .where(eq(domains.id, domainId))
+        .limit(1),
+      db
+        .select()
+        .from(domainSsoConfig)
+        .where(eq(domainSsoConfig.domainId, domainId))
+        .limit(1),
+    ]);
+
+    if (!domain) {
+      return c.json({ error: 'NotFound', message: 'Domain not found' }, 404);
+    }
+
+    const featureState = getDomainSsoFeatureState(domain.features);
+    const nextPolicies = {
+      ...featureState.policies,
+      ...body,
+    };
+    delete (nextPolicies as Record<string, unknown>).domainId;
+
+    await db
+      .update(domains)
+      .set({
+        features: mergeDomainSsoFeatureState(domain.features, {
+          policies: nextPolicies as Record<string, unknown>,
+        }) as any,
+        updatedAt: new Date(),
+      })
+      .where(eq(domains.id, domainId));
+
+    const nextSsoMode = nextPolicies.ssoEnforced
+      ? 'required'
+      : config?.ssoMode === 'disabled'
+        ? 'disabled'
+        : 'optional';
+
+    if (config) {
+      await db
+        .update(domainSsoConfig)
+        .set({
+          ssoMode: nextSsoMode,
+          forceReauthAfterHours:
+            nextPolicies.sessionTimeoutUnit === 'days'
+              ? Number(nextPolicies.sessionTimeout || 24) * 24
+              : nextPolicies.sessionTimeoutUnit === 'minutes'
+                ? Math.max(1, Math.ceil(Number(nextPolicies.sessionTimeout || 24) / 60))
+                : Number(nextPolicies.sessionTimeout || 24),
+          updatedAt: new Date(),
+          updatedBy: c.get('did'),
+        })
+        .where(eq(domainSsoConfig.domainId, domainId));
+    } else {
+      await db.insert(domainSsoConfig).values({
+        id: nanoid(),
+        domainId,
+        ssoMode: nextSsoMode,
+        allowedIdpIds: [],
+        jitProvisioning: true,
+        defaultRole: 'member',
+        emailDomainVerification: true,
+        allowedEmailDomains: [],
+        forceReauthAfterHours:
+          nextPolicies.sessionTimeoutUnit === 'days'
+            ? Number(nextPolicies.sessionTimeout || 24) * 24
+            : nextPolicies.sessionTimeoutUnit === 'minutes'
+              ? Math.max(1, Math.ceil(Number(nextPolicies.sessionTimeout || 24) / 60))
+              : Number(nextPolicies.sessionTimeout || 24),
+        updatedBy: c.get('did'),
+      });
+    }
+
+    return c.json({ success: true });
+  }
+);
+
+// Domain SSO audit log
+adminRouter.get(
+  '/io.exprsn.admin.domains.sso.audit',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_VIEW),
+  async (c) => {
+    const domainId = c.req.query('domainId');
+    const providerId = c.req.query('providerId');
+    const userDid = c.req.query('userDid');
+    const eventType = c.req.query('eventType');
+    const limit = Math.min(parseInt(c.req.query('limit') || '50', 10), 200);
+
+    if (!domainId) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing domainId' }, 400);
+    }
+
+    const { ssoAuditLog } = await import('../db/schema.js');
+    const conditions = [eq(ssoAuditLog.domainId, domainId)];
+    if (providerId) conditions.push(eq(ssoAuditLog.providerId, providerId));
+    if (userDid) conditions.push(eq(ssoAuditLog.userDid, userDid));
+    if (eventType) conditions.push(eq(ssoAuditLog.eventType, eventType));
+
+    const logs = await db
+      .select()
+      .from(ssoAuditLog)
+      .where(and(...conditions))
+      .orderBy(desc(ssoAuditLog.createdAt))
+      .limit(limit);
+
+    return c.json({
+      logs: logs.map((log) => ({
+        id: log.id,
+        eventType: log.eventType,
+        userDid: log.userDid || undefined,
+        clientId: log.clientId || undefined,
+        providerId: log.providerId || undefined,
+        ipAddress: log.ipAddress || undefined,
+        userAgent: log.userAgent || undefined,
+        details: (log.details || {}) as Record<string, unknown>,
+        success: log.success,
+        errorMessage: log.errorMessage || undefined,
+        createdAt: log.createdAt.toISOString(),
+      })),
+    });
+  }
+);
+
+// Hosted OIDC clients for a domain
+adminRouter.get(
+  '/io.exprsn.admin.domains.oauth.clients.list',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_VIEW),
+  async (c) => {
+    const domainId = c.req.query('domainId');
+
+    if (!domainId) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing domainId' }, 400);
+    }
+
+    const { oauthClients } = await import('../db/schema.js');
+    const clients = await db
+      .select()
+      .from(oauthClients)
+      .where(eq(oauthClients.domainId, domainId))
+      .orderBy(desc(oauthClients.createdAt));
+
+    return c.json({
+      clients: clients.map((client) => ({
+        id: client.id,
+        clientId: client.clientId,
+        clientName: client.clientName,
+        clientUri: client.clientUri || undefined,
+        logoUri: client.logoUri || undefined,
+        clientType: client.clientType as 'confidential' | 'public',
+        applicationType: (client.applicationType || 'web') as 'web' | 'native' | 'spa',
+        redirectUris: (client.redirectUris || []) as string[],
+        grantTypes: (client.grantTypes || []) as string[],
+        allowedScopes: (client.allowedScopes || []) as string[],
+        requireConsent: client.requireConsent ?? true,
+        requirePkce: client.requirePkce ?? true,
+        status: (client.status || 'active') as 'active' | 'suspended' | 'pending_approval',
+        createdAt: client.createdAt.toISOString(),
+      })),
+    });
+  }
+);
+
+adminRouter.post(
+  '/io.exprsn.admin.domains.oauth.clients.create',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
+  async (c) => {
+    const body = await c.req.json<{
+      domainId: string;
+      clientName: string;
+      clientUri?: string;
+      logoUri?: string;
+      applicationType?: 'web' | 'native' | 'spa';
+      redirectUris: string[];
+      allowedScopes?: string[];
+      requireConsent?: boolean;
+      requirePkce?: boolean;
+    }>();
+
+    if (!body.domainId || !body.clientName || !Array.isArray(body.redirectUris) || body.redirectUris.length === 0) {
+      return c.json({ error: 'InvalidRequest', message: 'domainId, clientName, and redirectUris are required' }, 400);
+    }
+
+    const { OIDCProviderService } = await import('../services/sso/OIDCProviderService.js');
+    const result = await OIDCProviderService.registerClient({
+      clientName: body.clientName,
+      clientUri: body.clientUri,
+      logoUri: body.logoUri,
+      redirectUris: body.redirectUris,
+      allowedScopes: body.allowedScopes,
+      requireConsent: body.requireConsent,
+      requirePkce: body.requirePkce,
+      applicationType: body.applicationType,
+      domainId: body.domainId,
+      ownerDid: c.get('did'),
+    } as any);
+
+    return c.json({
+      client: {
+        id: result.client.id,
+        clientId: result.clientId,
+        clientSecret: result.clientSecret,
+        clientName: result.client.clientName,
+      },
+    });
+  }
+);
+
+adminRouter.post(
+  '/io.exprsn.admin.domains.oauth.clients.update',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
+  async (c) => {
+    const body = await c.req.json<{
+      domainId: string;
+      clientId: string;
+      clientName?: string;
+      clientUri?: string;
+      logoUri?: string;
+      redirectUris?: string[];
+      allowedScopes?: string[];
+      requireConsent?: boolean;
+      requirePkce?: boolean;
+      status?: 'active' | 'suspended';
+    }>();
+
+    if (!body.domainId || !body.clientId) {
+      return c.json({ error: 'InvalidRequest', message: 'domainId and clientId are required' }, 400);
+    }
+
+    const { oauthClients } = await import('../db/schema.js');
+    await db
+      .update(oauthClients)
+      .set({
+        ...(body.clientName !== undefined ? { clientName: body.clientName } : {}),
+        ...(body.clientUri !== undefined ? { clientUri: body.clientUri } : {}),
+        ...(body.logoUri !== undefined ? { logoUri: body.logoUri } : {}),
+        ...(body.redirectUris !== undefined ? { redirectUris: body.redirectUris } : {}),
+        ...(body.allowedScopes !== undefined ? { allowedScopes: body.allowedScopes } : {}),
+        ...(body.requireConsent !== undefined ? { requireConsent: body.requireConsent } : {}),
+        ...(body.requirePkce !== undefined ? { requirePkce: body.requirePkce } : {}),
+        ...(body.status !== undefined ? { status: body.status } : {}),
+        updatedAt: new Date(),
+      })
+      .where(and(eq(oauthClients.domainId, body.domainId), eq(oauthClients.id, body.clientId)));
+
+    return c.json({ success: true });
+  }
+);
+
+adminRouter.post(
+  '/io.exprsn.admin.domains.oauth.clients.delete',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
+  async (c) => {
+    const body = await c.req.json<{ domainId: string; clientId: string }>();
+
+    if (!body.domainId || !body.clientId) {
+      return c.json({ error: 'InvalidRequest', message: 'domainId and clientId are required' }, 400);
+    }
+
+    const { oauthClients } = await import('../db/schema.js');
+    await db
+      .delete(oauthClients)
+      .where(and(eq(oauthClients.domainId, body.domainId), eq(oauthClients.id, body.clientId)));
+
+    return c.json({ success: true });
+  }
+);
+
+adminRouter.post(
+  '/io.exprsn.admin.domains.oauth.clients.regenerateSecret',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
+  async (c) => {
+    const body = await c.req.json<{ domainId: string; clientId: string }>();
+
+    if (!body.domainId || !body.clientId) {
+      return c.json({ error: 'InvalidRequest', message: 'domainId and clientId are required' }, 400);
+    }
+
+    const { oauthClients } = await import('../db/schema.js');
+    const clientSecret = `secret_${nanoid(48)}`;
+    const clientSecretHash = await bcrypt.hash(clientSecret, 10);
+
+    await db
+      .update(oauthClients)
+      .set({
+        clientSecretHash,
+        updatedAt: new Date(),
+      })
+      .where(and(eq(oauthClients.domainId, body.domainId), eq(oauthClients.id, body.clientId)));
+
+    return c.json({ clientSecret });
+  }
+);
+
+// Hosted SAML service providers for a domain
+adminRouter.get(
+  '/io.exprsn.admin.domains.saml.providers.list',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_VIEW),
+  async (c) => {
+    const domainId = c.req.query('domainId');
+
+    if (!domainId) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing domainId' }, 400);
+    }
+
+    const { samlServiceProviders } = await import('../db/schema.js');
+    const providers = await db
+      .select()
+      .from(samlServiceProviders)
+      .where(eq(samlServiceProviders.domainId, domainId))
+      .orderBy(desc(samlServiceProviders.createdAt));
+
+    return c.json({
+      providers: providers.map((provider) => ({
+        id: provider.id,
+        entityId: provider.entityId,
+        name: provider.name,
+        description: provider.description || undefined,
+        assertionConsumerServiceUrl: provider.assertionConsumerServiceUrl,
+        singleLogoutServiceUrl: provider.singleLogoutServiceUrl || undefined,
+        nameIdFormat: provider.nameIdFormat || 'urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress',
+        signAssertions: provider.signAssertions ?? true,
+        signResponse: provider.signResponse ?? true,
+        encryptAssertions: provider.encryptAssertions ?? false,
+        status: (provider.status || 'active') as 'active' | 'suspended' | 'pending',
+        createdAt: provider.createdAt.toISOString(),
+      })),
+    });
+  }
+);
+
+adminRouter.post(
+  '/io.exprsn.admin.domains.saml.providers.create',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
+  async (c) => {
+    const body = await c.req.json<{
+      domainId: string;
+      name: string;
+      entityId: string;
+      assertionConsumerServiceUrl: string;
+      singleLogoutServiceUrl?: string;
+      nameIdFormat?: string;
+      signAssertions?: boolean;
+      signResponse?: boolean;
+      encryptAssertions?: boolean;
+      spCertificate?: string;
+      attributeMapping?: Record<string, string>;
+    }>();
+
+    if (!body.domainId || !body.name || !body.entityId || !body.assertionConsumerServiceUrl) {
+      return c.json({ error: 'InvalidRequest', message: 'domainId, name, entityId, and assertionConsumerServiceUrl are required' }, 400);
+    }
+
+    const { samlServiceProviders } = await import('../db/schema.js');
+    const providerId = nanoid();
+
+    await db.insert(samlServiceProviders).values({
+      id: providerId,
+      domainId: body.domainId,
+      entityId: body.entityId,
+      name: body.name,
+      assertionConsumerServiceUrl: body.assertionConsumerServiceUrl,
+      singleLogoutServiceUrl: body.singleLogoutServiceUrl,
+      nameIdFormat: body.nameIdFormat,
+      signAssertions: body.signAssertions ?? true,
+      signResponse: body.signResponse ?? true,
+      encryptAssertions: body.encryptAssertions ?? false,
+      spCertificate: body.spCertificate,
+      attributeMapping: body.attributeMapping,
+      ownerDid: c.get('did'),
+      status: 'active',
+    });
+
+    return c.json({
+      provider: {
+        id: providerId,
+        entityId: body.entityId,
+        name: body.name,
+      },
+    });
+  }
+);
+
+adminRouter.post(
+  '/io.exprsn.admin.domains.saml.providers.update',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
+  async (c) => {
+    const body = await c.req.json<{
+      domainId: string;
+      providerId: string;
+      name?: string;
+      assertionConsumerServiceUrl?: string;
+      singleLogoutServiceUrl?: string;
+      nameIdFormat?: string;
+      signAssertions?: boolean;
+      signResponse?: boolean;
+      encryptAssertions?: boolean;
+      spCertificate?: string;
+      status?: 'active' | 'suspended';
+    }>();
+
+    if (!body.domainId || !body.providerId) {
+      return c.json({ error: 'InvalidRequest', message: 'domainId and providerId are required' }, 400);
+    }
+
+    const { samlServiceProviders } = await import('../db/schema.js');
+    await db
+      .update(samlServiceProviders)
+      .set({
+        ...(body.name !== undefined ? { name: body.name } : {}),
+        ...(body.assertionConsumerServiceUrl !== undefined ? { assertionConsumerServiceUrl: body.assertionConsumerServiceUrl } : {}),
+        ...(body.singleLogoutServiceUrl !== undefined ? { singleLogoutServiceUrl: body.singleLogoutServiceUrl } : {}),
+        ...(body.nameIdFormat !== undefined ? { nameIdFormat: body.nameIdFormat } : {}),
+        ...(body.signAssertions !== undefined ? { signAssertions: body.signAssertions } : {}),
+        ...(body.signResponse !== undefined ? { signResponse: body.signResponse } : {}),
+        ...(body.encryptAssertions !== undefined ? { encryptAssertions: body.encryptAssertions } : {}),
+        ...(body.spCertificate !== undefined ? { spCertificate: body.spCertificate } : {}),
+        ...(body.status !== undefined ? { status: body.status } : {}),
+        updatedAt: new Date(),
+      })
+      .where(and(eq(samlServiceProviders.domainId, body.domainId), eq(samlServiceProviders.id, body.providerId)));
+
+    return c.json({ success: true });
+  }
+);
+
+adminRouter.post(
+  '/io.exprsn.admin.domains.saml.providers.delete',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
+  async (c) => {
+    const body = await c.req.json<{ domainId: string; providerId: string }>();
+
+    if (!body.domainId || !body.providerId) {
+      return c.json({ error: 'InvalidRequest', message: 'domainId and providerId are required' }, 400);
+    }
+
+    const { samlServiceProviders } = await import('../db/schema.js');
+    await db
+      .delete(samlServiceProviders)
+      .where(and(eq(samlServiceProviders.domainId, body.domainId), eq(samlServiceProviders.id, body.providerId)));
+
+    return c.json({ success: true });
+  }
+);
+
+adminRouter.get(
+  '/io.exprsn.admin.domains.saml.metadata',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_VIEW),
+  async (c) => {
+    const domainId = c.req.query('domainId');
+
+    if (!domainId) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing domainId' }, 400);
+    }
+
+    const { domains } = await import('../db/schema.js');
+    const [domain] = await db
+      .select({ domain: domains.domain })
+      .from(domains)
+      .where(eq(domains.id, domainId))
+      .limit(1);
+
+    if (!domain) {
+      return c.json({ error: 'NotFound', message: 'Domain not found' }, 404);
+    }
+
+    const { SAMLProviderService } = await import('../services/sso/SAMLProviderService.js');
+    const metadata = SAMLProviderService.generateIdPMetadata().replace(/Exprsn/g, domain.domain);
+    return c.json({ metadata });
   }
 );
 
@@ -5237,7 +8532,7 @@ adminRouter.get(
             }
           : null,
       })),
-      cursor: hasMore ? results[results.length - 1].org.createdAt.toISOString() : undefined,
+      cursor: hasMore && results.length > 0 ? results[results.length - 1]!.org.createdAt.toISOString() : undefined,
     });
   }
 );
@@ -5634,5 +8929,1668 @@ adminRouter.post(
         hierarchyLevel: updatedOrg.hierarchyLevel,
       },
     });
+  }
+);
+
+// ============================================
+// Certificate Management Routes
+// ============================================
+
+// Issue a certificate
+adminRouter.post(
+  '/io.exprsn.admin.certificates.issue',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
+  async (c) => {
+    const body = await c.req.json<{
+      issuerId: string; // Intermediate cert ID
+      domainId: string;
+      certType: 'client' | 'server' | 'code_signing';
+      commonName: string;
+      organization?: string;
+      validityDays: number;
+      subjectAltNames?: {
+        dnsNames?: string[];
+        ipAddresses?: string[];
+        emails?: string[];
+      };
+      userDid?: string;
+      serviceId?: string;
+    }>();
+
+    if (!body.issuerId || !body.commonName || !body.certType || !body.domainId) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing required fields' }, 400);
+    }
+
+    const { CertificateManager } = await import('../services/ca/index.js');
+    const { domains, domainActivityLog } = await import('../db/schema.js');
+
+    // Verify domain exists
+    const [domain] = await db
+      .select()
+      .from(domains)
+      .where(eq(domains.id, body.domainId))
+      .limit(1);
+
+    if (!domain) {
+      return c.json({ error: 'NotFound', message: 'Domain not found' }, 404);
+    }
+
+    try {
+      const certManager = new CertificateManager();
+
+      // Build SANs array
+      const subjectAltNames: string[] = [];
+      if (body.subjectAltNames?.dnsNames) {
+        subjectAltNames.push(...body.subjectAltNames.dnsNames.map(dns => `DNS:${dns}`));
+      }
+      if (body.subjectAltNames?.emails) {
+        subjectAltNames.push(...body.subjectAltNames.emails.map(email => `email:${email}`));
+      }
+
+      const result = await certManager.issueEntityCertificate({
+        commonName: body.commonName,
+        organization: body.organization || domain.name,
+        type: body.certType,
+        subjectDid: body.userDid,
+        serviceId: body.serviceId,
+        subjectAltNames: subjectAltNames.length > 0 ? subjectAltNames : undefined,
+        validityDays: body.validityDays || 365,
+        intermediateId: body.issuerId,
+      });
+
+      // Log activity
+      const adminDid = c.get('did');
+      await db.insert(domainActivityLog).values({
+        id: nanoid(),
+        domainId: body.domainId,
+        actorDid: adminDid,
+        action: 'certificate_issued',
+        metadata: {
+          certId: result.id,
+          certType: body.certType,
+          commonName: body.commonName,
+        },
+      });
+
+      return c.json({
+        certificate: {
+          id: result.id,
+          serialNumber: result.serialNumber,
+          fingerprint: result.fingerprint,
+          certType: body.certType,
+          commonName: body.commonName,
+        },
+      });
+    } catch (error) {
+      console.error('Certificate issue error:', error);
+      return c.json({
+        error: 'CertificateError',
+        message: error instanceof Error ? error.message : 'Failed to issue certificate'
+      }, 500);
+    }
+  }
+);
+
+// List certificates for a domain
+adminRouter.get(
+  '/io.exprsn.admin.certificates.list',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_VIEW),
+  async (c) => {
+    const domainId = c.req.query('domainId');
+    const certType = c.req.query('certType') as 'client' | 'server' | 'code_signing' | undefined;
+    const status = c.req.query('status') || 'active';
+    const limit = Math.min(parseInt(c.req.query('limit') || '50'), 100);
+
+    if (!domainId) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing domainId' }, 400);
+    }
+
+    const { domains, caIntermediateCertificates, caEntityCertificates } = await import('../db/schema.js');
+
+    // Get the domain's intermediate cert
+    const [domain] = await db
+      .select({ intermediateCertId: domains.intermediateCertId })
+      .from(domains)
+      .where(eq(domains.id, domainId))
+      .limit(1);
+
+    if (!domain || !domain.intermediateCertId) {
+      return c.json({ certificates: [] });
+    }
+
+    // Build query conditions
+    const conditions = [eq(caEntityCertificates.issuerId, domain.intermediateCertId)];
+    if (certType) {
+      conditions.push(eq(caEntityCertificates.certType, certType));
+    }
+    if (status) {
+      conditions.push(eq(caEntityCertificates.status, status));
+    }
+
+    const certificates = await db
+      .select({
+        id: caEntityCertificates.id,
+        commonName: caEntityCertificates.commonName,
+        certType: caEntityCertificates.certType,
+        serialNumber: caEntityCertificates.serialNumber,
+        fingerprint: caEntityCertificates.fingerprint,
+        status: caEntityCertificates.status,
+        notBefore: caEntityCertificates.notBefore,
+        notAfter: caEntityCertificates.notAfter,
+        subjectDid: caEntityCertificates.subjectDid,
+        serviceId: caEntityCertificates.serviceId,
+        createdAt: caEntityCertificates.createdAt,
+      })
+      .from(caEntityCertificates)
+      .where(and(...conditions))
+      .orderBy(desc(caEntityCertificates.createdAt))
+      .limit(limit);
+
+    return c.json({ certificates });
+  }
+);
+
+// Revoke a certificate
+adminRouter.post(
+  '/io.exprsn.admin.certificates.revoke',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
+  async (c) => {
+    const body = await c.req.json<{
+      certId: string;
+      reason?: string;
+    }>();
+
+    if (!body.certId) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing certId' }, 400);
+    }
+
+    const { caEntityCertificates, domainActivityLog, domains } = await import('../db/schema.js');
+
+    // Get the certificate
+    const [cert] = await db
+      .select()
+      .from(caEntityCertificates)
+      .where(eq(caEntityCertificates.id, body.certId))
+      .limit(1);
+
+    if (!cert) {
+      return c.json({ error: 'NotFound', message: 'Certificate not found' }, 404);
+    }
+
+    if (cert.status === 'revoked') {
+      return c.json({ error: 'AlreadyRevoked', message: 'Certificate is already revoked' }, 400);
+    }
+
+    // Revoke the certificate
+    await db
+      .update(caEntityCertificates)
+      .set({
+        status: 'revoked',
+        revokedAt: new Date(),
+        revocationReason: body.reason || 'Administrative revocation',
+      })
+      .where(eq(caEntityCertificates.id, body.certId));
+
+    // Find domain for logging (via intermediate cert)
+    const [domain] = await db
+      .select({ id: domains.id })
+      .from(domains)
+      .where(eq(domains.intermediateCertId, cert.issuerId))
+      .limit(1);
+
+    if (domain) {
+      const adminDid = c.get('did');
+      await db.insert(domainActivityLog).values({
+        id: nanoid(),
+        domainId: domain.id,
+        actorDid: adminDid,
+        action: 'certificate_revoked',
+        metadata: {
+          certId: body.certId,
+          commonName: cert.commonName,
+          reason: body.reason,
+        },
+      });
+    }
+
+    return c.json({ success: true });
+  }
+);
+
+// Download certificate (returns PEM)
+adminRouter.get(
+  '/io.exprsn.admin.certificates.download',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
+  async (c) => {
+    const certId = c.req.query('certId');
+    const format = c.req.query('format') || 'pem'; // 'pem' | 'chain'
+
+    if (!certId) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing certId' }, 400);
+    }
+
+    const { caEntityCertificates, caIntermediateCertificates, caRootCertificates } = await import('../db/schema.js');
+
+    // Get the certificate
+    const [cert] = await db
+      .select()
+      .from(caEntityCertificates)
+      .where(eq(caEntityCertificates.id, certId))
+      .limit(1);
+
+    if (!cert) {
+      return c.json({ error: 'NotFound', message: 'Certificate not found' }, 404);
+    }
+
+    if (format === 'chain') {
+      // Get the full chain
+      const [intermediate] = await db
+        .select()
+        .from(caIntermediateCertificates)
+        .where(eq(caIntermediateCertificates.id, cert.issuerId))
+        .limit(1);
+
+      let chainPem = cert.certificate;
+
+      if (intermediate) {
+        chainPem += '\n' + intermediate.certificate;
+
+        // Get root
+        const [root] = await db
+          .select()
+          .from(caRootCertificates)
+          .where(eq(caRootCertificates.id, intermediate.rootId))
+          .limit(1);
+
+        if (root) {
+          chainPem += '\n' + root.certificate;
+        }
+      }
+
+      return c.json({
+        certificate: chainPem,
+        format: 'chain',
+      });
+    }
+
+    return c.json({
+      certificate: cert.certificate,
+      format: 'pem',
+    });
+  }
+);
+
+// ============================================
+// Domain Clusters Routes
+// ============================================
+
+// List clusters assigned to a domain
+adminRouter.get(
+  '/io.exprsn.admin.domains.clusters.list',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_VIEW),
+  async (c) => {
+    const domainId = c.req.query('domainId');
+
+    if (!domainId) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing domainId' }, 400);
+    }
+
+    const { domainClusters, renderClusters } = await import('../db/schema.js');
+
+    const clusters = await db
+      .select({
+        id: domainClusters.id,
+        clusterId: domainClusters.clusterId,
+        isPrimary: domainClusters.isPrimary,
+        priority: domainClusters.priority,
+        createdAt: domainClusters.createdAt,
+        cluster: {
+          id: renderClusters.id,
+          name: renderClusters.name,
+          type: renderClusters.type,
+          region: renderClusters.region,
+          status: renderClusters.status,
+          workerCount: renderClusters.workerCount,
+          gpuEnabled: renderClusters.gpuEnabled,
+        },
+      })
+      .from(domainClusters)
+      .innerJoin(renderClusters, eq(domainClusters.clusterId, renderClusters.id))
+      .where(eq(domainClusters.domainId, domainId))
+      .orderBy(desc(domainClusters.isPrimary), domainClusters.priority);
+
+    return c.json({ clusters });
+  }
+);
+
+// List available clusters (not yet assigned to domain)
+adminRouter.get(
+  '/io.exprsn.admin.domains.clusters.available',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_VIEW),
+  async (c) => {
+    const domainId = c.req.query('domainId');
+
+    if (!domainId) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing domainId' }, 400);
+    }
+
+    const { domainClusters, renderClusters } = await import('../db/schema.js');
+
+    // Get cluster IDs already assigned to this domain
+    const assignedClusters = await db
+      .select({ clusterId: domainClusters.clusterId })
+      .from(domainClusters)
+      .where(eq(domainClusters.domainId, domainId));
+
+    const assignedIds = assignedClusters.map(c => c.clusterId);
+
+    // Get all active clusters not assigned
+    const availableClusters = await db
+      .select({
+        id: renderClusters.id,
+        name: renderClusters.name,
+        type: renderClusters.type,
+        region: renderClusters.region,
+        status: renderClusters.status,
+        workerCount: renderClusters.workerCount,
+        gpuEnabled: renderClusters.gpuEnabled,
+      })
+      .from(renderClusters)
+      .where(
+        and(
+          eq(renderClusters.status, 'active'),
+          assignedIds.length > 0 ? sql`${renderClusters.id} NOT IN (${sql.join(assignedIds.map(id => sql`${id}`), sql`,`)})` : sql`1=1`
+        )
+      );
+
+    return c.json({ clusters: availableClusters });
+  }
+);
+
+// Assign a cluster to a domain
+adminRouter.post(
+  '/io.exprsn.admin.domains.clusters.assign',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
+  async (c) => {
+    const body = await c.req.json<{
+      domainId: string;
+      clusterId: string;
+      isPrimary?: boolean;
+      priority?: number;
+    }>();
+
+    if (!body.domainId || !body.clusterId) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing required fields' }, 400);
+    }
+
+    const { domainClusters, domains, renderClusters, domainActivityLog } = await import('../db/schema.js');
+
+    // Verify domain exists
+    const [domain] = await db
+      .select({ id: domains.id })
+      .from(domains)
+      .where(eq(domains.id, body.domainId))
+      .limit(1);
+
+    if (!domain) {
+      return c.json({ error: 'NotFound', message: 'Domain not found' }, 404);
+    }
+
+    // Verify cluster exists
+    const [cluster] = await db
+      .select({ id: renderClusters.id })
+      .from(renderClusters)
+      .where(eq(renderClusters.id, body.clusterId))
+      .limit(1);
+
+    if (!cluster) {
+      return c.json({ error: 'NotFound', message: 'Cluster not found' }, 404);
+    }
+
+    // Check if already assigned
+    const [existing] = await db
+      .select({ id: domainClusters.id })
+      .from(domainClusters)
+      .where(
+        and(
+          eq(domainClusters.domainId, body.domainId),
+          eq(domainClusters.clusterId, body.clusterId)
+        )
+      )
+      .limit(1);
+
+    if (existing) {
+      return c.json({ error: 'AlreadyExists', message: 'Cluster already assigned to domain' }, 409);
+    }
+
+    // If setting as primary, unset other primaries
+    if (body.isPrimary) {
+      await db
+        .update(domainClusters)
+        .set({ isPrimary: false })
+        .where(eq(domainClusters.domainId, body.domainId));
+    }
+
+    const id = nanoid();
+    await db.insert(domainClusters).values({
+      id,
+      domainId: body.domainId,
+      clusterId: body.clusterId,
+      isPrimary: body.isPrimary || false,
+      priority: body.priority || 0,
+    });
+
+    // Log activity
+    const adminDid = c.get('did');
+    await db.insert(domainActivityLog).values({
+      id: nanoid(),
+      domainId: body.domainId,
+      actorDid: adminDid,
+      action: 'cluster_assigned',
+      metadata: { clusterId: body.clusterId, isPrimary: body.isPrimary },
+    });
+
+    return c.json({ success: true, id });
+  }
+);
+
+// Remove a cluster from a domain
+adminRouter.post(
+  '/io.exprsn.admin.domains.clusters.remove',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
+  async (c) => {
+    const body = await c.req.json<{
+      domainId: string;
+      clusterId: string;
+    }>();
+
+    if (!body.domainId || !body.clusterId) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing required fields' }, 400);
+    }
+
+    const { domainClusters, domainActivityLog } = await import('../db/schema.js');
+
+    await db
+      .delete(domainClusters)
+      .where(
+        and(
+          eq(domainClusters.domainId, body.domainId),
+          eq(domainClusters.clusterId, body.clusterId)
+        )
+      );
+
+    // Log activity
+    const adminDid = c.get('did');
+    await db.insert(domainActivityLog).values({
+      id: nanoid(),
+      domainId: body.domainId,
+      actorDid: adminDid,
+      action: 'cluster_removed',
+      metadata: { clusterId: body.clusterId },
+    });
+
+    return c.json({ success: true });
+  }
+);
+
+// Set primary cluster for a domain
+adminRouter.post(
+  '/io.exprsn.admin.domains.clusters.setPrimary',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
+  async (c) => {
+    const body = await c.req.json<{
+      domainId: string;
+      clusterId: string;
+    }>();
+
+    if (!body.domainId || !body.clusterId) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing required fields' }, 400);
+    }
+
+    const { domainClusters } = await import('../db/schema.js');
+
+    // Unset all primaries for this domain
+    await db
+      .update(domainClusters)
+      .set({ isPrimary: false })
+      .where(eq(domainClusters.domainId, body.domainId));
+
+    // Set the specified cluster as primary
+    await db
+      .update(domainClusters)
+      .set({ isPrimary: true })
+      .where(
+        and(
+          eq(domainClusters.domainId, body.domainId),
+          eq(domainClusters.clusterId, body.clusterId)
+        )
+      );
+
+    return c.json({ success: true });
+  }
+);
+
+// ============================================
+// Domain Services (Platform Services) Routes
+// ============================================
+
+// List services for a domain
+adminRouter.get(
+  '/io.exprsn.admin.domains.services.list',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_VIEW),
+  async (c) => {
+    const domainId = c.req.query('domainId');
+
+    if (!domainId) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing domainId' }, 400);
+    }
+
+    const { domainServices } = await import('../db/schema.js');
+
+    const services = await db
+      .select()
+      .from(domainServices)
+      .where(eq(domainServices.domainId, domainId));
+
+    // Return all service types with their config (or default if not configured)
+    const serviceTypes = ['pds', 'relay', 'appview', 'labeler'];
+    const result = serviceTypes.map(type => {
+      const existing = services.find(s => s.serviceType === type);
+      return existing || {
+        id: null,
+        domainId,
+        serviceType: type,
+        enabled: false,
+        endpoint: null,
+        config: null,
+        status: 'inactive',
+        lastHealthCheck: null,
+        errorMessage: null,
+      };
+    });
+
+    return c.json({ services: result });
+  }
+);
+
+// Configure a service for a domain
+adminRouter.post(
+  '/io.exprsn.admin.domains.services.configure',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
+  async (c) => {
+    const body = await c.req.json<{
+      domainId: string;
+      serviceType: 'pds' | 'relay' | 'appview' | 'labeler';
+      enabled: boolean;
+      endpoint?: string;
+      config?: Record<string, unknown>;
+    }>();
+
+    if (!body.domainId || !body.serviceType) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing required fields' }, 400);
+    }
+
+    const { domainServices, domains, domainActivityLog } = await import('../db/schema.js');
+
+    // Verify domain exists
+    const [domain] = await db
+      .select({ id: domains.id })
+      .from(domains)
+      .where(eq(domains.id, body.domainId))
+      .limit(1);
+
+    if (!domain) {
+      return c.json({ error: 'NotFound', message: 'Domain not found' }, 404);
+    }
+
+    // Check if service already exists
+    const [existing] = await db
+      .select()
+      .from(domainServices)
+      .where(
+        and(
+          eq(domainServices.domainId, body.domainId),
+          eq(domainServices.serviceType, body.serviceType)
+        )
+      )
+      .limit(1);
+
+    let serviceId: string;
+
+    if (existing) {
+      // Update existing
+      await db
+        .update(domainServices)
+        .set({
+          enabled: body.enabled,
+          endpoint: body.endpoint,
+          config: body.config as any,
+          status: body.enabled ? 'starting' : 'inactive',
+          updatedAt: new Date(),
+        })
+        .where(eq(domainServices.id, existing.id));
+      serviceId = existing.id;
+    } else {
+      // Create new
+      serviceId = nanoid();
+      await db.insert(domainServices).values({
+        id: serviceId,
+        domainId: body.domainId,
+        serviceType: body.serviceType,
+        enabled: body.enabled,
+        endpoint: body.endpoint,
+        config: body.config as any,
+        status: body.enabled ? 'starting' : 'inactive',
+      });
+    }
+
+    // Log activity
+    const adminDid = c.get('did');
+    await db.insert(domainActivityLog).values({
+      id: nanoid(),
+      domainId: body.domainId,
+      actorDid: adminDid,
+      action: 'service_configured',
+      metadata: {
+        serviceType: body.serviceType,
+        enabled: body.enabled,
+        endpoint: body.endpoint,
+      },
+    });
+
+    return c.json({ success: true, serviceId });
+  }
+);
+
+// Get service health
+adminRouter.get(
+  '/io.exprsn.admin.domains.services.health',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_VIEW),
+  async (c) => {
+    const domainId = c.req.query('domainId');
+    const serviceType = c.req.query('serviceType');
+
+    if (!domainId || !serviceType) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing required parameters' }, 400);
+    }
+
+    const { domainServices } = await import('../db/schema.js');
+
+    const [service] = await db
+      .select()
+      .from(domainServices)
+      .where(
+        and(
+          eq(domainServices.domainId, domainId),
+          eq(domainServices.serviceType, serviceType)
+        )
+      )
+      .limit(1);
+
+    if (!service) {
+      return c.json({
+        status: 'not_configured',
+        enabled: false,
+        lastHealthCheck: null,
+        errorMessage: null,
+      });
+    }
+
+    // In a real implementation, this would ping the service endpoint
+    // For now, return the stored status
+    return c.json({
+      status: service.status,
+      enabled: service.enabled,
+      endpoint: service.endpoint,
+      lastHealthCheck: service.lastHealthCheck,
+      errorMessage: service.errorMessage,
+    });
+  }
+);
+
+// ============================================
+// Domain Moderation
+// ============================================
+
+// List moderation queue for a domain
+adminRouter.get(
+  '/io.exprsn.admin.domains.moderation.queue.list',
+  requirePermission(ADMIN_PERMISSIONS.CONTENT_VIEW),
+  async (c) => {
+    const domainId = c.req.query('domainId');
+    const status = c.req.query('status') || 'pending';
+    const priority = c.req.query('priority');
+    const limit = parseInt(c.req.query('limit') || '50');
+    const offset = parseInt(c.req.query('offset') || '0');
+
+    if (!domainId) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing domainId' }, 400);
+    }
+
+    const { domainModerationQueue } = await import('../db/schema.js');
+
+    const conditions = [eq(domainModerationQueue.domainId, domainId)];
+    if (status) conditions.push(eq(domainModerationQueue.status, status));
+    if (priority) conditions.push(eq(domainModerationQueue.priority, priority));
+
+    const [items, countResult, stats] = await Promise.all([
+      db
+        .select()
+        .from(domainModerationQueue)
+        .where(and(...conditions))
+        .orderBy(desc(domainModerationQueue.createdAt))
+        .limit(limit)
+        .offset(offset),
+      db
+        .select({ total: count() })
+        .from(domainModerationQueue)
+        .where(and(...conditions)),
+      // Get stats by status
+      db
+        .select({
+          status: domainModerationQueue.status,
+          count: count(),
+        })
+        .from(domainModerationQueue)
+        .where(eq(domainModerationQueue.domainId, domainId))
+        .groupBy(domainModerationQueue.status),
+    ]);
+
+    const statsByStatus = {
+      pending: 0,
+      in_review: 0,
+      escalated: 0,
+      resolved: 0,
+    };
+    stats.forEach((s) => {
+      if (s.status in statsByStatus) {
+        statsByStatus[s.status as keyof typeof statsByStatus] = s.count;
+      }
+    });
+
+    return c.json({
+      items,
+      total: countResult[0]?.total ?? 0,
+      stats: statsByStatus,
+    });
+  }
+);
+
+// Claim a moderation queue item
+adminRouter.post(
+  '/io.exprsn.admin.domains.moderation.queue.claim',
+  requirePermission(ADMIN_PERMISSIONS.CONTENT_MODERATE),
+  async (c) => {
+    const body = await c.req.json<{ id: string }>();
+    const adminDid = c.get('did');
+
+    if (!body.id) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing id' }, 400);
+    }
+
+    const { domainModerationQueue, domainActivityLog } = await import('../db/schema.js');
+
+    // Get the item
+    const [item] = await db
+      .select()
+      .from(domainModerationQueue)
+      .where(eq(domainModerationQueue.id, body.id))
+      .limit(1);
+
+    if (!item) {
+      return c.json({ error: 'NotFound', message: 'Queue item not found' }, 404);
+    }
+
+    if (item.status !== 'pending') {
+      return c.json({ error: 'InvalidState', message: 'Item is not in pending status' }, 400);
+    }
+
+    // Claim the item
+    await db
+      .update(domainModerationQueue)
+      .set({
+        status: 'in_review',
+        assignedTo: adminDid,
+        updatedAt: new Date(),
+      })
+      .where(eq(domainModerationQueue.id, body.id));
+
+    // Log activity
+    await db.insert(domainActivityLog).values({
+      id: nanoid(),
+      domainId: item.domainId,
+      actorDid: adminDid,
+      action: 'moderation_claim',
+      metadata: { queueItemId: body.id, contentType: item.contentType },
+    });
+
+    return c.json({ success: true });
+  }
+);
+
+// Resolve a moderation queue item
+adminRouter.post(
+  '/io.exprsn.admin.domains.moderation.queue.resolve',
+  requirePermission(ADMIN_PERMISSIONS.CONTENT_MODERATE),
+  async (c) => {
+    const body = await c.req.json<{
+      id: string;
+      resolution: 'approved' | 'removed' | 'warning' | 'ban';
+      notes?: string;
+    }>();
+    const adminDid = c.get('did');
+
+    if (!body.id || !body.resolution) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing required fields' }, 400);
+    }
+
+    const { domainModerationQueue, domainActivityLog } = await import('../db/schema.js');
+
+    // Get the item
+    const [item] = await db
+      .select()
+      .from(domainModerationQueue)
+      .where(eq(domainModerationQueue.id, body.id))
+      .limit(1);
+
+    if (!item) {
+      return c.json({ error: 'NotFound', message: 'Queue item not found' }, 404);
+    }
+
+    if (item.status === 'resolved') {
+      return c.json({ error: 'InvalidState', message: 'Item is already resolved' }, 400);
+    }
+
+    // Resolve the item
+    await db
+      .update(domainModerationQueue)
+      .set({
+        status: 'resolved',
+        resolution: body.resolution,
+        resolvedBy: adminDid,
+        resolvedAt: new Date(),
+        notes: body.notes,
+        updatedAt: new Date(),
+      })
+      .where(eq(domainModerationQueue.id, body.id));
+
+    // Log activity
+    await db.insert(domainActivityLog).values({
+      id: nanoid(),
+      domainId: item.domainId,
+      actorDid: adminDid,
+      action: 'moderation_resolve',
+      metadata: {
+        queueItemId: body.id,
+        contentType: item.contentType,
+        resolution: body.resolution,
+      },
+    });
+
+    return c.json({ success: true });
+  }
+);
+
+// Escalate a moderation queue item
+adminRouter.post(
+  '/io.exprsn.admin.domains.moderation.queue.escalate',
+  requirePermission(ADMIN_PERMISSIONS.CONTENT_MODERATE),
+  async (c) => {
+    const body = await c.req.json<{ id: string; notes?: string }>();
+    const adminDid = c.get('did');
+
+    if (!body.id) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing id' }, 400);
+    }
+
+    const { domainModerationQueue, domainActivityLog } = await import('../db/schema.js');
+
+    const [item] = await db
+      .select()
+      .from(domainModerationQueue)
+      .where(eq(domainModerationQueue.id, body.id))
+      .limit(1);
+
+    if (!item) {
+      return c.json({ error: 'NotFound', message: 'Queue item not found' }, 404);
+    }
+
+    await db
+      .update(domainModerationQueue)
+      .set({
+        status: 'escalated',
+        priority: 'critical',
+        notes: body.notes ? `${item.notes || ''}\n[ESCALATED]: ${body.notes}` : item.notes,
+        updatedAt: new Date(),
+      })
+      .where(eq(domainModerationQueue.id, body.id));
+
+    await db.insert(domainActivityLog).values({
+      id: nanoid(),
+      domainId: item.domainId,
+      actorDid: adminDid,
+      action: 'moderation_escalate',
+      metadata: { queueItemId: body.id, contentType: item.contentType },
+    });
+
+    return c.json({ success: true });
+  }
+);
+
+// ============================================
+// Domain Banned Words
+// ============================================
+
+// List banned words for a domain
+adminRouter.get(
+  '/io.exprsn.admin.domains.moderation.bannedWords.list',
+  requirePermission(ADMIN_PERMISSIONS.CONTENT_VIEW),
+  async (c) => {
+    const domainId = c.req.query('domainId');
+    const severity = c.req.query('severity');
+
+    if (!domainId) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing domainId' }, 400);
+    }
+
+    const { domainBannedWords } = await import('../db/schema.js');
+
+    const conditions = [eq(domainBannedWords.domainId, domainId)];
+    if (severity) conditions.push(eq(domainBannedWords.severity, severity));
+
+    const words = await db
+      .select()
+      .from(domainBannedWords)
+      .where(and(...conditions))
+      .orderBy(domainBannedWords.word);
+
+    return c.json({ words });
+  }
+);
+
+// Add a banned word
+adminRouter.post(
+  '/io.exprsn.admin.domains.moderation.bannedWords.add',
+  requirePermission(ADMIN_PERMISSIONS.CONTENT_MODERATE),
+  async (c) => {
+    const body = await c.req.json<{
+      domainId: string;
+      word: string;
+      severity?: 'low' | 'medium' | 'high';
+      action?: 'flag' | 'hide' | 'remove';
+    }>();
+    const adminDid = c.get('did');
+
+    if (!body.domainId || !body.word) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing required fields' }, 400);
+    }
+
+    const { domainBannedWords, domainActivityLog } = await import('../db/schema.js');
+
+    const id = nanoid();
+    const normalizedWord = body.word.toLowerCase().trim();
+
+    try {
+      await db.insert(domainBannedWords).values({
+        id,
+        domainId: body.domainId,
+        word: normalizedWord,
+        severity: body.severity || 'medium',
+        action: body.action || 'flag',
+        createdBy: adminDid,
+      });
+
+      await db.insert(domainActivityLog).values({
+        id: nanoid(),
+        domainId: body.domainId,
+        actorDid: adminDid,
+        action: 'banned_word_add',
+        metadata: { word: normalizedWord, severity: body.severity || 'medium' },
+      });
+
+      return c.json({ success: true, id });
+    } catch (error: any) {
+      if (error.code === '23505') {
+        // Unique violation
+        return c.json({ error: 'AlreadyExists', message: 'Word already banned' }, 409);
+      }
+      throw error;
+    }
+  }
+);
+
+// Update a banned word
+adminRouter.post(
+  '/io.exprsn.admin.domains.moderation.bannedWords.update',
+  requirePermission(ADMIN_PERMISSIONS.CONTENT_MODERATE),
+  async (c) => {
+    const body = await c.req.json<{
+      id: string;
+      severity?: 'low' | 'medium' | 'high';
+      action?: 'flag' | 'hide' | 'remove';
+      enabled?: boolean;
+    }>();
+    const adminDid = c.get('did');
+
+    if (!body.id) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing id' }, 400);
+    }
+
+    const { domainBannedWords, domainActivityLog } = await import('../db/schema.js');
+
+    const [word] = await db
+      .select()
+      .from(domainBannedWords)
+      .where(eq(domainBannedWords.id, body.id))
+      .limit(1);
+
+    if (!word) {
+      return c.json({ error: 'NotFound', message: 'Banned word not found' }, 404);
+    }
+
+    const updates: any = {};
+    if (body.severity !== undefined) updates.severity = body.severity;
+    if (body.action !== undefined) updates.action = body.action;
+    if (body.enabled !== undefined) updates.enabled = body.enabled;
+
+    await db.update(domainBannedWords).set(updates).where(eq(domainBannedWords.id, body.id));
+
+    await db.insert(domainActivityLog).values({
+      id: nanoid(),
+      domainId: word.domainId,
+      actorDid: adminDid,
+      action: 'banned_word_update',
+      metadata: { wordId: body.id, word: word.word, updates },
+    });
+
+    return c.json({ success: true });
+  }
+);
+
+// Remove a banned word
+adminRouter.delete(
+  '/io.exprsn.admin.domains.moderation.bannedWords.remove',
+  requirePermission(ADMIN_PERMISSIONS.CONTENT_MODERATE),
+  async (c) => {
+    const id = c.req.query('id');
+    const adminDid = c.get('did');
+
+    if (!id) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing id' }, 400);
+    }
+
+    const { domainBannedWords, domainActivityLog } = await import('../db/schema.js');
+
+    const [word] = await db
+      .select()
+      .from(domainBannedWords)
+      .where(eq(domainBannedWords.id, id))
+      .limit(1);
+
+    if (!word) {
+      return c.json({ error: 'NotFound', message: 'Banned word not found' }, 404);
+    }
+
+    await db.delete(domainBannedWords).where(eq(domainBannedWords.id, id));
+
+    await db.insert(domainActivityLog).values({
+      id: nanoid(),
+      domainId: word.domainId,
+      actorDid: adminDid,
+      action: 'banned_word_remove',
+      metadata: { word: word.word },
+    });
+
+    return c.json({ success: true });
+  }
+);
+
+// ============================================
+// Domain Banned Tags
+// ============================================
+
+// List banned tags for a domain
+adminRouter.get(
+  '/io.exprsn.admin.domains.moderation.bannedTags.list',
+  requirePermission(ADMIN_PERMISSIONS.CONTENT_VIEW),
+  async (c) => {
+    const domainId = c.req.query('domainId');
+    const severity = c.req.query('severity');
+
+    if (!domainId) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing domainId' }, 400);
+    }
+
+    const { domainBannedTags } = await import('../db/schema.js');
+
+    const conditions = [eq(domainBannedTags.domainId, domainId)];
+    if (severity) conditions.push(eq(domainBannedTags.severity, severity));
+
+    const tags = await db
+      .select()
+      .from(domainBannedTags)
+      .where(and(...conditions))
+      .orderBy(domainBannedTags.tag);
+
+    return c.json({ tags });
+  }
+);
+
+// Add a banned tag
+adminRouter.post(
+  '/io.exprsn.admin.domains.moderation.bannedTags.add',
+  requirePermission(ADMIN_PERMISSIONS.CONTENT_MODERATE),
+  async (c) => {
+    const body = await c.req.json<{
+      domainId: string;
+      tag: string;
+      severity?: 'low' | 'medium' | 'high';
+      action?: 'flag' | 'hide' | 'remove';
+    }>();
+    const adminDid = c.get('did');
+
+    if (!body.domainId || !body.tag) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing required fields' }, 400);
+    }
+
+    const { domainBannedTags, domainActivityLog } = await import('../db/schema.js');
+
+    const id = nanoid();
+    const normalizedTag = body.tag.toLowerCase().trim().replace(/^#/, '');
+
+    try {
+      await db.insert(domainBannedTags).values({
+        id,
+        domainId: body.domainId,
+        tag: normalizedTag,
+        severity: body.severity || 'medium',
+        action: body.action || 'flag',
+        createdBy: adminDid,
+      });
+
+      await db.insert(domainActivityLog).values({
+        id: nanoid(),
+        domainId: body.domainId,
+        actorDid: adminDid,
+        action: 'banned_tag_add',
+        metadata: { tag: normalizedTag, severity: body.severity || 'medium' },
+      });
+
+      return c.json({ success: true, id });
+    } catch (error: any) {
+      if (error.code === '23505') {
+        return c.json({ error: 'AlreadyExists', message: 'Tag already banned' }, 409);
+      }
+      throw error;
+    }
+  }
+);
+
+// Update a banned tag
+adminRouter.post(
+  '/io.exprsn.admin.domains.moderation.bannedTags.update',
+  requirePermission(ADMIN_PERMISSIONS.CONTENT_MODERATE),
+  async (c) => {
+    const body = await c.req.json<{
+      id: string;
+      severity?: 'low' | 'medium' | 'high';
+      action?: 'flag' | 'hide' | 'remove';
+      enabled?: boolean;
+    }>();
+    const adminDid = c.get('did');
+
+    if (!body.id) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing id' }, 400);
+    }
+
+    const { domainBannedTags, domainActivityLog } = await import('../db/schema.js');
+
+    const [tag] = await db
+      .select()
+      .from(domainBannedTags)
+      .where(eq(domainBannedTags.id, body.id))
+      .limit(1);
+
+    if (!tag) {
+      return c.json({ error: 'NotFound', message: 'Banned tag not found' }, 404);
+    }
+
+    const updates: any = {};
+    if (body.severity !== undefined) updates.severity = body.severity;
+    if (body.action !== undefined) updates.action = body.action;
+    if (body.enabled !== undefined) updates.enabled = body.enabled;
+
+    await db.update(domainBannedTags).set(updates).where(eq(domainBannedTags.id, body.id));
+
+    await db.insert(domainActivityLog).values({
+      id: nanoid(),
+      domainId: tag.domainId,
+      actorDid: adminDid,
+      action: 'banned_tag_update',
+      metadata: { tagId: body.id, tag: tag.tag, updates },
+    });
+
+    return c.json({ success: true });
+  }
+);
+
+// Remove a banned tag
+adminRouter.delete(
+  '/io.exprsn.admin.domains.moderation.bannedTags.remove',
+  requirePermission(ADMIN_PERMISSIONS.CONTENT_MODERATE),
+  async (c) => {
+    const id = c.req.query('id');
+    const adminDid = c.get('did');
+
+    if (!id) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing id' }, 400);
+    }
+
+    const { domainBannedTags, domainActivityLog } = await import('../db/schema.js');
+
+    const [tag] = await db
+      .select()
+      .from(domainBannedTags)
+      .where(eq(domainBannedTags.id, id))
+      .limit(1);
+
+    if (!tag) {
+      return c.json({ error: 'NotFound', message: 'Banned tag not found' }, 404);
+    }
+
+    await db.delete(domainBannedTags).where(eq(domainBannedTags.id, id));
+
+    await db.insert(domainActivityLog).values({
+      id: nanoid(),
+      domainId: tag.domainId,
+      actorDid: adminDid,
+      action: 'banned_tag_remove',
+      metadata: { tag: tag.tag },
+    });
+
+    return c.json({ success: true });
+  }
+);
+
+// ============================================
+// Domain Identities (PLC)
+// ============================================
+
+// List identities for a domain
+adminRouter.get(
+  '/io.exprsn.admin.domains.identities.list',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_VIEW),
+  async (c) => {
+    const domainId = c.req.query('domainId');
+    const status = c.req.query('status');
+    const limit = parseInt(c.req.query('limit') || '50');
+    const offset = parseInt(c.req.query('offset') || '0');
+
+    if (!domainId) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing domainId' }, 400);
+    }
+
+    const { domainIdentities } = await import('../db/schema.js');
+
+    const conditions = [eq(domainIdentities.domainId, domainId)];
+    if (status) conditions.push(eq(domainIdentities.status, status));
+
+    const [identities, countResult] = await Promise.all([
+      db
+        .select()
+        .from(domainIdentities)
+        .where(and(...conditions))
+        .orderBy(desc(domainIdentities.createdAt))
+        .limit(limit)
+        .offset(offset),
+      db
+        .select({ total: count() })
+        .from(domainIdentities)
+        .where(and(...conditions)),
+    ]);
+
+    return c.json({ identities, total: countResult[0]?.total ?? 0 });
+  }
+);
+
+// Create a new identity
+adminRouter.post(
+  '/io.exprsn.admin.domains.identities.create',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
+  async (c) => {
+    const body = await c.req.json<{
+      domainId: string;
+      handle: string;
+      pdsEndpoint?: string;
+    }>();
+    const adminDid = c.get('did');
+
+    if (!body.domainId || !body.handle) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing required fields' }, 400);
+    }
+
+    const { domainIdentities, domains, domainActivityLog } = await import('../db/schema.js');
+
+    // Get domain for handle suffix
+    const [domain] = await db.select().from(domains).where(eq(domains.id, body.domainId)).limit(1);
+
+    if (!domain) {
+      return c.json({ error: 'NotFound', message: 'Domain not found' }, 404);
+    }
+
+    const normalizedHandle = body.handle.toLowerCase().trim();
+    const fullHandle = `${normalizedHandle}.${domain.domain}`;
+
+    // Generate a DID (in production, this would involve PLC directory)
+    const did = `did:plc:${nanoid(24)}`;
+    const id = nanoid();
+
+    try {
+      await db.insert(domainIdentities).values({
+        id,
+        domainId: body.domainId,
+        did,
+        handle: fullHandle,
+        pdsEndpoint: body.pdsEndpoint || domain.plcConfig?.defaultPdsEndpoint,
+        status: 'active',
+        createdBy: adminDid,
+      });
+
+      await db.insert(domainActivityLog).values({
+        id: nanoid(),
+        domainId: body.domainId,
+        actorDid: adminDid,
+        action: 'identity_create',
+        metadata: { identityId: id, handle: fullHandle, did },
+      });
+
+      return c.json({ success: true, id, did, handle: fullHandle });
+    } catch (error: any) {
+      if (error.code === '23505') {
+        return c.json({ error: 'AlreadyExists', message: 'Handle already exists' }, 409);
+      }
+      throw error;
+    }
+  }
+);
+
+// Update identity status
+adminRouter.post(
+  '/io.exprsn.admin.domains.identities.updateStatus',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
+  async (c) => {
+    const body = await c.req.json<{
+      id: string;
+      status: 'active' | 'deactivated' | 'tombstoned';
+      reason?: string;
+    }>();
+    const adminDid = c.get('did');
+
+    if (!body.id || !body.status) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing required fields' }, 400);
+    }
+
+    const { domainIdentities, domainActivityLog } = await import('../db/schema.js');
+
+    const [identity] = await db
+      .select()
+      .from(domainIdentities)
+      .where(eq(domainIdentities.id, body.id))
+      .limit(1);
+
+    if (!identity) {
+      return c.json({ error: 'NotFound', message: 'Identity not found' }, 404);
+    }
+
+    const updates: any = {
+      status: body.status,
+      updatedAt: new Date(),
+    };
+
+    if (body.status === 'tombstoned') {
+      updates.tombstonedAt = new Date();
+      updates.tombstoneReason = body.reason;
+    }
+
+    await db.update(domainIdentities).set(updates).where(eq(domainIdentities.id, body.id));
+
+    await db.insert(domainActivityLog).values({
+      id: nanoid(),
+      domainId: identity.domainId,
+      actorDid: adminDid,
+      action: 'identity_status_update',
+      metadata: { identityId: body.id, handle: identity.handle, status: body.status },
+    });
+
+    return c.json({ success: true });
+  }
+);
+
+// Link identity to user
+adminRouter.post(
+  '/io.exprsn.admin.domains.identities.linkUser',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
+  async (c) => {
+    const body = await c.req.json<{ identityId: string; userDid: string }>();
+    const adminDid = c.get('did');
+
+    if (!body.identityId || !body.userDid) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing required fields' }, 400);
+    }
+
+    const { domainIdentities, domainActivityLog } = await import('../db/schema.js');
+
+    const [identity] = await db
+      .select()
+      .from(domainIdentities)
+      .where(eq(domainIdentities.id, body.identityId))
+      .limit(1);
+
+    if (!identity) {
+      return c.json({ error: 'NotFound', message: 'Identity not found' }, 404);
+    }
+
+    await db
+      .update(domainIdentities)
+      .set({ userDid: body.userDid, updatedAt: new Date() })
+      .where(eq(domainIdentities.id, body.identityId));
+
+    await db.insert(domainActivityLog).values({
+      id: nanoid(),
+      domainId: identity.domainId,
+      actorDid: adminDid,
+      action: 'identity_link_user',
+      metadata: { identityId: body.identityId, handle: identity.handle, linkedUserDid: body.userDid },
+    });
+
+    return c.json({ success: true });
+  }
+);
+
+// ============================================
+// Domain Handle Reservations
+// ============================================
+
+// List handle reservations for a domain
+adminRouter.get(
+  '/io.exprsn.admin.domains.handles.list',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_VIEW),
+  async (c) => {
+    const domainId = c.req.query('domainId');
+    const includeExpired = c.req.query('includeExpired') === 'true';
+    const includeClaimed = c.req.query('includeClaimed') === 'true';
+
+    if (!domainId) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing domainId' }, 400);
+    }
+
+    const { domainHandleReservations } = await import('../db/schema.js');
+
+    const conditions = [eq(domainHandleReservations.domainId, domainId)];
+
+    if (!includeExpired) {
+      conditions.push(
+        or(
+          isNull(domainHandleReservations.expiresAt),
+          gte(domainHandleReservations.expiresAt, new Date())
+        )!
+      );
+    }
+
+    if (!includeClaimed) {
+      conditions.push(isNull(domainHandleReservations.claimedBy));
+    }
+
+    const reservations = await db
+      .select()
+      .from(domainHandleReservations)
+      .where(and(...conditions))
+      .orderBy(domainHandleReservations.handle);
+
+    return c.json({ reservations });
+  }
+);
+
+// Reserve a handle
+adminRouter.post(
+  '/io.exprsn.admin.domains.handles.reserve',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
+  async (c) => {
+    const body = await c.req.json<{
+      domainId: string;
+      handle: string;
+      handleType?: 'user' | 'org';
+      reason?: string;
+      expiresAt?: string;
+    }>();
+    const adminDid = c.get('did');
+
+    if (!body.domainId || !body.handle) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing required fields' }, 400);
+    }
+
+    const { domainHandleReservations, domainActivityLog } = await import('../db/schema.js');
+
+    const id = nanoid();
+    const normalizedHandle = body.handle.toLowerCase().trim();
+
+    try {
+      await db.insert(domainHandleReservations).values({
+        id,
+        domainId: body.domainId,
+        handle: normalizedHandle,
+        handleType: body.handleType || 'user',
+        reason: body.reason,
+        reservedBy: adminDid,
+        expiresAt: body.expiresAt ? new Date(body.expiresAt) : null,
+      });
+
+      await db.insert(domainActivityLog).values({
+        id: nanoid(),
+        domainId: body.domainId,
+        actorDid: adminDid,
+        action: 'handle_reserve',
+        metadata: { handle: normalizedHandle, handleType: body.handleType || 'user' },
+      });
+
+      return c.json({ success: true, id });
+    } catch (error: any) {
+      if (error.code === '23505') {
+        return c.json({ error: 'AlreadyExists', message: 'Handle already reserved' }, 409);
+      }
+      throw error;
+    }
+  }
+);
+
+// Release a handle reservation
+adminRouter.delete(
+  '/io.exprsn.admin.domains.handles.release',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
+  async (c) => {
+    const id = c.req.query('id');
+    const adminDid = c.get('did');
+
+    if (!id) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing id' }, 400);
+    }
+
+    const { domainHandleReservations, domainActivityLog } = await import('../db/schema.js');
+
+    const [reservation] = await db
+      .select()
+      .from(domainHandleReservations)
+      .where(eq(domainHandleReservations.id, id))
+      .limit(1);
+
+    if (!reservation) {
+      return c.json({ error: 'NotFound', message: 'Handle reservation not found' }, 404);
+    }
+
+    if (reservation.claimedBy) {
+      return c.json({ error: 'InvalidState', message: 'Handle has been claimed' }, 400);
+    }
+
+    await db.delete(domainHandleReservations).where(eq(domainHandleReservations.id, id));
+
+    await db.insert(domainActivityLog).values({
+      id: nanoid(),
+      domainId: reservation.domainId,
+      actorDid: adminDid,
+      action: 'handle_release',
+      metadata: { handle: reservation.handle },
+    });
+
+    return c.json({ success: true });
+  }
+);
+
+// Claim a reserved handle
+adminRouter.post(
+  '/io.exprsn.admin.domains.handles.claim',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
+  async (c) => {
+    const body = await c.req.json<{ id: string; claimedBy: string }>();
+    const adminDid = c.get('did');
+
+    if (!body.id || !body.claimedBy) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing required fields' }, 400);
+    }
+
+    const { domainHandleReservations, domainActivityLog } = await import('../db/schema.js');
+
+    const [reservation] = await db
+      .select()
+      .from(domainHandleReservations)
+      .where(eq(domainHandleReservations.id, body.id))
+      .limit(1);
+
+    if (!reservation) {
+      return c.json({ error: 'NotFound', message: 'Handle reservation not found' }, 404);
+    }
+
+    if (reservation.claimedBy) {
+      return c.json({ error: 'InvalidState', message: 'Handle already claimed' }, 400);
+    }
+
+    // Check if expired
+    if (reservation.expiresAt && reservation.expiresAt < new Date()) {
+      return c.json({ error: 'Expired', message: 'Handle reservation has expired' }, 400);
+    }
+
+    await db
+      .update(domainHandleReservations)
+      .set({ claimedBy: body.claimedBy, claimedAt: new Date() })
+      .where(eq(domainHandleReservations.id, body.id));
+
+    await db.insert(domainActivityLog).values({
+      id: nanoid(),
+      domainId: reservation.domainId,
+      actorDid: adminDid,
+      action: 'handle_claim',
+      metadata: { handle: reservation.handle, claimedBy: body.claimedBy },
+    });
+
+    return c.json({ success: true });
   }
 );

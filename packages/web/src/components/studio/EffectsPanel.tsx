@@ -2,10 +2,11 @@
 
 import { useState, useCallback } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { api } from '@/lib/api';
 import { useEditor } from '@/stores/settings-store';
 import { cn } from '@/lib/utils';
 import toast from 'react-hot-toast';
+
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3002';
 
 // Types
 interface EffectParam {
@@ -78,7 +79,7 @@ export function EffectsPanel({ onEffectsChange, initialEffects = [] }: EffectsPa
   const { data: effectsData } = useQuery({
     queryKey: ['effects', 'list'],
     queryFn: async () => {
-      const response = await fetch('/api/xrpc/io.exprsn.studio.effects.list');
+      const response = await fetch(`${API_BASE}/xrpc/io.exprsn.studio.effects.list`);
       return response.json();
     },
   });
@@ -87,7 +88,7 @@ export function EffectsPanel({ onEffectsChange, initialEffects = [] }: EffectsPa
   const { data: presetsData } = useQuery({
     queryKey: ['effects', 'presets'],
     queryFn: async () => {
-      const response = await fetch('/api/xrpc/io.exprsn.studio.effects.presets');
+      const response = await fetch(`${API_BASE}/xrpc/io.exprsn.studio.effects.presets`);
       return response.json();
     },
   });
@@ -223,7 +224,7 @@ export function EffectsPanel({ onEffectsChange, initialEffects = [] }: EffectsPa
   // Save as preset mutation
   const savePresetMutation = useMutation({
     mutationFn: async (data: { name: string; description: string }) => {
-      const response = await fetch('/api/xrpc/io.exprsn.studio.effects.savePreset', {
+      const response = await fetch(`${API_BASE}/xrpc/io.exprsn.studio.effects.savePreset`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

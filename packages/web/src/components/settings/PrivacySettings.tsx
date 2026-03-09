@@ -3,6 +3,7 @@
 import { useCallback } from 'react';
 import type { PrivacySettings as PrivacySettingsType, UserSettingsUpdate } from '@exprsn/shared';
 import { SettingsRow, ToggleSwitch, Select } from './SettingsSection';
+import { useSettingsStore } from '@/stores/settings-store';
 
 interface PrivacySettingsProps {
   privacy: PrivacySettingsType;
@@ -17,11 +18,21 @@ const PERMISSION_OPTIONS = [
 ];
 
 export function PrivacySettings({ privacy, onUpdate, isUpdating }: PrivacySettingsProps) {
+  // Use Zustand store for immediate UI updates
+  const storePrivacy = useSettingsStore((state) => state.settings.privacy);
+  const updatePrivacy = useSettingsStore((state) => state.updatePrivacy);
+
+  // Use store values for display (more reliable than props)
+  const currentPrivacy = storePrivacy || privacy;
+
   const handleChange = useCallback(
     <K extends keyof PrivacySettingsType>(key: K, value: PrivacySettingsType[K]) => {
+      // Update Zustand store immediately
+      updatePrivacy({ [key]: value });
+      // Also update React Query cache
       onUpdate({ privacy: { [key]: value } });
     },
-    [onUpdate]
+    [updatePrivacy, onUpdate]
   );
 
   return (
@@ -31,7 +42,7 @@ export function PrivacySettings({ privacy, onUpdate, isUpdating }: PrivacySettin
         description="Only approved followers can see your content"
       >
         <ToggleSwitch
-          checked={privacy.privateAccount}
+          checked={currentPrivacy.privateAccount}
           onChange={(v) => handleChange('privateAccount', v)}
           disabled={isUpdating}
         />
@@ -42,7 +53,7 @@ export function PrivacySettings({ privacy, onUpdate, isUpdating }: PrivacySettin
         description="Let others see when you're active"
       >
         <ToggleSwitch
-          checked={privacy.showActivityStatus}
+          checked={currentPrivacy.showActivityStatus}
           onChange={(v) => handleChange('showActivityStatus', v)}
           disabled={isUpdating}
         />
@@ -53,7 +64,7 @@ export function PrivacySettings({ privacy, onUpdate, isUpdating }: PrivacySettin
         description="Let others create side-by-side videos with yours"
       >
         <ToggleSwitch
-          checked={privacy.allowDuets}
+          checked={currentPrivacy.allowDuets}
           onChange={(v) => handleChange('allowDuets', v)}
           disabled={isUpdating}
         />
@@ -64,7 +75,7 @@ export function PrivacySettings({ privacy, onUpdate, isUpdating }: PrivacySettin
         description="Let others use clips from your videos"
       >
         <ToggleSwitch
-          checked={privacy.allowStitches}
+          checked={currentPrivacy.allowStitches}
           onChange={(v) => handleChange('allowStitches', v)}
           disabled={isUpdating}
         />
@@ -75,7 +86,7 @@ export function PrivacySettings({ privacy, onUpdate, isUpdating }: PrivacySettin
         description="Control who can comment on your videos"
       >
         <Select
-          value={privacy.allowComments}
+          value={currentPrivacy.allowComments}
           onChange={(v) => handleChange('allowComments', v as PrivacySettingsType['allowComments'])}
           options={PERMISSION_OPTIONS}
           disabled={isUpdating}
@@ -87,7 +98,7 @@ export function PrivacySettings({ privacy, onUpdate, isUpdating }: PrivacySettin
         description="Control who can send you direct messages"
       >
         <Select
-          value={privacy.allowMessages}
+          value={currentPrivacy.allowMessages}
           onChange={(v) => handleChange('allowMessages', v as PrivacySettingsType['allowMessages'])}
           options={PERMISSION_OPTIONS}
           disabled={isUpdating}

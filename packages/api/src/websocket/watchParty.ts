@@ -76,14 +76,14 @@ async function authenticateSocket(socket: Socket): Promise<UserInfo | null> {
     // Look up session
     const [session] = await db
       .select({
-        userDid: sessions.userDid,
+        userDid: sessions.did,
         handle: users.handle,
         displayName: users.displayName,
         avatar: users.avatar,
       })
       .from(sessions)
-      .innerJoin(users, eq(users.did, sessions.userDid))
-      .where(eq(sessions.accessToken, token))
+      .innerJoin(users, eq(users.did, sessions.did))
+      .where(eq(sessions.accessJwt, token))
       .limit(1);
 
     if (!session) return null;

@@ -264,7 +264,7 @@ export default function OrganizationDashboard() {
     }
 
     try {
-      await api.deleteOrganization(orgId, confirmation);
+      await api.deleteOrganization({ organizationId: orgId, confirmName: confirmation });
       router.push('/');
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to delete organization');

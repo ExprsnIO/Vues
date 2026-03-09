@@ -3,6 +3,7 @@
 import { useCallback } from 'react';
 import type { PlaybackSettings as PlaybackSettingsType, UserSettingsUpdate } from '@exprsn/shared';
 import { SettingsRow, ToggleSwitch, Select } from './SettingsSection';
+import { useSettingsStore } from '@/stores/settings-store';
 
 interface PlaybackSettingsProps {
   playback: PlaybackSettingsType;
@@ -19,11 +20,21 @@ const QUALITY_OPTIONS = [
 ];
 
 export function PlaybackSettings({ playback, onUpdate, isUpdating }: PlaybackSettingsProps) {
+  // Use Zustand store for immediate UI updates
+  const storePlayback = useSettingsStore((state) => state.settings.playback);
+  const updatePlayback = useSettingsStore((state) => state.updatePlayback);
+
+  // Use store values for display (more reliable than props)
+  const currentPlayback = storePlayback || playback;
+
   const handleChange = useCallback(
     <K extends keyof PlaybackSettingsType>(key: K, value: PlaybackSettingsType[K]) => {
+      // Update Zustand store immediately
+      updatePlayback({ [key]: value });
+      // Also update React Query cache
       onUpdate({ playback: { [key]: value } });
     },
-    [onUpdate]
+    [updatePlayback, onUpdate]
   );
 
   return (
@@ -33,7 +44,7 @@ export function PlaybackSettings({ playback, onUpdate, isUpdating }: PlaybackSet
         description="Automatically play videos when scrolling"
       >
         <ToggleSwitch
-          checked={playback.autoplay}
+          checked={currentPlayback.autoplay}
           onChange={(v) => handleChange('autoplay', v)}
           disabled={isUpdating}
         />
@@ -44,7 +55,7 @@ export function PlaybackSettings({ playback, onUpdate, isUpdating }: PlaybackSet
         description="Replay videos when they end"
       >
         <ToggleSwitch
-          checked={playback.loopVideos}
+          checked={currentPlayback.loopVideos}
           onChange={(v) => handleChange('loopVideos', v)}
           disabled={isUpdating}
         />
@@ -55,7 +66,7 @@ export function PlaybackSettings({ playback, onUpdate, isUpdating }: PlaybackSet
         description="Start videos muted"
       >
         <ToggleSwitch
-          checked={playback.defaultMuted}
+          checked={currentPlayback.defaultMuted}
           onChange={(v) => handleChange('defaultMuted', v)}
           disabled={isUpdating}
         />
@@ -66,7 +77,7 @@ export function PlaybackSettings({ playback, onUpdate, isUpdating }: PlaybackSet
         description="Reduce data usage on mobile networks"
       >
         <ToggleSwitch
-          checked={playback.dataSaver}
+          checked={currentPlayback.dataSaver}
           onChange={(v) => handleChange('dataSaver', v)}
           disabled={isUpdating}
         />
@@ -77,7 +88,7 @@ export function PlaybackSettings({ playback, onUpdate, isUpdating }: PlaybackSet
         description="Video quality when not using data saver"
       >
         <Select
-          value={playback.defaultQuality}
+          value={currentPlayback.defaultQuality}
           onChange={(v) => handleChange('defaultQuality', v as PlaybackSettingsType['defaultQuality'])}
           options={QUALITY_OPTIONS}
           disabled={isUpdating}

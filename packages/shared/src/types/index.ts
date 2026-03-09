@@ -138,3 +138,6 @@ export * from './certificates.js';
 
 // Organization management types
 export * from './organization.js';
+
+// Domain administration types
+export * from './domain-admin.js';

@@ -48,6 +48,8 @@ async function checkOrgPermission(
       )
       .limit(1);
 
+    // Owner should always have a member record
+    if (!member[0]) return null;
     return { member: member[0], org: org[0] };
   }
 

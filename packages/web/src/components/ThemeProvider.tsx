@@ -71,6 +71,7 @@ export const ThemeProvider: FC<PropsWithChildren> = ({ children }) => {
   // Apply accessibility settings
   useEffect(() => {
     const root = document.documentElement;
+    const body = document.body;
 
     // Reduced motion
     if (accessibility.reducedMotion) {
@@ -98,6 +99,12 @@ export const ThemeProvider: FC<PropsWithChildren> = ({ children }) => {
       root.classList.add('sr-optimized');
     } else {
       root.classList.remove('sr-optimized');
+    }
+
+    body.classList.remove('font-dyslexic-friendly');
+
+    if (accessibility.fontPreference === 'open-dyslexic') {
+      body.classList.add('font-dyslexic-friendly');
     }
   }, [accessibility]);
 

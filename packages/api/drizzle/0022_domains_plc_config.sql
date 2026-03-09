@@ -1,0 +1,2 @@
+ALTER TABLE "domains" ADD COLUMN "plc_config" jsonb DEFAULT '{"enabled":true,"mode":"standalone","allowCustomHandles":false,"requireInviteCode":false}'::jsonb;--> statement-breakpoint
+ALTER TABLE "domains" ADD COLUMN "identity_count" integer DEFAULT 0 NOT NULL;

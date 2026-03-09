@@ -24,6 +24,7 @@ const DEFAULT_SETTINGS: UserSettings = {
     highContrast: false,
     largeText: false,
     screenReaderOptimized: false,
+    fontPreference: 'inter',
   },
   playback: {
     autoplay: true,
@@ -66,6 +67,41 @@ const DEFAULT_SETTINGS: UserSettings = {
   },
   updatedAt: new Date().toISOString(),
 };
+
+function mergeUserSettings(settings: Partial<UserSettings>): UserSettings {
+  return {
+    ...DEFAULT_SETTINGS,
+    ...settings,
+    accessibility: {
+      ...DEFAULT_SETTINGS.accessibility,
+      ...settings.accessibility,
+    },
+    playback: {
+      ...DEFAULT_SETTINGS.playback,
+      ...settings.playback,
+    },
+    notifications: {
+      ...DEFAULT_SETTINGS.notifications,
+      ...settings.notifications,
+    },
+    privacy: {
+      ...DEFAULT_SETTINGS.privacy,
+      ...settings.privacy,
+    },
+    content: {
+      ...DEFAULT_SETTINGS.content,
+      ...settings.content,
+    },
+    layout: {
+      ...DEFAULT_SETTINGS.layout,
+      ...settings.layout,
+    },
+    editor: {
+      ...DEFAULT_SETTINGS.editor,
+      ...settings.editor,
+    },
+  };
+}
 
 interface SettingsState {
   settings: UserSettings;
@@ -297,7 +333,7 @@ export const useSettingsStore = create<SettingsState>()(
 
           if (serverTime >= localTime) {
             set({
-              settings: serverSettings,
+              settings: mergeUserSettings(serverSettings),
               lastSyncedAt: new Date().toISOString(),
             });
           }
@@ -335,6 +371,15 @@ export const useSettingsStore = create<SettingsState>()(
     {
       name: 'exprsn-settings',
       storage: createJSONStorage(() => localStorage),
+      merge: (persistedState, currentState) => {
+        const persisted = persistedState as Partial<SettingsState> | undefined;
+
+        return {
+          ...currentState,
+          ...persisted,
+          settings: mergeUserSettings(persisted?.settings ?? currentState.settings),
+        };
+      },
       partialize: (state) => ({
         settings: state.settings,
         resolvedColorMode: state.resolvedColorMode,
