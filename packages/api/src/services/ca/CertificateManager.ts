@@ -1023,6 +1023,15 @@ export class CertificateManager {
     }>;
     total: number;
     hasMore: boolean;
+    stats: {
+      total: number;
+      active: number;
+      revoked: number;
+      expired: number;
+      server: number;
+      client: number;
+      codeSigning: number;
+    };
   }> {
     const { status, certType, search, limit, offset } = options;
 
@@ -1067,10 +1076,41 @@ export class CertificateManager {
       .where(whereClause);
     const totalCount = countResult[0]?.count || 0;
 
+    // Get stats for the response
+    const statsResult = await db
+      .select({
+        status: caEntityCertificates.status,
+        certType: caEntityCertificates.certType,
+        count: sql<number>`count(*)::int`,
+      })
+      .from(caEntityCertificates)
+      .groupBy(caEntityCertificates.status, caEntityCertificates.certType);
+
+    const stats = {
+      total: 0,
+      active: 0,
+      revoked: 0,
+      expired: 0,
+      server: 0,
+      client: 0,
+      codeSigning: 0,
+    };
+
+    for (const row of statsResult) {
+      stats.total += row.count;
+      if (row.status === 'active') stats.active += row.count;
+      if (row.status === 'revoked') stats.revoked += row.count;
+      if (row.status === 'expired') stats.expired += row.count;
+      if (row.certType === 'server') stats.server += row.count;
+      if (row.certType === 'client') stats.client += row.count;
+      if (row.certType === 'code_signing') stats.codeSigning += row.count;
+    }
+
     return {
       certificates,
       total: totalCount,
       hasMore: offset + certificates.length < totalCount,
+      stats,
     };
   }
 

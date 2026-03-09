@@ -844,7 +844,13 @@ caRoutes.get(
   adminAuthMiddleware,
   async (c) => {
     const cas = await certificateManager.listAllCAs();
-    const issuers = cas.filter((ca: any) => ca.status === 'active');
+    const issuers = cas
+      .filter((ca: any) => ca.status === 'active')
+      .map((ca: any) => ({
+        id: ca.id,
+        subject: ca.commonName || ca.subject || 'Unknown CA',
+        type: ca.caType || ca.type || 'intermediate',
+      }));
     return c.json({ issuers });
   }
 );
@@ -869,7 +875,34 @@ caRoutes.get(
       offset,
     });
 
-    return c.json(result);
+    // Transform response to match frontend expectations
+    const certificates = result.certificates.map((cert) => ({
+      id: cert.id,
+      subject: cert.commonName,
+      type: cert.certType,
+      serialNumber: cert.serialNumber,
+      status: cert.status,
+      notBefore: cert.notBefore,
+      notAfter: cert.notAfter,
+      algorithm: 'RSA', // Default - could be stored in DB
+      keySize: 2048,    // Default - could be stored in DB
+      issuer: {
+        id: 'intermediate',
+        subject: 'Exprsn Intermediate CA',
+      },
+      subjectAltNames: [],
+      keyUsage: cert.certType === 'server'
+        ? ['digitalSignature', 'keyEncipherment']
+        : cert.certType === 'code_signing'
+        ? ['digitalSignature']
+        : ['digitalSignature', 'keyAgreement'],
+    }));
+
+    return c.json({
+      certificates,
+      total: result.total,
+      stats: result.stats,
+    });
   }
 );
 
