@@ -6075,31 +6075,6 @@ export const repositories = pgTable(
   })
 );
 
-// Repository records - individual records in AT Protocol collections
-export const repoRecords = pgTable(
-  'repo_records',
-  {
-    uri: text('uri').primaryKey(), // at://did/collection/rkey
-    did: text('did')
-      .notNull()
-      .references(() => repositories.did, { onDelete: 'cascade' }),
-    collection: text('collection').notNull(), // e.g., io.exprsn.video.post
-    rkey: text('rkey').notNull(), // record key (TID or custom)
-    cid: text('cid').notNull(), // content identifier
-    value: jsonb('value').notNull(), // record content
-    createdAt: timestamp('created_at').defaultNow().notNull(),
-    indexedAt: timestamp('indexed_at').defaultNow().notNull(),
-  },
-  (table) => ({
-    didCollectionIdx: index('repo_records_did_collection_idx').on(table.did, table.collection),
-    collectionIdx: index('repo_records_collection_idx').on(table.collection),
-    cidIdx: index('repo_records_cid_idx').on(table.cid),
-    rkeyIdx: index('repo_records_rkey_idx').on(table.did, table.collection, table.rkey),
-    createdIdx: index('repo_records_created_idx').on(table.createdAt),
-    uniqueRecordIdx: uniqueIndex('repo_records_unique_idx').on(table.did, table.collection, table.rkey),
-  })
-);
-
 // Repository blobs - binary content stored with repositories
 export const repoBlobs = pgTable(
   'repo_blobs',
@@ -6116,27 +6091,6 @@ export const repoBlobs = pgTable(
   (table) => ({
     didIdx: index('repo_blobs_did_idx').on(table.did),
     cidIdx: uniqueIndex('repo_blobs_cid_idx').on(table.cid),
-  })
-);
-
-// Repository commits - history of repository changes
-export const repoCommits = pgTable(
-  'repo_commits',
-  {
-    cid: text('cid').primaryKey(),
-    did: text('did')
-      .notNull()
-      .references(() => repositories.did, { onDelete: 'cascade' }),
-    prev: text('prev'), // previous commit CID
-    data: text('data').notNull(), // MST root CID
-    rev: integer('rev').notNull(),
-    sig: text('sig'), // signature
-    createdAt: timestamp('created_at').defaultNow().notNull(),
-  },
-  (table) => ({
-    didIdx: index('repo_commits_did_idx').on(table.did),
-    revIdx: index('repo_commits_rev_idx').on(table.did, table.rev),
-    createdIdx: index('repo_commits_created_idx').on(table.createdAt),
   })
 );
 
@@ -6187,15 +6141,11 @@ export const syncEvents = pgTable(
   })
 );
 
-// Type exports
+// Type exports for AT Protocol tables
 export type Repository = typeof repositories.$inferSelect;
 export type NewRepository = typeof repositories.$inferInsert;
-export type RepoRecord = typeof repoRecords.$inferSelect;
-export type NewRepoRecord = typeof repoRecords.$inferInsert;
 export type RepoBlob = typeof repoBlobs.$inferSelect;
 export type NewRepoBlob = typeof repoBlobs.$inferInsert;
-export type RepoCommit = typeof repoCommits.$inferSelect;
-export type NewRepoCommit = typeof repoCommits.$inferInsert;
 export type SyncSubscription = typeof syncSubscriptions.$inferSelect;
 export type NewSyncSubscription = typeof syncSubscriptions.$inferInsert;
 export type SyncEvent = typeof syncEvents.$inferSelect;

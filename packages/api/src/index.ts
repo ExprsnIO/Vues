@@ -49,6 +49,7 @@ import { registryRouter, initializeServiceRegistry } from './routes/registry.js'
 import { federationRouter } from './routes/federation.js';
 import { plcRouter } from './routes/plc.js';
 import { syncRouter } from './routes/sync.js';
+import { atprotoRouter } from './routes/atproto.js';
 import { announcementsRouter } from './routes/announcements.js';
 import { paymentsAdminRouter } from './routes/payments-admin.js';
 import { liveAdminRouter } from './routes/live-admin.js';
@@ -272,6 +273,8 @@ app.route('/xrpc', identityRouter);
 app.route('/xrpc', registryRouter);
 app.route('/xrpc', federationRouter);
 app.route('/', syncRouter); // Sync routes for federation
+// AT Protocol repository and sync routes (com.atproto.repo.* and com.atproto.sync.*)
+app.route('/xrpc', atprotoRouter);
 // Admin routes (must be before PLC to avoid /:did catch-all)
 app.route('/xrpc', adminRouter);
 app.route('/xrpc', announcementsRouter);

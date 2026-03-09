@@ -178,7 +178,7 @@ export class SyncService {
 
     return {
       cid: commit.cid,
-      rev: commit.rev,
+      rev: parseInt(commit.rev, 10) || 0,
     };
   }
 
@@ -264,55 +264,26 @@ export class SyncService {
 
   /**
    * Subscribe to firehose via WebSocket
+   * Note: WebSocket subscriptions should use the Socket.IO endpoint at /xrpc/com.atproto.sync.subscribeRepos
+   * This method is only used for compatibility and returns an error suggesting the Socket.IO endpoint.
    */
   async subscribeWebSocket(c: Context, cursor?: number): Promise<Response> {
-    // Upgrade to WebSocket
-    const { response, socket } = Deno.upgradeWebSocket(c.req.raw);
-
-    socket.onopen = async () => {
-      // Send events starting from cursor
-      const startSeq = cursor || 0;
-
-      // Send historical events
-      const events = await db
-        .select()
-        .from(syncEvents)
-        .where(gt(syncEvents.seq, startSeq))
-        .orderBy(syncEvents.seq)
-        .limit(1000);
-
-      for (const event of events) {
-        socket.send(JSON.stringify({
-          seq: event.seq,
-          did: event.did,
-          eventType: event.eventType,
-          commit: event.commit,
-          ops: event.ops,
-          blocks: event.blocks,
-          rebase: event.rebase,
-          tooBig: event.tooBig,
-          time: event.createdAt.toISOString(),
-        }));
+    // In Node.js with Hono, WebSocket handling is done via Socket.IO in index.ts
+    // Return an error with instructions to use the Socket.IO endpoint
+    return new Response(
+      JSON.stringify({
+        error: 'WebSocketRequired',
+        message: 'Please connect via WebSocket to /xrpc/com.atproto.sync.subscribeRepos',
+        cursor: cursor || 0,
+      }),
+      {
+        status: 426, // Upgrade Required
+        headers: {
+          'Content-Type': 'application/json',
+          'Upgrade': 'websocket',
+        },
       }
-
-      // Subscribe to live events
-      const handler = (event: any) => {
-        if (event.seq > startSeq) {
-          socket.send(JSON.stringify({
-            ...event,
-            time: new Date().toISOString(),
-          }));
-        }
-      };
-
-      firehose.on('event', handler);
-
-      socket.onclose = () => {
-        firehose.off('event', handler);
-      };
-    };
-
-    return response;
+    );
   }
 
   /**

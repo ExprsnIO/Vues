@@ -1,11 +1,15 @@
-import { Repository, WriteOp, RepoRecord } from '@exprsn/pds';
 import { db } from '../../db/index.js';
-import { repositories, repoRecords, repoBlobs } from '../../db/schema.js';
-import { eq, and, desc, asc, gt, lt } from 'drizzle-orm';
-import { CID } from 'multiformats/cid';
-import * as dagCbor from '@ipld/dag-cbor';
-import { sha256 } from 'multiformats/hashes/sha2';
+import { repositories, repoRecords, repoBlobs, blobs, users } from '../../db/schema.js';
+import { eq, and, desc, asc, gt, lt, sql } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
+import { createHash } from 'crypto';
+
+// Simple CID generation using SHA-256
+function generateCid(data: unknown): string {
+  const json = JSON.stringify(data);
+  const hash = createHash('sha256').update(json).digest('hex');
+  return `bafyrei${hash.slice(0, 32)}`;
+}
 
 /**
  * Repository Service
@@ -49,6 +53,13 @@ export interface DeleteRecordInput {
   collection: string;
   rkey: string;
   swapRecord?: string;
+}
+
+export interface WriteOp {
+  action: 'create' | 'update' | 'delete';
+  collection: string;
+  rkey?: string;
+  value?: unknown;
 }
 
 export interface ApplyWritesInput {
@@ -108,10 +119,7 @@ export class RepositoryService {
     const uri = `at://${input.did}/${input.collection}/${rkey}`;
 
     // Create CID for record
-    const recordBytes = dagCbor.encode(input.record);
-    const recordHash = await sha256.digest(recordBytes);
-    const recordCid = CID.create(1, dagCbor.code, recordHash);
-    const cidStr = recordCid.toString();
+    const cidStr = generateCid(input.record);
 
     // Store record in database
     await db.insert(repoRecords).values({
@@ -120,7 +128,7 @@ export class RepositoryService {
       rkey,
       uri,
       cid: cidStr,
-      value: input.record,
+      record: input.record,
       createdAt: new Date(),
       indexedAt: new Date(),
     });
@@ -158,7 +166,7 @@ export class RepositoryService {
     return {
       uri: record.uri,
       cid: record.cid,
-      value: record.value,
+      value: record.record,
     };
   }
 
@@ -203,7 +211,7 @@ export class RepositoryService {
       records: records.map((r) => ({
         uri: r.uri,
         cid: r.cid,
-        value: r.value,
+        value: r.record,
       })),
       cursor: hasMore ? records[records.length - 1]?.rkey : undefined,
     };
@@ -233,10 +241,7 @@ export class RepositoryService {
     }
 
     // Create new CID
-    const recordBytes = dagCbor.encode(input.record);
-    const recordHash = await sha256.digest(recordBytes);
-    const recordCid = CID.create(1, dagCbor.code, recordHash);
-    const cidStr = recordCid.toString();
+    const cidStr = generateCid(input.record);
 
     if (existing) {
       // Update existing record
@@ -244,7 +249,7 @@ export class RepositoryService {
         .update(repoRecords)
         .set({
           cid: cidStr,
-          value: input.record,
+          record: input.record,
           indexedAt: new Date(),
         })
         .where(
@@ -262,7 +267,7 @@ export class RepositoryService {
         rkey: input.rkey,
         uri,
         cid: cidStr,
-        value: input.record,
+        record: input.record,
         createdAt: new Date(),
         indexedAt: new Date(),
       });
@@ -333,6 +338,9 @@ export class RepositoryService {
           });
           results.push(result);
         } else if (write.action === 'update') {
+          if (!write.rkey) {
+            throw new Error('rkey is required for update operations');
+          }
           const result = await this.putRecord({
             did: input.did,
             collection: write.collection,
@@ -342,6 +350,9 @@ export class RepositoryService {
           });
           results.push(result);
         } else if (write.action === 'delete') {
+          if (!write.rkey) {
+            throw new Error('rkey is required for delete operations');
+          }
           await this.deleteRecord({
             did: input.did,
             collection: write.collection,
@@ -374,9 +385,12 @@ export class RepositoryService {
     }
 
     // Get user info
-    const user = await db.query.users.findFirst({
-      where: eq(db.query.users.did, did),
-    });
+    const user = await db
+      .select()
+      .from(users)
+      .where(eq(users.did, did))
+      .limit(1)
+      .then((r) => r[0]);
 
     // Get collections
     const recordResults = await db
@@ -400,10 +414,9 @@ export class RepositoryService {
    * Upload a blob
    */
   async uploadBlob(input: UploadBlobInput): Promise<{ cid: string; url: string }> {
-    // Create CID for blob
-    const blobHash = await sha256.digest(input.blob);
-    const blobCid = CID.create(1, 0x55, blobHash); // Raw codec
-    const cidStr = blobCid.toString();
+    // Create CID for blob using SHA-256 hash
+    const hash = createHash('sha256').update(input.blob).digest('hex');
+    const cidStr = `bafkrei${hash.slice(0, 32)}`; // Raw blob CID prefix
 
     // Store blob metadata (actual blob would be stored in S3/MinIO)
     await db.insert(repoBlobs).values({
@@ -440,7 +453,7 @@ export class RepositoryService {
     await db
       .update(repositories)
       .set({
-        rev: db.query.repositories.rev + 1,
+        rev: sql`${repositories.rev} + 1`,
         updatedAt: new Date(),
       })
       .where(eq(repositories.did, did));
