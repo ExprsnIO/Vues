@@ -41,6 +41,7 @@ vi.mock('../../src/db/index.js', () => ({
       },
       likes: {
         findFirst: vi.fn(() => Promise.resolve(null)),
+        findMany: vi.fn(() => Promise.resolve([])),
       },
       views: {
         findFirst: vi.fn(() => Promise.resolve(null)),
@@ -65,11 +66,25 @@ vi.mock('../../src/db/index.js', () => ({
       mutes: {
         findMany: vi.fn(() => Promise.resolve([])),
       },
+      userFeedPreferences: {
+        findFirst: vi.fn(() => Promise.resolve(null)),
+      },
+      userInteractions: {
+        findMany: vi.fn(() => Promise.resolve([])),
+      },
+      uploadJobs: {
+        findFirst: vi.fn(() => Promise.resolve(null)),
+        findMany: vi.fn(() => Promise.resolve([])),
+      },
+      userContentFeedback: {
+        findMany: vi.fn(() => Promise.resolve([])),
+      },
     },
     insert: vi.fn(() => ({
       values: vi.fn(() => ({
         returning: vi.fn(() => Promise.resolve([{ uri: 'at://test/video/123' }])),
         onConflictDoNothing: vi.fn(() => Promise.resolve()),
+        onConflictDoUpdate: vi.fn(() => Promise.resolve()),
       })),
     })),
     update: vi.fn(() => ({
@@ -93,6 +108,7 @@ vi.mock('../../src/db/index.js', () => ({
         obj.where = vi.fn(() => createThenable());
         obj.innerJoin = vi.fn(() => createThenable());
         obj.leftJoin = vi.fn(() => createThenable());
+        obj.union = vi.fn(() => createThenable());
         return obj;
       };
       return {
@@ -113,6 +129,7 @@ vi.mock('../../src/db/index.js', () => ({
   mutes: {},
   trendingVideos: {},
   userInteractions: {},
+  uploadJobs: { id: 'id', userDid: 'user_did', status: 'status' },
 }));
 
 // Mock cache
@@ -168,6 +185,22 @@ describe('Video Routes', () => {
         });
 
         expect(res.status).toBe(200);
+      }
+    });
+
+    it('should not log an error when foryou has no cached preferences', async () => {
+      const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      try {
+        const res = await testRequest(app, 'GET', '/xrpc/io.exprsn.video.getFeed', {
+          headers: authHeader('exp_testtoken'),
+          query: { feed: 'foryou' },
+        });
+
+        expect(res.status).toBe(200);
+        expect(consoleErrorSpy).not.toHaveBeenCalled();
+      } finally {
+        consoleErrorSpy.mockRestore();
       }
     });
 
@@ -269,15 +302,15 @@ describe('Video Routes', () => {
       expect(res.status).toBe(401);
     });
 
-    it('should require completed upload', async () => {
+    it('should require valid upload', async () => {
       const res = await testRequest(app, 'POST', '/xrpc/io.exprsn.video.createPost', {
         headers: authHeader('exp_testtoken'),
         body: { uploadId: 'invalid-upload', caption: 'Test caption' },
       });
 
-      expect(res.status).toBe(400);
+      expect(res.status).toBe(404);
       const data = await res.json();
-      expect(data.message).toContain('Upload not ready');
+      expect(data.message).toContain('Upload not found');
     });
   });
 

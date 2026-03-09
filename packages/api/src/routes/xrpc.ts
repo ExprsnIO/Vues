@@ -1,7 +1,15 @@
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { authMiddleware, optionalAuthMiddleware } from '../auth/middleware.js';
-import { db, videos, users, likes, comments, commentReactions, sounds, follows, trendingVideos, userInteractions, blocks, mutes } from '../db/index.js';
+import { db, videos, users, likes, comments, commentReactions, sounds, follows, trendingVideos, userInteractions, blocks, mutes, userContentFeedback, uploadJobs } from '../db/index.js';
+import { createUserPreferenceModel } from '../services/preferences/index.js';
+import { createForYouAlgorithm } from '../services/feed/index.js';
+import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
+import * as schema from '../db/schema.js';
+
+// Initialize preference model and FYP algorithm for personalized feeds
+const preferenceModel = createUserPreferenceModel(db as PostgresJsDatabase<typeof schema>);
+const forYouAlgorithm = createForYouAlgorithm(db as PostgresJsDatabase<typeof schema>, preferenceModel);
 import { cacheService, CacheKeys, CACHE_TTL } from '../cache/redis.js';
 import { eq, desc, inArray, and, sql, lt, asc, or, ilike } from 'drizzle-orm';
 import type { VideoView, AuthorView, FeedResult, CommentView, ReactionType, CommentSortType } from '@exprsn/shared';
@@ -570,54 +578,78 @@ xrpcRouter.get('/io.exprsn.video.getUploadStatus', authMiddleware, async (c) => 
  * POST /xrpc/io.exprsn.video.createPost
  */
 xrpcRouter.post('/io.exprsn.video.createPost', authMiddleware, async (c) => {
-  const session = c.get('session');
+  const userDid = c.get('did');
   const data = await c.req.json();
 
-  // Validate upload is complete
-  const uploadStatus = await cacheService.get(CacheKeys.upload(data.uploadId));
-  if (!uploadStatus || (uploadStatus as { status: string }).status !== 'completed') {
-    throw new HTTPException(400, { message: 'Upload not ready' });
+  // Get upload job from database to check status and get URLs
+  const uploadJob = await db.query.uploadJobs.findFirst({
+    where: eq(uploadJobs.id, data.uploadId),
+  });
+
+  if (!uploadJob) {
+    throw new HTTPException(404, { message: 'Upload not found' });
   }
 
-  const { cdnUrl, hlsPlaylist, thumbnail } = uploadStatus as {
-    cdnUrl: string;
-    hlsPlaylist: string;
-    thumbnail: string;
-  };
+  if (uploadJob.userDid !== userDid) {
+    throw new HTTPException(403, { message: 'Not authorized' });
+  }
 
-  // Create record in user's PDS via the session agent
-  const record = {
-    $type: 'io.exprsn.video.post',
-    video: {
-      blob: data.blob,
-      thumbnail: data.thumbnail,
-      aspectRatio: data.aspectRatio,
-      duration: data.duration,
-      cdnUrl,
-      hlsPlaylist,
-    },
-    caption: data.caption,
-    tags: data.tags,
-    sound: data.sound,
+  if (uploadJob.status !== 'completed') {
+    throw new HTTPException(400, {
+      message: `Upload not ready. Status: ${uploadJob.status}`,
+      status: uploadJob.status,
+      progress: uploadJob.progress,
+    });
+  }
+
+  if (!uploadJob.hlsPlaylist) {
+    throw new HTTPException(500, { message: 'Video processing incomplete - no HLS playlist' });
+  }
+
+  // Create video URI
+  const videoUri = `at://${userDid}/io.exprsn.video.post/${nanoid()}`;
+  const videoCid = nanoid();
+  const now = new Date();
+
+  // Insert video record into database
+  await db.insert(videos).values({
+    uri: videoUri,
+    cid: videoCid,
+    authorDid: userDid,
+    caption: data.caption || null,
+    tags: data.tags || [],
+    soundUri: data.soundUri || null,
+    cdnUrl: uploadJob.cdnUrl,
+    hlsPlaylist: uploadJob.hlsPlaylist,
+    thumbnailUrl: uploadJob.thumbnailUrl,
+    duration: data.duration || null,
+    aspectRatio: data.aspectRatio || { width: 9, height: 16 },
     visibility: data.visibility || 'public',
     allowDuet: data.allowDuet ?? true,
     allowStitch: data.allowStitch ?? true,
     allowComments: data.allowComments ?? true,
-    createdAt: new Date().toISOString(),
-  };
-
-  // TODO: Implement proper agent creation from OAuth session
-  // @ts-expect-error - Agent integration not yet implemented
-  const agent = session.agent;
-  const result = await agent.api.com.atproto.repo.createRecord({
-    repo: session.did,
-    collection: 'io.exprsn.video.post',
-    record,
+    publishedAsOrgId: data.publishedAsOrgId || null,
+    moderationStatus: 'auto_approved',
+    createdAt: now,
+    indexedAt: now,
   });
 
+  // Increment user's video count
+  await db
+    .update(users)
+    .set({ videoCount: sql`${users.videoCount} + 1` })
+    .where(eq(users.did, userDid));
+
+  // Invalidate feed cache
+  await cacheService.delete(CacheKeys.trendingFeed());
+  await cacheService.delete(CacheKeys.followingFeed(userDid));
+
   return c.json({
-    uri: result.data.uri,
-    cid: result.data.cid,
+    uri: videoUri,
+    cid: videoCid,
+    hlsPlaylist: uploadJob.hlsPlaylist,
+    thumbnailUrl: uploadJob.thumbnailUrl,
+    cdnUrl: uploadJob.cdnUrl,
   });
 });
 
@@ -679,11 +711,23 @@ xrpcRouter.post('/io.exprsn.video.unlike', authMiddleware, async (c) => {
 });
 
 /**
- * Track video view
+ * Track video view with enhanced engagement signals for FYP personalization
  * POST /xrpc/io.exprsn.video.trackView
  */
 xrpcRouter.post('/io.exprsn.video.trackView', optionalAuthMiddleware, async (c) => {
-  let body: { videoUri?: string; watchDuration?: number; completed?: boolean } = {};
+  interface TrackViewBody {
+    videoUri?: string;
+    watchDuration?: number;
+    completed?: boolean;
+    // Enhanced engagement signals
+    loopCount?: number; // Number of complete loops watched
+    sessionPosition?: number; // Position in viewing session (1st, 2nd, 3rd video)
+    engagementActions?: string[]; // paused, unmuted, fullscreen, shared, etc.
+    milestone?: '25%' | '50%' | '75%' | '100%'; // Watch progress milestone
+    videoDuration?: number; // Total video duration for accurate completion calculation
+  }
+
+  let body: TrackViewBody = {};
 
   try {
     body = await c.req.json();
@@ -692,7 +736,16 @@ xrpcRouter.post('/io.exprsn.video.trackView', optionalAuthMiddleware, async (c) 
     return c.json({ success: true });
   }
 
-  const { videoUri, watchDuration, completed } = body;
+  const {
+    videoUri,
+    watchDuration,
+    completed,
+    loopCount,
+    sessionPosition,
+    engagementActions,
+    milestone,
+    videoDuration,
+  } = body;
 
   if (!videoUri) {
     // No video URI provided - return success silently to avoid client errors
@@ -710,19 +763,224 @@ xrpcRouter.post('/io.exprsn.video.trackView', optionalAuthMiddleware, async (c) 
   // Optionally track in user_interactions if authenticated
   const userDid = c.get('did');
   if (userDid) {
+    // Calculate completion rate more accurately
+    let completionRate: number;
+    if (completed) {
+      completionRate = 1.0;
+    } else if (videoDuration && videoDuration > 0) {
+      completionRate = Math.min(1.0, (watchDuration || 0) / videoDuration);
+    } else {
+      completionRate = Math.min(0.99, (watchDuration || 0) / 100);
+    }
+
+    // Calculate interaction quality score based on engagement signals
+    let interactionQuality = completionRate * 0.4; // Base: completion rate
+    if (loopCount && loopCount > 0) {
+      interactionQuality += Math.min(0.3, loopCount * 0.1); // Bonus for rewatches
+    }
+    if (engagementActions && engagementActions.length > 0) {
+      // Bonus for engagement actions
+      const actionWeights: Record<string, number> = {
+        paused: 0.05,
+        unmuted: 0.1,
+        fullscreen: 0.1,
+        shared: 0.15,
+        liked: 0.1,
+        commented: 0.15,
+        saved: 0.1,
+      };
+      const actionScore = engagementActions.reduce(
+        (sum, action) => sum + (actionWeights[action] || 0.02),
+        0
+      );
+      interactionQuality += Math.min(0.3, actionScore);
+    }
+    interactionQuality = Math.min(1.0, interactionQuality);
+
     await db
       .insert(userInteractions)
       .values({
         id: crypto.randomUUID(),
         userDid,
         videoUri,
-        interactionType: 'view',
+        interactionType: milestone ? `view_${milestone}` : 'view',
         watchDuration: watchDuration || 0,
-        completionRate: completed ? 1.0 : Math.min(0.99, (watchDuration || 0) / 100),
+        completionRate,
+        loopCount: loopCount || 0,
+        rewatchCount: loopCount && loopCount > 1 ? loopCount - 1 : 0,
+        interactionQuality,
+        sessionPosition: sessionPosition || null,
+        engagementActions: engagementActions || null,
+        milestone: milestone || null,
         createdAt: new Date(),
       })
       .onConflictDoNothing();
   }
+
+  return c.json({ success: true });
+});
+
+/**
+ * Track authenticated video conversion events without incrementing views
+ * POST /xrpc/io.exprsn.video.trackEvent
+ */
+xrpcRouter.post('/io.exprsn.video.trackEvent', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  const body = await c.req.json<{
+    videoUri?: string;
+    eventType?: string;
+    engagementActions?: string[];
+  }>();
+
+  if (!body.videoUri || !body.eventType) {
+    throw new HTTPException(400, { message: 'Video URI and event type are required' });
+  }
+
+  await db
+    .insert(userInteractions)
+    .values({
+      id: crypto.randomUUID(),
+      userDid,
+      videoUri: body.videoUri,
+      interactionType: body.eventType,
+      interactionQuality: 0.6,
+      engagementActions: body.engagementActions || null,
+      createdAt: new Date(),
+    })
+    .onConflictDoNothing();
+
+  return c.json({ success: true });
+});
+
+/**
+ * Submit "not interested" feedback for FYP personalization
+ * POST /xrpc/io.exprsn.video.notInterested
+ */
+xrpcRouter.post('/io.exprsn.video.notInterested', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  const body = await c.req.json<{
+    videoUri?: string;
+    authorDid?: string;
+    tag?: string;
+    soundId?: string;
+    feedbackType?: 'not_interested' | 'see_less' | 'hide_author' | 'report';
+    reason?: 'repetitive' | 'not_relevant' | 'offensive' | 'spam' | 'other';
+    hideAuthor?: boolean;
+  }>();
+
+  const {
+    videoUri,
+    authorDid,
+    tag,
+    soundId,
+    feedbackType = 'not_interested',
+    reason,
+    hideAuthor,
+  } = body;
+
+  // Determine target type and ID
+  let targetType: string;
+  let targetId: string;
+
+  if (videoUri) {
+    targetType = 'video';
+    targetId = videoUri;
+  } else if (authorDid) {
+    targetType = 'author';
+    targetId = authorDid;
+  } else if (tag) {
+    targetType = 'tag';
+    targetId = tag;
+  } else if (soundId) {
+    targetType = 'sound';
+    targetId = soundId;
+  } else {
+    throw new HTTPException(400, {
+      message: 'Must provide videoUri, authorDid, tag, or soundId',
+    });
+  }
+
+  // Insert feedback
+  await db
+    .insert(userContentFeedback)
+    .values({
+      id: crypto.randomUUID(),
+      userDid,
+      targetType,
+      targetId,
+      feedbackType,
+      reason: reason || null,
+      weight: feedbackType === 'hide_author' ? 2.0 : 1.0,
+      createdAt: new Date(),
+    })
+    .onConflictDoUpdate({
+      target: [
+        userContentFeedback.userDid,
+        userContentFeedback.targetType,
+        userContentFeedback.targetId,
+        userContentFeedback.feedbackType,
+      ],
+      set: {
+        reason: reason || null,
+        weight: feedbackType === 'hide_author' ? 2.0 : 1.0,
+        createdAt: new Date(),
+      },
+    });
+
+  // If hideAuthor is true and we have a video, also hide the author
+  if (hideAuthor && videoUri) {
+    const video = await db.query.videos.findFirst({
+      where: eq(videos.uri, videoUri),
+      columns: { authorDid: true },
+    });
+
+    if (video?.authorDid) {
+      await db
+        .insert(userContentFeedback)
+        .values({
+          id: crypto.randomUUID(),
+          userDid,
+          targetType: 'author',
+          targetId: video.authorDid,
+          feedbackType: 'hide_author',
+          reason: reason || null,
+          weight: 2.0,
+          createdAt: new Date(),
+        })
+        .onConflictDoNothing();
+    }
+  }
+
+  return c.json({ success: true });
+});
+
+/**
+ * Remove "not interested" feedback
+ * POST /xrpc/io.exprsn.video.removeFeedback
+ */
+xrpcRouter.post('/io.exprsn.video.removeFeedback', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  const { targetType, targetId, feedbackType } = await c.req.json<{
+    targetType: 'video' | 'author' | 'tag' | 'sound';
+    targetId: string;
+    feedbackType?: string;
+  }>();
+
+  if (!targetType || !targetId) {
+    throw new HTTPException(400, { message: 'targetType and targetId are required' });
+  }
+
+  const conditions = [
+    eq(userContentFeedback.userDid, userDid),
+    eq(userContentFeedback.targetType, targetType),
+    eq(userContentFeedback.targetId, targetId),
+  ];
+
+  if (feedbackType) {
+    conditions.push(eq(userContentFeedback.feedbackType, feedbackType));
+  }
+
+  await db.delete(userContentFeedback).where(and(...conditions));
 
   return c.json({ success: true });
 });
@@ -1529,33 +1787,52 @@ async function getForYouFeed(
   cursor?: string,
   limit = 30
 ): Promise<FeedResult> {
-  // Get blocked and muted users if authenticated
-  let excludedDids: string[] = [];
-  if (userDid) {
-    const { blocked, muted } = await getBlockedAndMutedDids(userDid);
-    excludedDids = [...blocked, ...muted];
+  try {
+    if (userDid) {
+      // Authenticated user: use personalized ForYou algorithm
+      const result = await forYouAlgorithm.generateFeed(userDid, { limit, cursor });
+      return {
+        feed: result.items.map((item) => ({ post: item.video.uri })),
+        cursor: result.cursor,
+      };
+    } else {
+      // Anonymous user: fall back to trending
+      const result = await forYouAlgorithm.generateAnonymousFeed({ limit, cursor });
+      return {
+        feed: result.items.map((item) => ({ post: item.uri })),
+        cursor: result.cursor,
+      };
+    }
+  } catch (error) {
+    console.error('Error in getForYouFeed:', error);
+
+    // Fallback to simple trending query
+    let excludedDids: string[] = [];
+    if (userDid) {
+      const { blocked, muted } = await getBlockedAndMutedDids(userDid);
+      excludedDids = [...blocked, ...muted];
+    }
+
+    const offset = cursor ? parseInt(cursor, 10) : 0;
+
+    const whereCondition = excludedDids.length > 0
+      ? sql`${videos.authorDid} NOT IN (${sql.join(excludedDids.map(d => sql`${d}`), sql`, `)})`
+      : undefined;
+
+    const query = whereCondition
+      ? db.select().from(trendingVideos).innerJoin(videos, eq(trendingVideos.videoUri, videos.uri)).where(whereCondition)
+      : db.select().from(trendingVideos).innerJoin(videos, eq(trendingVideos.videoUri, videos.uri));
+
+    const results = await query
+      .orderBy(desc(trendingVideos.score))
+      .limit(limit)
+      .offset(offset);
+
+    return {
+      feed: results.map((r) => ({ post: r.videos.uri })),
+      cursor: results.length === limit ? (offset + limit).toString() : undefined,
+    };
   }
-
-  const offset = cursor ? parseInt(cursor, 10) : 0;
-
-  // Build query with optional block/mute filter
-  const whereCondition = excludedDids.length > 0
-    ? sql`${videos.authorDid} NOT IN (${sql.join(excludedDids.map(d => sql`${d}`), sql`, `)})`
-    : undefined;
-
-  const query = whereCondition
-    ? db.select().from(trendingVideos).innerJoin(videos, eq(trendingVideos.videoUri, videos.uri)).where(whereCondition)
-    : db.select().from(trendingVideos).innerJoin(videos, eq(trendingVideos.videoUri, videos.uri));
-
-  const results = await query
-    .orderBy(desc(trendingVideos.score))
-    .limit(limit)
-    .offset(offset);
-
-  return {
-    feed: results.map((r) => ({ post: r.videos.uri })),
-    cursor: results.length === limit ? (offset + limit).toString() : undefined,
-  };
 }
 
 async function getSoundFeed(

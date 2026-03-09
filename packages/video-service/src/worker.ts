@@ -7,6 +7,7 @@ import { join } from 'path';
 import { Readable } from 'stream';
 import { pipeline } from 'stream/promises';
 import { Redis } from 'ioredis';
+import postgres from 'postgres';
 
 interface TranscodeJob {
   uploadId: string;
@@ -15,6 +16,9 @@ interface TranscodeJob {
 }
 
 const redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379');
+
+// Database connection for updating video records
+const sql = postgres(process.env.DATABASE_URL || 'postgresql://localhost:5432/exprsn');
 
 const s3 = new S3Client({
   endpoint:
@@ -29,9 +33,10 @@ const s3 = new S3Client({
 });
 
 const BUCKET = process.env.DO_SPACES_BUCKET || 'exprsn-uploads';
+const PROCESSED_BUCKET = process.env.DO_SPACES_PROCESSED_BUCKET || 'exprsn-processed';
 const CDN_BASE = process.env.DO_SPACES_CDN || 'http://localhost:9000/exprsn-processed';
 
-async function updateStatus(
+async function updateRedisStatus(
   uploadId: string,
   status: string,
   progress: number,
@@ -53,6 +58,29 @@ async function updateStatus(
   );
 }
 
+async function updateDatabaseStatus(
+  uploadId: string,
+  status: string,
+  progress: number,
+  cdnUrl?: string,
+  hlsPlaylist?: string,
+  thumbnailUrl?: string,
+  error?: string
+) {
+  await sql`
+    UPDATE upload_jobs
+    SET
+      status = ${status},
+      progress = ${progress},
+      cdn_url = ${cdnUrl || null},
+      hls_playlist = ${hlsPlaylist || null},
+      thumbnail_url = ${thumbnailUrl || null},
+      error = ${error || null},
+      updated_at = NOW()
+    WHERE id = ${uploadId}
+  `;
+}
+
 async function downloadFromS3(key: string, destPath: string): Promise<void> {
   const command = new GetObjectCommand({
     Bucket: BUCKET,
@@ -67,7 +95,7 @@ async function downloadFromS3(key: string, destPath: string): Promise<void> {
 
 async function uploadToS3(localPath: string, key: string, contentType: string): Promise<void> {
   const command = new PutObjectCommand({
-    Bucket: 'exprsn-processed',
+    Bucket: PROCESSED_BUCKET,
     Key: key,
     Body: createReadStream(localPath),
     ContentType: contentType,
@@ -112,14 +140,16 @@ async function processVideo(job: Job<TranscodeJob>): Promise<void> {
     await mkdir(outputDir, { recursive: true });
 
     // Update status: downloading
-    await updateStatus(uploadId, 'processing', 20);
+    await updateRedisStatus(uploadId, 'processing', 20);
+    await updateDatabaseStatus(uploadId, 'processing', 20);
 
     // Download input file
-    console.log(`Downloading ${inputKey}...`);
+    console.log(`[${uploadId}] Downloading ${inputKey}...`);
     await downloadFromS3(inputKey, inputPath);
 
     // Update status: transcoding
-    await updateStatus(uploadId, 'processing', 30);
+    await updateRedisStatus(uploadId, 'processing', 30);
+    await updateDatabaseStatus(uploadId, 'processing', 30);
 
     // Get video info
     const probe = await new Promise<ffmpeg.FfprobeData>((resolve, reject) => {
@@ -132,7 +162,7 @@ async function processVideo(job: Job<TranscodeJob>): Promise<void> {
     const videoStream = probe.streams.find((s) => s.codec_type === 'video');
     const duration = probe.format.duration || 0;
 
-    console.log(`Video duration: ${duration}s, resolution: ${videoStream?.width}x${videoStream?.height}`);
+    console.log(`[${uploadId}] Video duration: ${duration}s, resolution: ${videoStream?.width}x${videoStream?.height}`);
 
     // Generate HLS with multiple quality levels
     await new Promise<void>((resolve, reject) => {
@@ -163,9 +193,10 @@ async function processVideo(job: Job<TranscodeJob>): Promise<void> {
           `${outputDir}/v%v/segment%d.ts`,
         ])
         .output(`${outputDir}/v%v/playlist.m3u8`)
-        .on('progress', (progress) => {
+        .on('progress', async (progress) => {
           const percent = Math.min(90, 30 + (progress.percent || 0) * 0.5);
-          updateStatus(uploadId, 'processing', Math.floor(percent));
+          await updateRedisStatus(uploadId, 'processing', Math.floor(percent));
+          await updateDatabaseStatus(uploadId, 'processing', Math.floor(percent));
         })
         .on('end', () => resolve())
         .on('error', (err) => reject(err))
@@ -173,7 +204,8 @@ async function processVideo(job: Job<TranscodeJob>): Promise<void> {
     });
 
     // Update status: generating thumbnail
-    await updateStatus(uploadId, 'processing', 92);
+    await updateRedisStatus(uploadId, 'processing', 92);
+    await updateDatabaseStatus(uploadId, 'processing', 92);
 
     // Generate thumbnail
     await new Promise<void>((resolve, reject) => {
@@ -189,11 +221,12 @@ async function processVideo(job: Job<TranscodeJob>): Promise<void> {
     });
 
     // Update status: uploading
-    await updateStatus(uploadId, 'processing', 95);
+    await updateRedisStatus(uploadId, 'processing', 95);
+    await updateDatabaseStatus(uploadId, 'processing', 95);
 
     // Upload to CDN bucket
     const cdnPrefix = `${userId}/${uploadId}`;
-    console.log(`Uploading to ${cdnPrefix}...`);
+    console.log(`[${uploadId}] Uploading to ${cdnPrefix}...`);
     await uploadDirectory(outputDir, cdnPrefix);
 
     // Build CDN URLs
@@ -201,19 +234,42 @@ async function processVideo(job: Job<TranscodeJob>): Promise<void> {
     const hlsPlaylist = `${cdnUrl}/master.m3u8`;
     const thumbnail = `${cdnUrl}/thumbnail.jpg`;
 
-    // Update final status
-    await updateStatus(uploadId, 'completed', 100, {
+    // Update final status in both Redis and Database
+    await updateRedisStatus(uploadId, 'completed', 100, {
       cdnUrl,
       hlsPlaylist,
       thumbnail,
     });
 
-    console.log(`Completed processing ${uploadId}`);
+    await updateDatabaseStatus(
+      uploadId,
+      'completed',
+      100,
+      cdnUrl,
+      hlsPlaylist,
+      thumbnail
+    );
+
+    console.log(`[${uploadId}] Completed processing - HLS: ${hlsPlaylist}`);
   } catch (error) {
-    console.error(`Failed to process ${uploadId}:`, error);
-    await updateStatus(uploadId, 'failed', 0, {
-      error: error instanceof Error ? error.message : 'Unknown error',
+    console.error(`[${uploadId}] Failed to process:`, error);
+
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+
+    await updateRedisStatus(uploadId, 'failed', 0, {
+      error: errorMessage,
     });
+
+    await updateDatabaseStatus(
+      uploadId,
+      'failed',
+      0,
+      undefined,
+      undefined,
+      undefined,
+      errorMessage
+    );
+
     throw error;
   } finally {
     // Cleanup
@@ -235,11 +291,20 @@ const worker = new Worker<TranscodeJob>('transcode', processVideo, {
 });
 
 worker.on('completed', (job) => {
-  console.log(`Job ${job.id} completed`);
+  console.log(`[Worker] Job ${job.id} completed successfully`);
 });
 
 worker.on('failed', (job, err) => {
-  console.error(`Job ${job?.id} failed:`, err);
+  console.error(`[Worker] Job ${job?.id} failed:`, err);
 });
 
 console.log('Video transcoding worker started');
+
+// Graceful shutdown
+process.on('SIGTERM', async () => {
+  console.log('SIGTERM received, closing worker...');
+  await worker.close();
+  await sql.end();
+  await redis.quit();
+  process.exit(0);
+});
