@@ -66,6 +66,7 @@ import { videoModerationRouter } from './routes/video-moderation.js';
 import { userModerationRouter } from './routes/user-moderation.js';
 import { searchRouter } from './routes/search.js';
 import { pushRouter } from './routes/push.js';
+import { analyticsRouter } from './routes/analytics.js';
 import { initializeIdentityService } from './services/identity/index.js';
 import { cronService } from './services/cron/index.js';
 import { oauthAgent } from './services/oauth/OAuthAgent.js';
@@ -280,6 +281,7 @@ app.route('/xrpc', videoModerationRouter); // Content moderation gate and queue
 app.route('/xrpc', userModerationRouter); // User-facing moderation (reports, sanctions, appeals)
 app.route('/xrpc', searchRouter); // Search across videos, users, sounds
 app.route('/', pushRouter); // Push notification token management
+app.route('/', analyticsRouter); // Creator analytics dashboard
 // PLC routes - standard directory at /plc, XRPC routes already have /xrpc prefix
 app.route('/plc', plcRouter); // Standard PLC directory endpoints (did:plc resolution)
 // NOTE: plcRouter at '/' is mounted in main() after setup wizard to avoid /:did catching /first-run

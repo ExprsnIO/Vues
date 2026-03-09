@@ -1,764 +1,624 @@
 import { Hono } from 'hono';
-import { HTTPException } from 'hono/http-exception';
+import { zValidator } from '@hono/zod-validator';
+import { z } from 'zod';
+import { authMiddleware, optionalAuthMiddleware } from '../auth/middleware.js';
 import { db } from '../db/index.js';
-import {
-  videos,
-  likes,
-  comments,
-  reposts,
-  follows,
-  users,
-  liveStreams,
-  streamViewers,
-  creatorEarnings,
-  bookmarks,
-  shares,
-} from '../db/schema.js';
-import { eq, and, desc, sql, gte, lte, count } from 'drizzle-orm';
-import { authMiddleware } from '../auth/middleware.js';
+import * as schema from '../db/schema.js';
+import { eq, and, gte, lte, desc, sql, count } from 'drizzle-orm';
 
-type AuthContext = {
-  Variables: {
-    did: string;
-  };
-};
+const analyticsRouter = new Hono();
 
-export const analyticsRoutes = new Hono<AuthContext>();
+// Get time range query helper
+function getTimeRange(period: string): { start: Date; end: Date } {
+  const end = new Date();
+  const start = new Date();
 
-// ============================================
-// Dashboard Overview
-// ============================================
+  switch (period) {
+    case '24h':
+      start.setHours(start.getHours() - 24);
+      break;
+    case '7d':
+      start.setDate(start.getDate() - 7);
+      break;
+    case '30d':
+      start.setDate(start.getDate() - 30);
+      break;
+    case '90d':
+      start.setDate(start.getDate() - 90);
+      break;
+    case '1y':
+      start.setFullYear(start.getFullYear() - 1);
+      break;
+    default:
+      start.setDate(start.getDate() - 30);
+  }
+
+  return { start, end };
+}
 
 // Get creator dashboard overview
-analyticsRoutes.get('/io.exprsn.analytics.overview', authMiddleware, async (c) => {
-  const userDid = c.get('did');
-  if (!userDid) {
-    throw new HTTPException(401, { message: 'Authentication required' });
+analyticsRouter.get(
+  '/xrpc/io.exprsn.analytics.getOverview',
+  authMiddleware,
+  async (c) => {
+    const userDid = c.get('did')!;
+    const period = c.req.query('period') || '30d';
+    const { start, end } = getTimeRange(period);
+
+    // Get total stats
+    const [videoStats] = await db
+      .select({
+        totalVideos: count(),
+        totalViews: sql<number>`COALESCE(SUM(${schema.videos.viewCount}), 0)`,
+        totalLikes: sql<number>`COALESCE(SUM(${schema.videos.likeCount}), 0)`,
+        totalComments: sql<number>`COALESCE(SUM(${schema.videos.commentCount}), 0)`,
+        totalShares: sql<number>`COALESCE(SUM(${schema.videos.shareCount}), 0)`,
+      })
+      .from(schema.videos)
+      .where(eq(schema.videos.authorDid, userDid));
+
+    // Get follower count
+    const [followerStats] = await db
+      .select({
+        totalFollowers: count(),
+      })
+      .from(schema.follows)
+      .where(eq(schema.follows.subjectDid, userDid));
+
+    // Get new followers in period
+    const [newFollowers] = await db
+      .select({
+        count: count(),
+      })
+      .from(schema.follows)
+      .where(
+        and(
+          eq(schema.follows.subjectDid, userDid),
+          gte(schema.follows.createdAt, start)
+        )
+      );
+
+    // Get average engagement rate
+    const totalEngagement =
+      (videoStats?.totalLikes || 0) +
+      (videoStats?.totalComments || 0) +
+      (videoStats?.totalShares || 0);
+    const engagementRate =
+      videoStats?.totalViews && videoStats.totalViews > 0
+        ? ((totalEngagement / videoStats.totalViews) * 100).toFixed(2)
+        : '0.00';
+
+    return c.json({
+      period,
+      overview: {
+        totalVideos: Number(videoStats?.totalVideos || 0),
+        totalViews: Number(videoStats?.totalViews || 0),
+        totalLikes: Number(videoStats?.totalLikes || 0),
+        totalComments: Number(videoStats?.totalComments || 0),
+        totalShares: Number(videoStats?.totalShares || 0),
+        totalFollowers: Number(followerStats?.totalFollowers || 0),
+        newFollowers: Number(newFollowers?.count || 0),
+        engagementRate: parseFloat(engagementRate),
+      },
+    });
   }
+);
 
-  const period = c.req.query('period') || '30d'; // 7d, 30d, 90d, all
-  const startDate = getPeriodStartDate(period);
+// Get video performance analytics
+analyticsRouter.get(
+  '/xrpc/io.exprsn.analytics.getVideoPerformance',
+  authMiddleware,
+  async (c) => {
+    const userDid = c.get('did')!;
+    const period = c.req.query('period') || '30d';
+    const limit = Math.min(parseInt(c.req.query('limit') || '20'), 100);
+    const sortBy = c.req.query('sortBy') || 'views'; // views, likes, comments, engagement
+    const { start } = getTimeRange(period);
 
-  // Get user profile
-  const userResult = await db
-    .select({
-      followerCount: users.followerCount,
-      followingCount: users.followingCount,
-      videoCount: users.videoCount,
-    })
-    .from(users)
-    .where(eq(users.did, userDid))
-    .limit(1);
-
-  const profile = userResult[0];
-  if (!profile) {
-    throw new HTTPException(404, { message: 'User not found' });
-  }
-
-  // Get total views for the period
-  const viewsResult = await db
-    .select({
-      totalViews: sql<number>`COALESCE(SUM(${videos.viewCount}), 0)`,
-    })
-    .from(videos)
-    .where(
-      and(
-        eq(videos.authorDid, userDid),
-        startDate ? gte(videos.createdAt, startDate) : undefined
+    // Get user's videos with stats
+    const videos = await db
+      .select({
+        uri: schema.videos.uri,
+        caption: schema.videos.caption,
+        thumbnailUrl: schema.videos.thumbnailUrl,
+        viewCount: schema.videos.viewCount,
+        likeCount: schema.videos.likeCount,
+        commentCount: schema.videos.commentCount,
+        shareCount: schema.videos.shareCount,
+        createdAt: schema.videos.createdAt,
+      })
+      .from(schema.videos)
+      .where(eq(schema.videos.authorDid, userDid))
+      .orderBy(
+        sortBy === 'likes'
+          ? desc(schema.videos.likeCount)
+          : sortBy === 'comments'
+            ? desc(schema.videos.commentCount)
+            : sortBy === 'engagement'
+              ? desc(
+                  sql`${schema.videos.likeCount} + ${schema.videos.commentCount} + ${schema.videos.shareCount}`
+                )
+              : desc(schema.videos.viewCount)
       )
+      .limit(limit);
+
+    // Calculate engagement metrics for each video
+    const videosWithEngagement = videos.map((video) => {
+      const totalEngagement =
+        video.likeCount + video.commentCount + video.shareCount;
+      const engagementRate =
+        video.viewCount > 0
+          ? ((totalEngagement / video.viewCount) * 100).toFixed(2)
+          : '0.00';
+
+      return {
+        ...video,
+        engagementRate: parseFloat(engagementRate),
+      };
+    });
+
+    return c.json({
+      period,
+      videos: videosWithEngagement,
+    });
+  }
+);
+
+// Get audience demographics
+analyticsRouter.get(
+  '/xrpc/io.exprsn.analytics.getAudienceDemographics',
+  authMiddleware,
+  async (c) => {
+    const userDid = c.get('did')!;
+
+    // Get follower count by join date (growth over time)
+    const followerGrowth = await db
+      .select({
+        date: sql<string>`DATE(${schema.follows.createdAt})`.as('date'),
+        count: count(),
+      })
+      .from(schema.follows)
+      .where(eq(schema.follows.subjectDid, userDid))
+      .groupBy(sql`DATE(${schema.follows.createdAt})`)
+      .orderBy(desc(sql`DATE(${schema.follows.createdAt})`))
+      .limit(30);
+
+    // Get top viewers (most engaged followers)
+    const topViewers = await db
+      .select({
+        viewerDid: schema.videoViews.viewerDid,
+        viewCount: count(),
+      })
+      .from(schema.videoViews)
+      .innerJoin(schema.videos, eq(schema.videoViews.videoUri, schema.videos.uri))
+      .where(eq(schema.videos.authorDid, userDid))
+      .groupBy(schema.videoViews.viewerDid)
+      .orderBy(desc(count()))
+      .limit(10);
+
+    // Get viewer profile info
+    const viewerProfiles = await Promise.all(
+      topViewers.map(async (viewer) => {
+        const [profile] = await db
+          .select({
+            did: schema.users.did,
+            handle: schema.users.handle,
+            displayName: schema.users.displayName,
+            avatar: schema.users.avatar,
+          })
+          .from(schema.users)
+          .where(eq(schema.users.did, viewer.viewerDid))
+          .limit(1);
+
+        return {
+          ...profile,
+          viewCount: Number(viewer.viewCount),
+        };
+      })
     );
 
-  // Get total likes for the period
-  const likesResult = await db
-    .select({
-      count: count(),
-    })
-    .from(likes)
-    .innerJoin(videos, eq(videos.uri, likes.videoUri))
-    .where(
-      and(
-        eq(videos.authorDid, userDid),
-        startDate ? gte(likes.createdAt, startDate) : undefined
-      )
-    );
-
-  // Get total comments for the period
-  const commentsResult = await db
-    .select({
-      count: count(),
-    })
-    .from(comments)
-    .innerJoin(videos, eq(videos.uri, comments.videoUri))
-    .where(
-      and(
-        eq(videos.authorDid, userDid),
-        startDate ? gte(comments.createdAt, startDate) : undefined
-      )
-    );
-
-  // Get new followers for the period
-  const followersResult = await db
-    .select({
-      count: count(),
-    })
-    .from(follows)
-    .where(
-      and(
-        eq(follows.followeeDid, userDid),
-        startDate ? gte(follows.createdAt, startDate) : undefined
-      )
-    );
-
-  // Get reposts for the period
-  const repostsResult = await db
-    .select({
-      count: count(),
-    })
-    .from(reposts)
-    .innerJoin(videos, eq(videos.uri, reposts.videoUri))
-    .where(
-      and(
-        eq(videos.authorDid, userDid),
-        startDate ? gte(reposts.createdAt, startDate) : undefined
-      )
-    );
-
-  // Get shares for the period
-  const sharesResult = await db
-    .select({
-      count: count(),
-    })
-    .from(shares)
-    .innerJoin(videos, eq(videos.uri, shares.videoUri))
-    .where(
-      and(
-        eq(videos.authorDid, userDid),
-        startDate ? gte(shares.createdAt, startDate) : undefined
-      )
-    );
-
-  // Get earnings info
-  const earningsResult = await db
-    .select()
-    .from(creatorEarnings)
-    .where(eq(creatorEarnings.userDid, userDid))
-    .limit(1);
-
-  return c.json({
-    period,
-    profile: {
-      totalFollowers: profile.followerCount,
-      totalFollowing: profile.followingCount,
-      totalVideos: profile.videoCount,
-    },
-    metrics: {
-      views: viewsResult[0]?.totalViews || 0,
-      likes: likesResult[0]?.count || 0,
-      comments: commentsResult[0]?.count || 0,
-      newFollowers: followersResult[0]?.count || 0,
-      reposts: repostsResult[0]?.count || 0,
-      shares: sharesResult[0]?.count || 0,
-    },
-    earnings: earningsResult[0] ? {
-      totalEarnings: earningsResult[0].totalEarnings / 100, // Convert cents to dollars
-      availableBalance: earningsResult[0].availableBalance / 100,
-      pendingBalance: earningsResult[0].pendingBalance / 100,
-      currency: earningsResult[0].currency,
-      lastPayoutAt: earningsResult[0].lastPayoutAt?.toISOString(),
-    } : null,
-  });
-});
-
-// ============================================
-// Video Analytics
-// ============================================
-
-// Get analytics for all videos
-analyticsRoutes.get('/io.exprsn.analytics.videos', authMiddleware, async (c) => {
-  const userDid = c.get('did');
-  if (!userDid) {
-    throw new HTTPException(401, { message: 'Authentication required' });
+    return c.json({
+      followerGrowth: followerGrowth.map((row) => ({
+        date: row.date,
+        count: Number(row.count),
+      })),
+      topViewers: viewerProfiles.filter((p) => p.did),
+    });
   }
+);
 
-  const limit = Math.min(parseInt(c.req.query('limit') || '20'), 50);
-  const cursor = c.req.query('cursor');
-  const sortBy = c.req.query('sortBy') || 'recent'; // recent, views, likes, comments
+// Get content performance over time
+analyticsRouter.get(
+  '/xrpc/io.exprsn.analytics.getContentTrends',
+  authMiddleware,
+  async (c) => {
+    const userDid = c.get('did')!;
+    const period = c.req.query('period') || '30d';
+    const { start } = getTimeRange(period);
 
-  let orderByColumn;
-  switch (sortBy) {
-    case 'views':
-      orderByColumn = desc(videos.viewCount);
-      break;
-    case 'likes':
-      orderByColumn = desc(videos.likeCount);
-      break;
-    case 'comments':
-      orderByColumn = desc(videos.commentCount);
-      break;
-    default:
-      orderByColumn = desc(videos.createdAt);
-  }
-
-  let query = db
-    .select({
-      uri: videos.uri,
-      caption: videos.caption,
-      thumbnailUrl: videos.thumbnailUrl,
-      duration: videos.duration,
-      viewCount: videos.viewCount,
-      likeCount: videos.likeCount,
-      commentCount: videos.commentCount,
-      shareCount: videos.shareCount,
-      createdAt: videos.createdAt,
-    })
-    .from(videos)
-    .where(eq(videos.authorDid, userDid))
-    .orderBy(orderByColumn)
-    .limit(limit + 1);
-
-  if (cursor) {
-    // Parse cursor based on sort type
-    // @ts-expect-error - cursor parsing
-    query = query.where(
-      and(
-        eq(videos.authorDid, userDid),
-        sql`${videos.uri} < ${cursor}`
+    // Get daily video stats
+    const dailyStats = await db
+      .select({
+        date: sql<string>`DATE(${schema.videos.createdAt})`.as('date'),
+        videos: count(),
+        totalViews: sql<number>`COALESCE(SUM(${schema.videos.viewCount}), 0)`,
+        totalLikes: sql<number>`COALESCE(SUM(${schema.videos.likeCount}), 0)`,
+      })
+      .from(schema.videos)
+      .where(
+        and(
+          eq(schema.videos.authorDid, userDid),
+          gte(schema.videos.createdAt, start)
+        )
       )
-    ) as typeof query;
+      .groupBy(sql`DATE(${schema.videos.createdAt})`)
+      .orderBy(sql`DATE(${schema.videos.createdAt})`);
+
+    // Get best performing content categories (by hashtags)
+    const topHashtags = await db
+      .select({
+        tag: schema.videoHashtags.tag,
+        videoCount: count(),
+        totalViews: sql<number>`COALESCE(SUM(${schema.videos.viewCount}), 0)`,
+      })
+      .from(schema.videoHashtags)
+      .innerJoin(schema.videos, eq(schema.videoHashtags.videoUri, schema.videos.uri))
+      .where(eq(schema.videos.authorDid, userDid))
+      .groupBy(schema.videoHashtags.tag)
+      .orderBy(desc(sql`COALESCE(SUM(${schema.videos.viewCount}), 0)`))
+      .limit(10);
+
+    return c.json({
+      period,
+      dailyStats: dailyStats.map((row) => ({
+        date: row.date,
+        videos: Number(row.videos),
+        views: Number(row.totalViews),
+        likes: Number(row.totalLikes),
+      })),
+      topHashtags: topHashtags.map((row) => ({
+        tag: row.tag,
+        videoCount: Number(row.videoCount),
+        totalViews: Number(row.totalViews),
+      })),
+    });
   }
+);
 
-  const results = await query;
-  const hasMore = results.length > limit;
-  const videoList = hasMore ? results.slice(0, -1) : results;
+// Get engagement breakdown
+analyticsRouter.get(
+  '/xrpc/io.exprsn.analytics.getEngagementBreakdown',
+  authMiddleware,
+  async (c) => {
+    const userDid = c.get('did')!;
+    const period = c.req.query('period') || '30d';
+    const { start } = getTimeRange(period);
 
-  return c.json({
-    videos: videoList.map((video) => ({
-      ...video,
-      createdAt: video.createdAt.toISOString(),
-      engagementRate: calculateEngagementRate(
-        video.viewCount,
-        video.likeCount,
-        video.commentCount,
-        video.shareCount
-      ),
-    })),
-    cursor: hasMore ? videoList[videoList.length - 1]?.uri : undefined,
-  });
-});
-
-// Get detailed analytics for a single video
-analyticsRoutes.get('/io.exprsn.analytics.video', authMiddleware, async (c) => {
-  const userDid = c.get('did');
-  if (!userDid) {
-    throw new HTTPException(401, { message: 'Authentication required' });
-  }
-
-  const videoId = c.req.query('videoId');
-  if (!videoId) {
-    throw new HTTPException(400, { message: 'Video ID required' });
-  }
-
-  // Get video
-  const videoResult = await db
-    .select()
-    .from(videos)
-    .where(eq(videos.uri, videoId))
-    .limit(1);
-
-  const video = videoResult[0];
-  if (!video) {
-    throw new HTTPException(404, { message: 'Video not found' });
-  }
-
-  if (video.authorDid !== userDid) {
-    throw new HTTPException(403, { message: 'Not your video' });
-  }
-
-  // Get likes over time (last 30 days by day)
-  const likesOverTime = await db
-    .select({
-      date: sql<string>`DATE(${likes.createdAt})`,
-      count: count(),
-    })
-    .from(likes)
-    .where(
-      and(
-        eq(likes.videoUri, videoId),
-        gte(likes.createdAt, new Date(Date.now() - 30 * 24 * 60 * 60 * 1000))
+    // Get likes breakdown
+    const likesInPeriod = await db
+      .select({
+        date: sql<string>`DATE(${schema.likes.createdAt})`.as('date'),
+        count: count(),
+      })
+      .from(schema.likes)
+      .innerJoin(schema.videos, eq(schema.likes.subjectUri, schema.videos.uri))
+      .where(
+        and(
+          eq(schema.videos.authorDid, userDid),
+          gte(schema.likes.createdAt, start)
+        )
       )
-    )
-    .groupBy(sql`DATE(${likes.createdAt})`)
-    .orderBy(sql`DATE(${likes.createdAt})`);
+      .groupBy(sql`DATE(${schema.likes.createdAt})`)
+      .orderBy(sql`DATE(${schema.likes.createdAt})`);
 
-  // Get comments over time
-  const commentsOverTime = await db
-    .select({
-      date: sql<string>`DATE(${comments.createdAt})`,
-      count: count(),
-    })
-    .from(comments)
-    .where(
-      and(
-        eq(comments.videoUri, videoId),
-        gte(comments.createdAt, new Date(Date.now() - 30 * 24 * 60 * 60 * 1000))
+    // Get comments breakdown
+    const commentsInPeriod = await db
+      .select({
+        date: sql<string>`DATE(${schema.comments.createdAt})`.as('date'),
+        count: count(),
+      })
+      .from(schema.comments)
+      .innerJoin(schema.videos, eq(schema.comments.videoUri, schema.videos.uri))
+      .where(
+        and(
+          eq(schema.videos.authorDid, userDid),
+          gte(schema.comments.createdAt, start)
+        )
       )
-    )
-    .groupBy(sql`DATE(${comments.createdAt})`)
-    .orderBy(sql`DATE(${comments.createdAt})`);
+      .groupBy(sql`DATE(${schema.comments.createdAt})`)
+      .orderBy(sql`DATE(${schema.comments.createdAt})`);
 
-  // Get bookmark count
-  const bookmarkResult = await db
-    .select({ count: count() })
-    .from(bookmarks)
-    .where(eq(bookmarks.videoUri, videoId));
+    // Get total engagement metrics
+    const [totals] = await db
+      .select({
+        totalLikes: sql<number>`COUNT(DISTINCT ${schema.likes.uri})`,
+        totalComments: sql<number>`COUNT(DISTINCT ${schema.comments.uri})`,
+      })
+      .from(schema.videos)
+      .leftJoin(schema.likes, eq(schema.likes.subjectUri, schema.videos.uri))
+      .leftJoin(schema.comments, eq(schema.comments.videoUri, schema.videos.uri))
+      .where(
+        and(
+          eq(schema.videos.authorDid, userDid),
+          gte(schema.videos.createdAt, start)
+        )
+      );
 
-  // Get share count
-  const shareResult = await db
-    .select({ count: count() })
-    .from(shares)
-    .where(eq(shares.videoUri, videoId));
-
-  return c.json({
-    video: {
-      uri: video.uri,
-      caption: video.caption,
-      thumbnailUrl: video.thumbnailUrl,
-      cdnUrl: video.cdnUrl,
-      duration: video.duration,
-      aspectRatio: video.aspectRatio,
-      createdAt: video.createdAt.toISOString(),
-    },
-    metrics: {
-      views: video.viewCount,
-      likes: video.likeCount,
-      comments: video.commentCount,
-      shares: video.shareCount,
-      bookmarks: bookmarkResult[0]?.count || 0,
-      reposts: shareResult[0]?.count || 0,
-      engagementRate: calculateEngagementRate(
-        video.viewCount,
-        video.likeCount,
-        video.commentCount,
-        video.shareCount
-      ),
-    },
-    trends: {
-      likes: likesOverTime,
-      comments: commentsOverTime,
-    },
-  });
-});
-
-// ============================================
-// Follower Analytics
-// ============================================
-
-// Get follower growth over time
-analyticsRoutes.get('/io.exprsn.analytics.followers', authMiddleware, async (c) => {
-  const userDid = c.get('did');
-  if (!userDid) {
-    throw new HTTPException(401, { message: 'Authentication required' });
+    return c.json({
+      period,
+      likes: {
+        total: Number(totals?.totalLikes || 0),
+        daily: likesInPeriod.map((row) => ({
+          date: row.date,
+          count: Number(row.count),
+        })),
+      },
+      comments: {
+        total: Number(totals?.totalComments || 0),
+        daily: commentsInPeriod.map((row) => ({
+          date: row.date,
+          count: Number(row.count),
+        })),
+      },
+    });
   }
+);
 
-  const period = c.req.query('period') || '30d';
-  const startDate = getPeriodStartDate(period);
+// Get real-time stats (last 24 hours)
+analyticsRouter.get(
+  '/xrpc/io.exprsn.analytics.getRealtime',
+  authMiddleware,
+  async (c) => {
+    const userDid = c.get('did')!;
+    const { start } = getTimeRange('24h');
 
-  // Get follower growth by day
-  const followerGrowth = await db
-    .select({
-      date: sql<string>`DATE(${follows.createdAt})`,
-      count: count(),
-    })
-    .from(follows)
-    .where(
-      and(
-        eq(follows.followeeDid, userDid),
-        startDate ? gte(follows.createdAt, startDate) : undefined
+    // Get hourly view counts for last 24 hours
+    const hourlyViews = await db
+      .select({
+        hour: sql<string>`DATE_TRUNC('hour', ${schema.videoViews.watchedAt})`.as('hour'),
+        count: count(),
+      })
+      .from(schema.videoViews)
+      .innerJoin(schema.videos, eq(schema.videoViews.videoUri, schema.videos.uri))
+      .where(
+        and(
+          eq(schema.videos.authorDid, userDid),
+          gte(schema.videoViews.watchedAt, start)
+        )
       )
-    )
-    .groupBy(sql`DATE(${follows.createdAt})`)
-    .orderBy(sql`DATE(${follows.createdAt})`);
+      .groupBy(sql`DATE_TRUNC('hour', ${schema.videoViews.watchedAt})`)
+      .orderBy(sql`DATE_TRUNC('hour', ${schema.videoViews.watchedAt})`);
 
-  // Get total follower count
-  const totalResult = await db
-    .select({ followerCount: users.followerCount })
-    .from(users)
-    .where(eq(users.did, userDid))
-    .limit(1);
+    // Get active viewers (unique viewers in last hour)
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+    const [activeViewers] = await db
+      .select({
+        count: sql<number>`COUNT(DISTINCT ${schema.videoViews.viewerDid})`,
+      })
+      .from(schema.videoViews)
+      .innerJoin(schema.videos, eq(schema.videoViews.videoUri, schema.videos.uri))
+      .where(
+        and(
+          eq(schema.videos.authorDid, userDid),
+          gte(schema.videoViews.watchedAt, oneHourAgo)
+        )
+      );
 
-  // Get recent followers
-  const recentFollowers = await db
-    .select({
-      did: users.did,
-      handle: users.handle,
-      displayName: users.displayName,
-      avatar: users.avatar,
-      followerCount: users.followerCount,
-      followedAt: follows.createdAt,
-    })
-    .from(follows)
-    .innerJoin(users, eq(users.did, follows.followerDid))
-    .where(eq(follows.followeeDid, userDid))
-    .orderBy(desc(follows.createdAt))
-    .limit(10);
+    // Get recent likes
+    const recentLikes = await db
+      .select({
+        videoUri: schema.likes.subjectUri,
+        likerDid: schema.likes.authorDid,
+        createdAt: schema.likes.createdAt,
+      })
+      .from(schema.likes)
+      .innerJoin(schema.videos, eq(schema.likes.subjectUri, schema.videos.uri))
+      .where(
+        and(
+          eq(schema.videos.authorDid, userDid),
+          gte(schema.likes.createdAt, start)
+        )
+      )
+      .orderBy(desc(schema.likes.createdAt))
+      .limit(10);
 
-  return c.json({
-    period,
-    totalFollowers: totalResult[0]?.followerCount || 0,
-    growth: followerGrowth,
-    recentFollowers: recentFollowers.map((f) => ({
-      ...f,
-      followedAt: f.followedAt.toISOString(),
-    })),
-  });
-});
+    // Get recent comments
+    const recentComments = await db
+      .select({
+        videoUri: schema.comments.videoUri,
+        commenterDid: schema.comments.authorDid,
+        text: schema.comments.text,
+        createdAt: schema.comments.createdAt,
+      })
+      .from(schema.comments)
+      .innerJoin(schema.videos, eq(schema.comments.videoUri, schema.videos.uri))
+      .where(
+        and(
+          eq(schema.videos.authorDid, userDid),
+          gte(schema.comments.createdAt, start)
+        )
+      )
+      .orderBy(desc(schema.comments.createdAt))
+      .limit(10);
 
-// ============================================
-// Live Stream Analytics
-// ============================================
-
-// Get live stream analytics summary
-analyticsRoutes.get('/io.exprsn.analytics.streams', authMiddleware, async (c) => {
-  const userDid = c.get('did');
-  if (!userDid) {
-    throw new HTTPException(401, { message: 'Authentication required' });
+    return c.json({
+      activeViewers: Number(activeViewers?.count || 0),
+      hourlyViews: hourlyViews.map((row) => ({
+        hour: row.hour,
+        count: Number(row.count),
+      })),
+      recentLikes,
+      recentComments,
+    });
   }
+);
 
-  const period = c.req.query('period') || '30d';
-  const startDate = getPeriodStartDate(period);
+// Get revenue analytics (for monetized creators)
+analyticsRouter.get(
+  '/xrpc/io.exprsn.analytics.getRevenue',
+  authMiddleware,
+  async (c) => {
+    const userDid = c.get('did')!;
+    const period = c.req.query('period') || '30d';
+    const { start } = getTimeRange(period);
 
-  // Get stream stats
-  const streamStats = await db
-    .select({
-      totalStreams: count(),
-      totalViews: sql<number>`COALESCE(SUM(${liveStreams.totalViews}), 0)`,
-      totalPeakViewers: sql<number>`COALESCE(SUM(${liveStreams.peakViewers}), 0)`,
-      avgViewers: sql<number>`COALESCE(AVG(${liveStreams.peakViewers}), 0)`,
-    })
-    .from(liveStreams)
-    .where(
-      and(
-        eq(liveStreams.userDid, userDid),
-        eq(liveStreams.status, 'ended'),
-        startDate ? gte(liveStreams.createdAt, startDate) : undefined
+    // Get tips received
+    const tips = await db
+      .select({
+        date: sql<string>`DATE(${schema.tips.createdAt})`.as('date'),
+        totalAmount: sql<number>`COALESCE(SUM(${schema.tips.amount}), 0)`,
+        tipCount: count(),
+      })
+      .from(schema.tips)
+      .where(
+        and(
+          eq(schema.tips.recipientDid, userDid),
+          gte(schema.tips.createdAt, start)
+        )
       )
-    );
+      .groupBy(sql`DATE(${schema.tips.createdAt})`)
+      .orderBy(sql`DATE(${schema.tips.createdAt})`);
 
-  // Get recent streams
-  const recentStreams = await db
-    .select({
-      id: liveStreams.id,
-      title: liveStreams.title,
-      status: liveStreams.status,
-      viewerCount: liveStreams.viewerCount,
-      peakViewers: liveStreams.peakViewers,
-      totalViews: liveStreams.totalViews,
-      thumbnailUrl: liveStreams.thumbnailUrl,
-      startedAt: liveStreams.startedAt,
-      endedAt: liveStreams.endedAt,
-    })
-    .from(liveStreams)
-    .where(eq(liveStreams.userDid, userDid))
-    .orderBy(desc(liveStreams.createdAt))
-    .limit(10);
+    // Get total revenue
+    const [totalRevenue] = await db
+      .select({
+        total: sql<number>`COALESCE(SUM(${schema.tips.amount}), 0)`,
+        tipCount: count(),
+      })
+      .from(schema.tips)
+      .where(
+        and(
+          eq(schema.tips.recipientDid, userDid),
+          gte(schema.tips.createdAt, start)
+        )
+      );
 
-  // Calculate average duration
-  let totalDuration = 0;
-  let streamCount = 0;
-  for (const stream of recentStreams) {
-    if (stream.startedAt && stream.endedAt) {
-      totalDuration += stream.endedAt.getTime() - stream.startedAt.getTime();
-      streamCount++;
+    // Get top tippers
+    const topTippers = await db
+      .select({
+        tipperDid: schema.tips.senderDid,
+        totalAmount: sql<number>`COALESCE(SUM(${schema.tips.amount}), 0)`,
+        tipCount: count(),
+      })
+      .from(schema.tips)
+      .where(
+        and(
+          eq(schema.tips.recipientDid, userDid),
+          gte(schema.tips.createdAt, start)
+        )
+      )
+      .groupBy(schema.tips.senderDid)
+      .orderBy(desc(sql`COALESCE(SUM(${schema.tips.amount}), 0)`))
+      .limit(10);
+
+    return c.json({
+      period,
+      revenue: {
+        total: Number(totalRevenue?.total || 0),
+        tipCount: Number(totalRevenue?.tipCount || 0),
+        daily: tips.map((row) => ({
+          date: row.date,
+          amount: Number(row.totalAmount),
+          count: Number(row.tipCount),
+        })),
+      },
+      topTippers: topTippers.map((row) => ({
+        did: row.tipperDid,
+        totalAmount: Number(row.totalAmount),
+        tipCount: Number(row.tipCount),
+      })),
+    });
+  }
+);
+
+// Export endpoint for downloading analytics data
+analyticsRouter.get(
+  '/xrpc/io.exprsn.analytics.export',
+  authMiddleware,
+  async (c) => {
+    const userDid = c.get('did')!;
+    const period = c.req.query('period') || '30d';
+    const format = c.req.query('format') || 'json';
+    const { start, end } = getTimeRange(period);
+
+    // Get comprehensive analytics data
+    const [overview] = await db
+      .select({
+        totalVideos: count(),
+        totalViews: sql<number>`COALESCE(SUM(${schema.videos.viewCount}), 0)`,
+        totalLikes: sql<number>`COALESCE(SUM(${schema.videos.likeCount}), 0)`,
+        totalComments: sql<number>`COALESCE(SUM(${schema.videos.commentCount}), 0)`,
+        totalShares: sql<number>`COALESCE(SUM(${schema.videos.shareCount}), 0)`,
+      })
+      .from(schema.videos)
+      .where(eq(schema.videos.authorDid, userDid));
+
+    const videos = await db
+      .select({
+        uri: schema.videos.uri,
+        caption: schema.videos.caption,
+        viewCount: schema.videos.viewCount,
+        likeCount: schema.videos.likeCount,
+        commentCount: schema.videos.commentCount,
+        shareCount: schema.videos.shareCount,
+        createdAt: schema.videos.createdAt,
+      })
+      .from(schema.videos)
+      .where(
+        and(
+          eq(schema.videos.authorDid, userDid),
+          gte(schema.videos.createdAt, start)
+        )
+      )
+      .orderBy(desc(schema.videos.createdAt));
+
+    const data = {
+      exportedAt: new Date().toISOString(),
+      period,
+      startDate: start.toISOString(),
+      endDate: end.toISOString(),
+      overview: {
+        totalVideos: Number(overview?.totalVideos || 0),
+        totalViews: Number(overview?.totalViews || 0),
+        totalLikes: Number(overview?.totalLikes || 0),
+        totalComments: Number(overview?.totalComments || 0),
+        totalShares: Number(overview?.totalShares || 0),
+      },
+      videos,
+    };
+
+    if (format === 'csv') {
+      const headers = [
+        'Video URI',
+        'Caption',
+        'Views',
+        'Likes',
+        'Comments',
+        'Shares',
+        'Created At',
+      ];
+      const rows = videos.map((v) => [
+        v.uri,
+        `"${(v.caption || '').replace(/"/g, '""')}"`,
+        v.viewCount,
+        v.likeCount,
+        v.commentCount,
+        v.shareCount,
+        v.createdAt,
+      ]);
+
+      const csv = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
+
+      return new Response(csv, {
+        headers: {
+          'Content-Type': 'text/csv',
+          'Content-Disposition': `attachment; filename="analytics-${period}.csv"`,
+        },
+      });
     }
+
+    return c.json(data);
   }
-  const avgDuration = streamCount > 0 ? totalDuration / streamCount / 1000 : 0; // in seconds
+);
 
-  return c.json({
-    period,
-    summary: {
-      totalStreams: streamStats[0]?.totalStreams || 0,
-      totalViews: streamStats[0]?.totalViews || 0,
-      totalPeakViewers: streamStats[0]?.totalPeakViewers || 0,
-      avgPeakViewers: Math.round(streamStats[0]?.avgViewers || 0),
-      avgDurationSeconds: Math.round(avgDuration),
-    },
-    recentStreams: recentStreams.map((stream) => ({
-      ...stream,
-      startedAt: stream.startedAt?.toISOString(),
-      endedAt: stream.endedAt?.toISOString(),
-      durationSeconds: stream.startedAt && stream.endedAt
-        ? Math.round((stream.endedAt.getTime() - stream.startedAt.getTime()) / 1000)
-        : null,
-    })),
-  });
-});
-
-// Get detailed analytics for a single stream
-analyticsRoutes.get('/io.exprsn.analytics.stream', authMiddleware, async (c) => {
-  const userDid = c.get('did');
-  if (!userDid) {
-    throw new HTTPException(401, { message: 'Authentication required' });
-  }
-
-  const streamId = c.req.query('streamId');
-  if (!streamId) {
-    throw new HTTPException(400, { message: 'Stream ID required' });
-  }
-
-  // Get stream
-  const streamResult = await db
-    .select()
-    .from(liveStreams)
-    .where(eq(liveStreams.id, streamId))
-    .limit(1);
-
-  const stream = streamResult[0];
-  if (!stream) {
-    throw new HTTPException(404, { message: 'Stream not found' });
-  }
-
-  if (stream.userDid !== userDid) {
-    throw new HTTPException(403, { message: 'Not your stream' });
-  }
-
-  // Get viewer analytics
-  const viewerStats = await db
-    .select({
-      uniqueViewers: sql<number>`COUNT(DISTINCT COALESCE(${streamViewers.userDid}, ${streamViewers.sessionId}))`,
-      totalSessions: count(),
-      avgWatchDuration: sql<number>`COALESCE(AVG(${streamViewers.watchDuration}), 0)`,
-      authViewers: sql<number>`COUNT(DISTINCT ${streamViewers.userDid})`,
-    })
-    .from(streamViewers)
-    .where(eq(streamViewers.streamId, streamId));
-
-  // Get viewer join times distribution (for charts)
-  const viewerJoinTimes = await db
-    .select({
-      minute: sql<string>`DATE_TRUNC('minute', ${streamViewers.joinedAt})`,
-      count: count(),
-    })
-    .from(streamViewers)
-    .where(eq(streamViewers.streamId, streamId))
-    .groupBy(sql`DATE_TRUNC('minute', ${streamViewers.joinedAt})`)
-    .orderBy(sql`DATE_TRUNC('minute', ${streamViewers.joinedAt})`);
-
-  return c.json({
-    stream: {
-      id: stream.id,
-      title: stream.title,
-      status: stream.status,
-      category: stream.category,
-      tags: stream.tags,
-      thumbnailUrl: stream.thumbnailUrl,
-      peakViewers: stream.peakViewers,
-      totalViews: stream.totalViews,
-      startedAt: stream.startedAt?.toISOString(),
-      endedAt: stream.endedAt?.toISOString(),
-      durationSeconds: stream.startedAt && stream.endedAt
-        ? Math.round((stream.endedAt.getTime() - stream.startedAt.getTime()) / 1000)
-        : null,
-    },
-    viewerMetrics: {
-      uniqueViewers: viewerStats[0]?.uniqueViewers || 0,
-      totalSessions: viewerStats[0]?.totalSessions || 0,
-      authenticatedViewers: viewerStats[0]?.authViewers || 0,
-      avgWatchDurationSeconds: Math.round(viewerStats[0]?.avgWatchDuration || 0),
-    },
-    viewerTimeline: viewerJoinTimes,
-  });
-});
-
-// ============================================
-// Earnings Analytics
-// ============================================
-
-// Get earnings breakdown
-analyticsRoutes.get('/io.exprsn.analytics.earnings', authMiddleware, async (c) => {
-  const userDid = c.get('did');
-  if (!userDid) {
-    throw new HTTPException(401, { message: 'Authentication required' });
-  }
-
-  // Get earnings record
-  const earningsResult = await db
-    .select()
-    .from(creatorEarnings)
-    .where(eq(creatorEarnings.userDid, userDid))
-    .limit(1);
-
-  const earnings = earningsResult[0];
-
-  return c.json({
-    earnings: earnings ? {
-      totalEarnings: earnings.totalEarnings / 100,
-      availableBalance: earnings.availableBalance / 100,
-      pendingBalance: earnings.pendingBalance / 100,
-      currency: earnings.currency,
-      lastPayoutAt: earnings.lastPayoutAt?.toISOString(),
-      lastPayoutAmount: earnings.lastPayoutAmount ? earnings.lastPayoutAmount / 100 : null,
-    } : {
-      totalEarnings: 0,
-      availableBalance: 0,
-      pendingBalance: 0,
-      currency: 'usd',
-      lastPayoutAt: null,
-      lastPayoutAmount: null,
-    },
-  });
-});
-
-// ============================================
-// Content Performance
-// ============================================
-
-// Get top performing content
-analyticsRoutes.get('/io.exprsn.analytics.topContent', authMiddleware, async (c) => {
-  const userDid = c.get('did');
-  if (!userDid) {
-    throw new HTTPException(401, { message: 'Authentication required' });
-  }
-
-  const metric = c.req.query('metric') || 'views'; // views, likes, comments, shares, engagement
-  const limit = Math.min(parseInt(c.req.query('limit') || '10'), 20);
-
-  let orderBy;
-  switch (metric) {
-    case 'likes':
-      orderBy = desc(videos.likeCount);
-      break;
-    case 'comments':
-      orderBy = desc(videos.commentCount);
-      break;
-    case 'shares':
-      orderBy = desc(videos.shareCount);
-      break;
-    case 'engagement':
-      orderBy = desc(sql`(${videos.likeCount} + ${videos.commentCount} + ${videos.shareCount})::float / NULLIF(${videos.viewCount}, 0)`);
-      break;
-    default:
-      orderBy = desc(videos.viewCount);
-  }
-
-  const topVideos = await db
-    .select({
-      uri: videos.uri,
-      caption: videos.caption,
-      thumbnailUrl: videos.thumbnailUrl,
-      viewCount: videos.viewCount,
-      likeCount: videos.likeCount,
-      commentCount: videos.commentCount,
-      shareCount: videos.shareCount,
-      createdAt: videos.createdAt,
-    })
-    .from(videos)
-    .where(eq(videos.authorDid, userDid))
-    .orderBy(orderBy)
-    .limit(limit);
-
-  return c.json({
-    metric,
-    videos: topVideos.map((video) => ({
-      ...video,
-      createdAt: video.createdAt.toISOString(),
-      engagementRate: calculateEngagementRate(
-        video.viewCount,
-        video.likeCount,
-        video.commentCount,
-        video.shareCount
-      ),
-    })),
-  });
-});
-
-// ============================================
-// Audience Insights
-// ============================================
-
-// Get audience insights (followers analysis)
-analyticsRoutes.get('/io.exprsn.analytics.audience', authMiddleware, async (c) => {
-  const userDid = c.get('did');
-  if (!userDid) {
-    throw new HTTPException(401, { message: 'Authentication required' });
-  }
-
-  // Get top followers by their follower count (influencers following you)
-  const topFollowers = await db
-    .select({
-      did: users.did,
-      handle: users.handle,
-      displayName: users.displayName,
-      avatar: users.avatar,
-      followerCount: users.followerCount,
-    })
-    .from(follows)
-    .innerJoin(users, eq(users.did, follows.followerDid))
-    .where(eq(follows.followeeDid, userDid))
-    .orderBy(desc(users.followerCount))
-    .limit(10);
-
-  // Get follower count distribution
-  const followerDistribution = await db
-    .select({
-      range: sql<string>`
-        CASE
-          WHEN ${users.followerCount} < 100 THEN '0-99'
-          WHEN ${users.followerCount} < 1000 THEN '100-999'
-          WHEN ${users.followerCount} < 10000 THEN '1K-10K'
-          WHEN ${users.followerCount} < 100000 THEN '10K-100K'
-          ELSE '100K+'
-        END
-      `,
-      count: count(),
-    })
-    .from(follows)
-    .innerJoin(users, eq(users.did, follows.followerDid))
-    .where(eq(follows.followeeDid, userDid))
-    .groupBy(sql`
-      CASE
-        WHEN ${users.followerCount} < 100 THEN '0-99'
-        WHEN ${users.followerCount} < 1000 THEN '100-999'
-        WHEN ${users.followerCount} < 10000 THEN '1K-10K'
-        WHEN ${users.followerCount} < 100000 THEN '10K-100K'
-        ELSE '100K+'
-      END
-    `);
-
-  return c.json({
-    topFollowers,
-    followerDistribution,
-  });
-});
-
-// ============================================
-// Helper Functions
-// ============================================
-
-function getPeriodStartDate(period: string): Date | undefined {
-  const now = new Date();
-  switch (period) {
-    case '7d':
-      return new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-    case '30d':
-      return new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-    case '90d':
-      return new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
-    case 'all':
-      return undefined;
-    default:
-      return new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-  }
-}
-
-function calculateEngagementRate(
-  views: number,
-  likes: number,
-  comments: number,
-  shares: number
-): number {
-  if (views === 0) return 0;
-  const engagement = (likes + comments + shares) / views * 100;
-  return Math.round(engagement * 100) / 100; // 2 decimal places
-}
-
-export default analyticsRoutes;
+export { analyticsRouter };
