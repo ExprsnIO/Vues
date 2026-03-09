@@ -1,28 +1,52 @@
+/**
+ * Push Notification Routes
+ * Endpoints for push token management and notifications
+ */
+
 import { Hono } from 'hono';
-import { zValidator } from '@hono/zod-validator';
-import { z } from 'zod';
 import { authMiddleware } from '../auth/middleware.js';
 import { getNotificationService } from '../services/notifications/index.js';
 import { getPushProvider } from '../services/notifications/push.js';
 
 const pushRouter = new Hono();
 
-// Register push token
-const registerTokenSchema = z.object({
-  token: z.string().min(1),
-  platform: z.enum(['ios', 'android', 'web']),
-  deviceId: z.string().optional(),
-  deviceName: z.string().optional(),
-  appVersion: z.string().optional(),
-});
+// Type definitions
+interface RegisterTokenBody {
+  token: string;
+  platform: 'ios' | 'android' | 'web';
+  deviceId?: string;
+  deviceName?: string;
+  appVersion?: string;
+}
 
+interface UnregisterTokenBody {
+  token: string;
+}
+
+interface UpdatePushSettingsBody {
+  pushEnabled?: boolean;
+  pushOnFollow?: boolean;
+  pushOnLike?: boolean;
+  pushOnComment?: boolean;
+  pushOnMention?: boolean;
+  pushOnMessage?: boolean;
+}
+
+// Register push token
 pushRouter.post(
   '/xrpc/io.exprsn.push.registerToken',
   authMiddleware,
-  zValidator('json', registerTokenSchema),
   async (c) => {
     const userDid = c.get('did')!;
-    const body = c.req.valid('json');
+    const body = await c.req.json<RegisterTokenBody>();
+
+    if (!body.token || !body.platform) {
+      return c.json({ error: 'token and platform are required' }, 400);
+    }
+
+    if (!['ios', 'android', 'web'].includes(body.platform)) {
+      return c.json({ error: 'platform must be ios, android, or web' }, 400);
+    }
 
     const notificationService = getNotificationService();
 
@@ -45,16 +69,15 @@ pushRouter.post(
 );
 
 // Unregister push token
-const unregisterTokenSchema = z.object({
-  token: z.string().min(1),
-});
-
 pushRouter.post(
   '/xrpc/io.exprsn.push.unregisterToken',
   authMiddleware,
-  zValidator('json', unregisterTokenSchema),
   async (c) => {
-    const body = c.req.valid('json');
+    const body = await c.req.json<UnregisterTokenBody>();
+
+    if (!body.token) {
+      return c.json({ error: 'token is required' }, 400);
+    }
 
     const notificationService = getNotificationService();
     await notificationService.unregisterPushToken(body.token);
@@ -84,22 +107,12 @@ pushRouter.get(
 );
 
 // Update push notification settings
-const updatePushSettingsSchema = z.object({
-  pushEnabled: z.boolean().optional(),
-  pushOnFollow: z.boolean().optional(),
-  pushOnLike: z.boolean().optional(),
-  pushOnComment: z.boolean().optional(),
-  pushOnMention: z.boolean().optional(),
-  pushOnMessage: z.boolean().optional(),
-});
-
 pushRouter.post(
   '/xrpc/io.exprsn.push.updateSettings',
   authMiddleware,
-  zValidator('json', updatePushSettingsSchema),
   async (c) => {
     const userDid = c.get('did')!;
-    const body = c.req.valid('json');
+    const body = await c.req.json<UpdatePushSettingsBody>();
 
     const notificationService = getNotificationService();
     await notificationService.updateSettings(userDid, body);

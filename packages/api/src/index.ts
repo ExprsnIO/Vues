@@ -1,5 +1,5 @@
 import { serve } from '@hono/node-server';
-import { compress } from '@hono/node-server/compress';
+import { compress } from 'hono/compress';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
@@ -57,7 +57,6 @@ import { adminSettingsRouter } from './routes/admin-settings.js';
 import { renderAdminRouter } from './routes/render-admin.js';
 import { presetsRouter } from './routes/presets.js';
 import { clusterAdminRouter } from './routes/cluster-admin.js';
-import { analyticsRoutes } from './routes/analytics.js';
 import { studioRouter } from './routes/studio.js';
 import { effectsRouter } from './routes/effects.js';
 import soundsRouter from './routes/sounds.js';
@@ -283,7 +282,6 @@ app.route('/xrpc', adminSettingsRouter); // Admin settings for auth/CA/moderatio
 app.route('/xrpc', renderAdminRouter); // Render pipeline admin
 // NOTE: presetsRouter and clusterAdminRouter are mounted in main() after setup wizard
 // because clusterAdminRouter.use('*', adminAuthMiddleware) would intercept /first-run
-app.route('/xrpc', analyticsRoutes); // Creator analytics
 app.route('/xrpc', videoDeletionRouter); // Video deletion and upload retry
 app.route('/xrpc', videoModerationRouter); // Content moderation gate and queue
 app.route('/xrpc', userModerationRouter); // User-facing moderation (reports, sanctions, appeals)

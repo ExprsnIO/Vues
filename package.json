@@ -5,7 +5,7 @@
   "packageManager": "pnpm@9.15.0",
   "scripts": {
     "build": "turbo build",
-    "dev": "turbo dev",
+    "dev": "turbo dev --concurrency=32",
     "lint": "turbo lint",
     "test": "turbo test",
     "typecheck": "turbo typecheck",
@@ -19,9 +19,9 @@
     "lexicon:gen": "pnpm --filter @exprsn/lexicons generate"
   },
   "devDependencies": {
-    "@types/node": "^22.10.0",
+    "@types/node": "^22.19.13",
     "prettier": "^3.4.0",
-    "turbo": "^2.3.0",
+    "turbo": "^2.8.13",
     "typescript": "^5.7.0"
   },
   "engines": {
