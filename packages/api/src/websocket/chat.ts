@@ -79,19 +79,20 @@ const userConversations = new Map<string, Set<string>>();
  */
 async function updatePresence(userDid: string, status: 'online' | 'away' | 'offline', conversationId?: string): Promise<void> {
   try {
+    const now = new Date().toISOString();
     await db
       .insert(userPresence)
       .values({
         userDid,
         status,
-        lastSeen: new Date(),
+        lastSeen: now,
         currentConversationId: conversationId || null,
       })
       .onConflictDoUpdate({
         target: userPresence.userDid,
         set: {
           status,
-          lastSeen: new Date(),
+          lastSeen: now,
           currentConversationId: conversationId || null,
         },
       });
@@ -517,7 +518,7 @@ export function initializeChatWebSocket(io: SocketIOServer): void {
         .where(
           and(
             sql`${userPresence.status} != 'offline'`,
-            sql`${userPresence.lastSeen} < ${staleThreshold}`
+            sql`${userPresence.lastSeen} < ${staleThreshold.toISOString()}`
           )
         );
     } catch (error) {

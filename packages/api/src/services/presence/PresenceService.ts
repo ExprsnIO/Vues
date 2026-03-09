@@ -7,7 +7,7 @@ import { Redis } from 'ioredis';
 import { EventEmitter } from 'events';
 import { db } from '../../db/index.js';
 import { userPresence } from '../../db/schema.js';
-import { eq, inArray, lt, and } from 'drizzle-orm';
+import { eq, inArray, lt, and, sql } from 'drizzle-orm';
 
 /**
  * User presence status
@@ -87,7 +87,8 @@ export class PresenceService extends EventEmitter {
   constructor(config: PresenceServiceConfig) {
     super();
     this.redis = config.redis;
-    this.redisSub = config.redis.duplicate();
+    // Disable ready check for subscriber connection to avoid INFO command after subscribe
+    this.redisSub = config.redis.duplicate({ enableReadyCheck: false });
     this.serverId = config.serverId || `server-${process.pid}-${Date.now()}`;
     this.heartbeatIntervalMs = config.heartbeatIntervalMs || 30000; // 30s
     this.awayTimeoutMs = config.awayTimeoutMs || 300000; // 5 min
@@ -465,13 +466,13 @@ export class PresenceService extends EventEmitter {
     const cutoff = new Date(Date.now() - this.offlineTimeoutMs);
 
     try {
-      // Clean up database entries
+      // Clean up database entries using raw SQL for postgres.js Date compatibility
       await db
         .update(userPresence)
         .set({ status: 'offline' })
         .where(
           and(
-            lt(userPresence.lastSeen, cutoff),
+            sql`${userPresence.lastSeen} < ${cutoff.toISOString()}`,
             eq(userPresence.status, 'online')
           )
         );
@@ -493,19 +494,21 @@ export class PresenceService extends EventEmitter {
    */
   private async persistPresence(data: UserPresenceData): Promise<void> {
     try {
+      // Convert Date to ISO string for postgres.js compatibility
+      const lastSeenStr = data.lastSeen.toISOString();
       await db
         .insert(userPresence)
         .values({
           userDid: data.userDid,
           status: data.status,
-          lastSeen: data.lastSeen,
+          lastSeen: lastSeenStr,
           currentConversationId: data.currentContext || null,
         })
         .onConflictDoUpdate({
           target: userPresence.userDid,
           set: {
             status: data.status,
-            lastSeen: data.lastSeen,
+            lastSeen: lastSeenStr,
             currentConversationId: data.currentContext || null,
           },
         });

@@ -128,7 +128,7 @@ export class ChallengeLeaderboardCalculator {
     }
 
     try {
-      const now = new Date();
+      const now = new Date().toISOString();
 
       // Upcoming -> Active (when startAt is reached)
       await executeRawSql(sql`

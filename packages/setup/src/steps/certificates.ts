@@ -74,7 +74,7 @@ export async function initializeCertificates(
       organization: options?.intermediateCA?.organization || 'Exprsn',
       organizationalUnit: 'Entity Signing',
       validityDays: options?.intermediateCA?.validityDays || 3650, // 10 years
-      pathLen: 0, // Cannot sign other CAs
+      pathLength: 0, // Cannot sign other CAs
     });
 
     return {

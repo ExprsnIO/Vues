@@ -147,7 +147,7 @@ async function getAdminStats(): Promise<AdminStats> {
       db
         .select({ count: count() })
         .from(userPresence)
-        .where(gte(userPresence.lastSeen, new Date(now - 5 * 60 * 1000))),
+        .where(sql`${userPresence.lastSeen} >= ${new Date(now - 5 * 60 * 1000).toISOString()}`),
     ]);
 
     // Check system health
