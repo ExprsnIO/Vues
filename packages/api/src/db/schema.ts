@@ -6054,3 +6054,149 @@ export type CertificatePin = typeof certificatePins.$inferSelect;
 export type NewCertificatePin = typeof certificatePins.$inferInsert;
 export type PinViolationReport = typeof pinViolationReports.$inferSelect;
 export type NewPinViolationReport = typeof pinViolationReports.$inferInsert;
+
+// ============================================
+// AT Protocol Repository System
+// ============================================
+
+// Repositories - AT Protocol user data repositories
+export const repositories = pgTable(
+  'repositories',
+  {
+    did: text('did').primaryKey(),
+    head: text('head'), // CID of latest commit
+    rev: integer('rev').default(0).notNull(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    didIdx: uniqueIndex('repositories_did_idx').on(table.did),
+    updatedAtIdx: index('repositories_updated_at_idx').on(table.updatedAt),
+  })
+);
+
+// Repository records - individual records in AT Protocol collections
+export const repoRecords = pgTable(
+  'repo_records',
+  {
+    uri: text('uri').primaryKey(), // at://did/collection/rkey
+    did: text('did')
+      .notNull()
+      .references(() => repositories.did, { onDelete: 'cascade' }),
+    collection: text('collection').notNull(), // e.g., io.exprsn.video.post
+    rkey: text('rkey').notNull(), // record key (TID or custom)
+    cid: text('cid').notNull(), // content identifier
+    value: jsonb('value').notNull(), // record content
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    indexedAt: timestamp('indexed_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    didCollectionIdx: index('repo_records_did_collection_idx').on(table.did, table.collection),
+    collectionIdx: index('repo_records_collection_idx').on(table.collection),
+    cidIdx: index('repo_records_cid_idx').on(table.cid),
+    rkeyIdx: index('repo_records_rkey_idx').on(table.did, table.collection, table.rkey),
+    createdIdx: index('repo_records_created_idx').on(table.createdAt),
+    uniqueRecordIdx: uniqueIndex('repo_records_unique_idx').on(table.did, table.collection, table.rkey),
+  })
+);
+
+// Repository blobs - binary content stored with repositories
+export const repoBlobs = pgTable(
+  'repo_blobs',
+  {
+    cid: text('cid').primaryKey(), // content identifier
+    did: text('did')
+      .notNull()
+      .references(() => repositories.did, { onDelete: 'cascade' }),
+    mimeType: text('mime_type').notNull(),
+    size: integer('size').notNull(),
+    url: text('url'), // CDN URL or local path
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    didIdx: index('repo_blobs_did_idx').on(table.did),
+    cidIdx: uniqueIndex('repo_blobs_cid_idx').on(table.cid),
+  })
+);
+
+// Repository commits - history of repository changes
+export const repoCommits = pgTable(
+  'repo_commits',
+  {
+    cid: text('cid').primaryKey(),
+    did: text('did')
+      .notNull()
+      .references(() => repositories.did, { onDelete: 'cascade' }),
+    prev: text('prev'), // previous commit CID
+    data: text('data').notNull(), // MST root CID
+    rev: integer('rev').notNull(),
+    sig: text('sig'), // signature
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    didIdx: index('repo_commits_did_idx').on(table.did),
+    revIdx: index('repo_commits_rev_idx').on(table.did, table.rev),
+    createdIdx: index('repo_commits_created_idx').on(table.createdAt),
+  })
+);
+
+// Sync subscriptions - track firehose subscriptions
+export const syncSubscriptions = pgTable(
+  'sync_subscriptions',
+  {
+    id: text('id').primaryKey(),
+    service: text('service').notNull(), // remote service URL
+    cursor: integer('cursor'), // last processed sequence number
+    status: text('status').default('active').notNull(), // active | paused | error
+    lastSync: timestamp('last_sync'),
+    errorCount: integer('error_count').default(0).notNull(),
+    errorMessage: text('error_message'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    serviceIdx: uniqueIndex('sync_subscriptions_service_idx').on(table.service),
+    statusIdx: index('sync_subscriptions_status_idx').on(table.status),
+  })
+);
+
+// Sync events - firehose events log
+export const syncEvents = pgTable(
+  'sync_events',
+  {
+    id: serial('id').primaryKey(),
+    seq: integer('seq').notNull(), // sequence number
+    did: text('did').notNull(),
+    eventType: text('event_type').notNull(), // commit | identity | account
+    commit: text('commit'), // commit CID
+    ops: jsonb('ops').$type<Array<{
+      action: 'create' | 'update' | 'delete';
+      path: string;
+      cid?: string;
+    }>>(),
+    blocks: jsonb('blocks').$type<Record<string, unknown>>(), // CAR blocks
+    rebase: boolean('rebase').default(false).notNull(),
+    tooBig: boolean('too_big').default(false).notNull(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    seqIdx: uniqueIndex('sync_events_seq_idx').on(table.seq),
+    didIdx: index('sync_events_did_idx').on(table.did),
+    eventTypeIdx: index('sync_events_type_idx').on(table.eventType),
+    createdIdx: index('sync_events_created_idx').on(table.createdAt),
+  })
+);
+
+// Type exports
+export type Repository = typeof repositories.$inferSelect;
+export type NewRepository = typeof repositories.$inferInsert;
+export type RepoRecord = typeof repoRecords.$inferSelect;
+export type NewRepoRecord = typeof repoRecords.$inferInsert;
+export type RepoBlob = typeof repoBlobs.$inferSelect;
+export type NewRepoBlob = typeof repoBlobs.$inferInsert;
+export type RepoCommit = typeof repoCommits.$inferSelect;
+export type NewRepoCommit = typeof repoCommits.$inferInsert;
+export type SyncSubscription = typeof syncSubscriptions.$inferSelect;
+export type NewSyncSubscription = typeof syncSubscriptions.$inferInsert;
+export type SyncEvent = typeof syncEvents.$inferSelect;
+export type NewSyncEvent = typeof syncEvents.$inferInsert;
