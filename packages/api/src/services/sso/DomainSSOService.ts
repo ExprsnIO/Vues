@@ -10,6 +10,7 @@
  */
 
 import { nanoid } from 'nanoid';
+import { promises as dns } from 'dns';
 import { db } from '../../db/index.js';
 import {
   domainSsoConfig,
@@ -35,6 +36,7 @@ export interface DomainSSOConfig {
   defaultRole: string;
   emailDomainVerification: boolean;
   allowedEmailDomains: string[];
+  verificationRecords: Record<string, string>;
   forceReauthAfterHours: number;
   createdAt: Date;
   updatedAt: Date;
@@ -428,23 +430,86 @@ class DomainSSOServiceImpl {
   }
 
   /**
-   * Verify email domain ownership (placeholder - implement DNS verification)
+   * Verify email domain ownership via DNS TXT record
    */
   async verifyEmailDomain(domainId: string, emailDomain: string): Promise<{
     verified: boolean;
     verificationRecord?: string;
     error?: string;
   }> {
-    // Generate verification record
-    const verificationRecord = `exprsn-verify=${nanoid(32)}`;
+    // Get existing verification record or generate new one
+    const config = await this.getConfig(domainId);
+    const existingRecords = (config?.verificationRecords || {}) as Record<string, string>;
+    let verificationRecord = existingRecords[emailDomain];
 
-    // In production, check DNS TXT record
-    // For now, return the record that should be added
-    return {
-      verified: false,
-      verificationRecord,
-      error: `Add TXT record "${verificationRecord}" to ${emailDomain} DNS`,
-    };
+    if (!verificationRecord) {
+      // Generate new verification record
+      verificationRecord = `exprsn-verify=${nanoid(32)}`;
+
+      // Store the verification record for future checks
+      await this.upsertConfig(domainId, {
+        verificationRecords: {
+          ...existingRecords,
+          [emailDomain]: verificationRecord,
+        },
+      });
+    }
+
+    try {
+      // Resolve DNS TXT records for the domain
+      const txtRecords = await dns.resolveTxt(emailDomain);
+
+      // Flatten the nested arrays (TXT records can be chunked)
+      const flatRecords = txtRecords.map((record) => record.join(''));
+
+      // Check if any TXT record matches our verification record
+      const isVerified = flatRecords.some((record) =>
+        record.includes(verificationRecord!)
+      );
+
+      if (isVerified) {
+        // Mark domain as verified by adding to allowed list
+        await this.addAllowedEmailDomain(domainId, emailDomain);
+
+        // Log successful verification
+        await this.logAuditEvent(
+          'email_domain_verified',
+          undefined,
+          domainId,
+          true,
+          { emailDomain }
+        );
+
+        return {
+          verified: true,
+          verificationRecord,
+        };
+      }
+
+      return {
+        verified: false,
+        verificationRecord,
+        error: `TXT record not found. Add "${verificationRecord}" as a TXT record to ${emailDomain}`,
+      };
+    } catch (error) {
+      // DNS lookup failed
+      const errorMessage = error instanceof Error ? error.message : 'DNS lookup failed';
+
+      await this.logAuditEvent(
+        'email_domain_verification_failed',
+        undefined,
+        domainId,
+        false,
+        { emailDomain },
+        errorMessage
+      );
+
+      return {
+        verified: false,
+        verificationRecord,
+        error: `DNS verification failed: ${errorMessage}. Ensure TXT record "${verificationRecord}" exists on ${emailDomain}`,
+      };
+    }
   }
 
   // ==========================================
@@ -482,6 +547,7 @@ class DomainSSOServiceImpl {
       defaultRole: c.defaultRole || 'member',
       emailDomainVerification: c.emailDomainVerification ?? true,
       allowedEmailDomains: (c.allowedEmailDomains as string[]) || [],
+      verificationRecords: (c.verificationRecords as Record<string, string>) || {},
       forceReauthAfterHours: c.forceReauthAfterHours || 24,
       createdAt: c.createdAt,
       updatedAt: c.updatedAt,

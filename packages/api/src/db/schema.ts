@@ -5695,6 +5695,7 @@ export const domainSsoConfig = pgTable(
     // Email domain enforcement
     emailDomainVerification: boolean('email_domain_verification').default(true),
     allowedEmailDomains: jsonb('allowed_email_domains').$type<string[]>().default([]),
+    verificationRecords: jsonb('verification_records').$type<Record<string, string>>().default({}),
 
     // Session settings
     forceReauthAfterHours: integer('force_reauth_after_hours').default(24),

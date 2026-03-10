@@ -7,6 +7,9 @@
 import { Context, Next } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { redis, CacheKeys } from '../cache/redis.js';
+import { db } from '../db/index.js';
+import { organizationMembers, organizationBilling } from '../db/schema.js';
+import { eq, and, desc } from 'drizzle-orm';
 
 // ==================== IP-BASED RATE LIMITING ====================
 
@@ -225,6 +228,55 @@ export const UPLOAD_QUOTAS = {
 } as const;
 
 /**
+ * Get user's subscription tier based on organization memberships
+ * Returns the highest tier the user has access to
+ */
+async function getUserSubscriptionTier(userDid: string): Promise<keyof typeof UPLOAD_QUOTAS> {
+  try {
+    // Check user's organization memberships and their billing tiers
+    const memberships = await db
+      .select({
+        subscriptionTier: organizationBilling.subscriptionTier,
+      })
+      .from(organizationMembers)
+      .innerJoin(
+        organizationBilling,
+        eq(organizationMembers.organizationId, organizationBilling.organizationId)
+      )
+      .where(
+        and(
+          eq(organizationMembers.userDid, userDid),
+          eq(organizationMembers.status, 'active')
+        )
+      );
+
+    // Map organization tiers to upload quota tiers
+    const tierPriority: Record<string, keyof typeof UPLOAD_QUOTAS> = {
+      enterprise: 'pro',
+      pro: 'pro',
+      starter: 'creator',
+      free: 'user',
+    };
+
+    // Find the highest tier
+    let highestTier: keyof typeof UPLOAD_QUOTAS = 'user';
+    const tierOrder: (keyof typeof UPLOAD_QUOTAS)[] = ['user', 'creator', 'pro'];
+
+    for (const membership of memberships) {
+      const mappedTier = tierPriority[membership.subscriptionTier] || 'user';
+      if (tierOrder.indexOf(mappedTier) > tierOrder.indexOf(highestTier)) {
+        highestTier = mappedTier;
+      }
+    }
+
+    return highestTier;
+  } catch (error) {
+    console.warn('[Security] Failed to check subscription tier:', error);
+    return 'user';
+  }
+}
+
+/**
  * Get upload quota for a user
  */
 export async function getUploadQuota(userDid: string): Promise<{
@@ -234,9 +286,8 @@ export async function getUploadQuota(userDid: string): Promise<{
   dailyUsed: number;
   hourlyUsed: number;
 }> {
-  // TODO: Check user subscription tier from database
-  // For now, use default user quotas
-  const tier: keyof typeof UPLOAD_QUOTAS = 'user';
+  // Check user subscription tier from database
+  const tier = await getUserSubscriptionTier(userDid);
   const quotas = UPLOAD_QUOTAS[tier];
 
   try {

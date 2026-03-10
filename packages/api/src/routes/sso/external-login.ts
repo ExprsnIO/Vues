@@ -15,7 +15,7 @@ import { OIDCConsumerService } from '../../services/sso/OIDCConsumerService.js';
 import { authMiddleware, optionalAuthMiddleware, adminAuthMiddleware, ADMIN_PERMISSIONS, requirePermission } from '../../auth/middleware.js';
 import { nanoid } from 'nanoid';
 import { db } from '../../db/index.js';
-import { users, actorRepos } from '../../db/schema.js';
+import { users, actorRepos, sessions } from '../../db/schema.js';
 import { eq } from 'drizzle-orm';
 
 const app = new Hono();
@@ -171,11 +171,18 @@ app.get('/auth/callback', async (c) => {
       }
     }
 
-    // Create session and redirect
-    // In a real implementation, create a session token here
+    // Create session and store in database
     const sessionToken = nanoid(48);
+    const refreshToken = nanoid(64);
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
 
-    // TODO: Store session in database
+    await db.insert(sessions).values({
+      id: nanoid(),
+      did: userDid,
+      accessJwt: sessionToken,
+      refreshJwt: refreshToken,
+      expiresAt,
+    });
 
     // Redirect to app with session token
     const redirectUrl = new URL(

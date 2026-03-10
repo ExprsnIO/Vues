@@ -6,7 +6,7 @@
 import { Queue, Worker, Job } from 'bullmq';
 import { db } from '../../db/index.js';
 import { uploadJobs, deadLetterQueue } from '../../db/schema.js';
-import { eq } from 'drizzle-orm';
+import { eq, and, or, count, desc, gte, lt, isNotNull, type SQL } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import { redis } from '../../cache/redis.js';
 import { getTranscodeWebhooks } from './TranscodeWebhooks.js';
@@ -303,7 +303,7 @@ export class DeadLetterQueueService {
   }
 
   /**
-   * Get DLQ entries with pagination
+   * Get DLQ entries with pagination and filtering
    */
   async listEntries(options: {
     limit?: number;
@@ -316,12 +316,33 @@ export class DeadLetterQueueService {
   }> {
     const { limit = 20, offset = 0, errorType, canRequeue } = options;
 
-    let query = db.select().from(deadLetterQueue);
+    // Build filter conditions
+    const conditions: SQL[] = [];
+    if (errorType) {
+      conditions.push(eq(deadLetterQueue.failureReason, errorType));
+    }
+    if (canRequeue !== undefined) {
+      conditions.push(eq(deadLetterQueue.canRequeue, canRequeue));
+    }
 
-    // Note: In a real implementation, you'd add proper filtering
-    const entries = await query.limit(limit).offset(offset);
+    const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
 
-    const total = entries.length; // Would need a count query
+    // Get total count with filters
+    const [countResult] = await db
+      .select({ count: count() })
+      .from(deadLetterQueue)
+      .where(whereClause);
+
+    const total = countResult?.count ?? 0;
+
+    // Get paginated entries with filters
+    const entries = await db
+      .select()
+      .from(deadLetterQueue)
+      .where(whereClause)
+      .orderBy(desc(deadLetterQueue.failedAt))
+      .limit(limit)
+      .offset(offset);
 
     return {
       entries: entries.map((e) => ({
@@ -344,28 +365,46 @@ export class DeadLetterQueueService {
    * Get DLQ statistics
    */
   async getStats(): Promise<DLQStats> {
-    const entries = await db.select().from(deadLetterQueue);
-
     const now = new Date();
     const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
 
-    const last24Hours = entries.filter(
-      (e) => e.failedAt >= oneDayAgo
-    ).length;
+    // Get total count
+    const [totalResult] = await db
+      .select({ count: count() })
+      .from(deadLetterQueue);
+    const totalCount = totalResult?.count ?? 0;
+
+    // Get last 24 hours count
+    const [last24HoursResult] = await db
+      .select({ count: count() })
+      .from(deadLetterQueue)
+      .where(gte(deadLetterQueue.failedAt, oneDayAgo));
+    const last24Hours = last24HoursResult?.count ?? 0;
+
+    // Get counts by error type
+    const errorTypeCounts = await db
+      .select({
+        failureReason: deadLetterQueue.failureReason,
+        count: count(),
+      })
+      .from(deadLetterQueue)
+      .groupBy(deadLetterQueue.failureReason);
 
     const byErrorType: Record<string, number> = {};
-    for (const entry of entries) {
-      byErrorType[entry.failureReason] = (byErrorType[entry.failureReason] || 0) + 1;
+    for (const row of errorTypeCounts) {
+      byErrorType[row.failureReason] = row.count;
     }
 
-    const oldestEntry = entries.length > 0
-      ? entries.reduce((oldest, e) =>
-          e.failedAt < oldest.failedAt ? e : oldest
-        ).failedAt
-      : undefined;
+    // Get oldest entry
+    const [oldestResult] = await db
+      .select({ failedAt: deadLetterQueue.failedAt })
+      .from(deadLetterQueue)
+      .orderBy(deadLetterQueue.failedAt)
+      .limit(1);
+    const oldestEntry = oldestResult?.failedAt;
 
     return {
-      totalCount: entries.length,
+      totalCount,
       last24Hours,
       byErrorType,
       oldestEntry,
@@ -379,18 +418,36 @@ export class DeadLetterQueueService {
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() - olderThanDays);
 
-    // In production, use proper date comparison
-    const entries = await db.select().from(deadLetterQueue);
-    const toDelete = entries.filter(
-      (e) => e.failedAt < cutoff && (e.processedAt || e.requeuedAt)
-    );
+    // Count entries to be deleted first
+    const [countResult] = await db
+      .select({ count: count() })
+      .from(deadLetterQueue)
+      .where(
+        and(
+          lt(deadLetterQueue.failedAt, cutoff),
+          or(
+            isNotNull(deadLetterQueue.processedAt),
+            isNotNull(deadLetterQueue.requeuedAt)
+          )
+        )
+      );
+    const deleteCount = countResult?.count ?? 0;
 
-    for (const entry of toDelete) {
-      await db.delete(deadLetterQueue).where(eq(deadLetterQueue.id, entry.id));
-    }
+    // Delete old entries that have been processed or requeued
+    await db
+      .delete(deadLetterQueue)
+      .where(
+        and(
+          lt(deadLetterQueue.failedAt, cutoff),
+          or(
+            isNotNull(deadLetterQueue.processedAt),
+            isNotNull(deadLetterQueue.requeuedAt)
+          )
+        )
+      );
 
-    console.log(`[DLQ] Purged ${toDelete.length} old entries`);
-    return toDelete.length;
+    console.log(`[DLQ] Purged ${deleteCount} old entries`);
+    return deleteCount;
   }
 }
 

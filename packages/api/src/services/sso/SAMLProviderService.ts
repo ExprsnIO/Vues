@@ -10,6 +10,7 @@
  */
 
 import { nanoid } from 'nanoid';
+import { SignedXml } from 'xml-crypto';
 import { db } from '../../db/index.js';
 import {
   samlServiceProviders,
@@ -17,6 +18,7 @@ import {
   users,
   actorRepos,
   ssoAuditLog,
+  caEntityCertificates,
 } from '../../db/schema.js';
 import { eq, and, isNull, lte } from 'drizzle-orm';
 import crypto from 'crypto';
@@ -37,6 +39,7 @@ export interface SAMLServiceProvider {
   extraAttributes?: Array<{ name: string; value: string }>;
   signAssertions: boolean;
   signResponse: boolean;
+  signingCertId?: string;
   status: string;
 }
 
@@ -336,10 +339,10 @@ class SAMLProviderServiceImpl {
       },
     });
 
-    // Sign if required (placeholder - in production, use proper XML signing)
+    // Sign if required
     let signedResponse = responseXml;
     if (sp.signResponse || sp.signAssertions) {
-      signedResponse = await this.signXml(responseXml);
+      signedResponse = await this.signXml(responseXml, sp.signingCertId);
     }
 
     // Base64 encode
@@ -644,6 +647,7 @@ class SAMLProviderServiceImpl {
       extraAttributes: (sp.extraAttributes as Array<{ name: string; value: string }>) || [],
       signAssertions: sp.signAssertions ?? true,
       signResponse: sp.signResponse ?? true,
+      signingCertId: sp.signingCertId || undefined,
       status: sp.status || 'active',
     };
   }
@@ -799,11 +803,54 @@ class SAMLProviderServiceImpl {
     }
   }
 
-  private async signXml(xml: string): Promise<string> {
-    // Placeholder for XML signing
-    // In production, use xml-crypto or similar library with CA certificates
-    // For now, return unsigned XML
-    return xml;
+  private async signXml(xml: string, signingCertId?: string): Promise<string> {
+    // If no signing cert configured, return unsigned
+    if (!signingCertId) {
+      console.warn('[SAML] No signing certificate configured, returning unsigned XML');
+      return xml;
+    }
+
+    // Fetch the signing certificate and private key
+    const [cert] = await db
+      .select()
+      .from(caEntityCertificates)
+      .where(eq(caEntityCertificates.id, signingCertId));
+
+    if (!cert || cert.status !== 'active') {
+      console.error('[SAML] Signing certificate not found or inactive:', signingCertId);
+      return xml;
+    }
+
+    try {
+      // Create SignedXml instance
+      const sig = new SignedXml({
+        privateKey: cert.privateKey,
+        publicCert: cert.certificate,
+        signatureAlgorithm: 'http://www.w3.org/2001/04/xmldsig-more#rsa-sha256',
+        canonicalizationAlgorithm: 'http://www.w3.org/2001/10/xml-exc-c14n#',
+      });
+
+      // Add reference to the Response element
+      sig.addReference({
+        xpath: "//*[local-name(.)='Response']",
+        digestAlgorithm: 'http://www.w3.org/2001/04/xmlenc#sha256',
+        transforms: [
+          'http://www.w3.org/2000/09/xmldsig#enveloped-signature',
+          'http://www.w3.org/2001/10/xml-exc-c14n#',
+        ],
+      });
+
+      // Compute signature
+      sig.computeSignature(xml, {
+        location: { reference: "//*[local-name(.)='Issuer']", action: 'after' },
+      });
+
+      return sig.getSignedXml();
+    } catch (error) {
+      console.error('[SAML] Failed to sign XML:', error);
+      // Return unsigned on error to prevent service disruption
+      return xml;
+    }
   }
 
   private async logAuditEvent(

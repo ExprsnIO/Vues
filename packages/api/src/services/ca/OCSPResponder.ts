@@ -44,6 +44,9 @@ export interface OCSPSingleResponse {
   nextUpdate: Date;
   revocationTime?: Date;
   revocationReason?: string;
+  // Issuer hashes from the request (for response building)
+  issuerNameHash?: string;
+  issuerKeyHash?: string;
 }
 
 export interface OCSPResponse {
@@ -262,7 +265,12 @@ export class OCSPResponder {
 
     for (const certId of request.requestList) {
       const status = await this.checkCertificateStatus(certId.serialNumber);
-      responses.push(status);
+      // Include issuer hashes from the request for response building
+      responses.push({
+        ...status,
+        issuerNameHash: certId.issuerNameHash,
+        issuerKeyHash: certId.issuerKeyHash,
+      });
     }
 
     return {
@@ -384,6 +392,29 @@ export class OCSPResponder {
     for (const resp of response.responses) {
       const certStatus = this.buildCertStatus(resp);
 
+      // Use issuer hashes from request, or compute from responder cert as fallback
+      let issuerNameHashBytes: string;
+      let issuerKeyHashBytes: string;
+
+      if (resp.issuerNameHash && resp.issuerKeyHash) {
+        // Use hashes from the original request
+        issuerNameHashBytes = forge.util.hexToBytes(resp.issuerNameHash);
+        issuerKeyHashBytes = forge.util.hexToBytes(resp.issuerKeyHash);
+      } else {
+        // Compute from responder certificate (fallback)
+        const nameHash = forge.md.sha256.create();
+        nameHash.update(forge.asn1.toDer(
+          forge.pki.distinguishedNameToAsn1(responderCert.subject)
+        ).getBytes());
+        issuerNameHashBytes = nameHash.digest().getBytes();
+
+        const keyHash = forge.md.sha256.create();
+        keyHash.update(forge.asn1.toDer(
+          responderCert.publicKey as unknown as forge.asn1.Asn1
+        ).getBytes());
+        issuerKeyHashBytes = keyHash.digest().getBytes();
+      }
+
       singleResponses.push(forge.asn1.create(forge.asn1.Class.UNIVERSAL, forge.asn1.Type.SEQUENCE, true, [
         // certID
         forge.asn1.create(forge.asn1.Class.UNIVERSAL, forge.asn1.Type.SEQUENCE, true, [
@@ -392,12 +423,12 @@ export class OCSPResponder {
             forge.asn1.create(forge.asn1.Class.UNIVERSAL, forge.asn1.Type.OID, false,
               forge.asn1.oidToDer('2.16.840.1.101.3.4.2.1').getBytes()),
           ]),
-          // issuerNameHash (placeholder)
+          // issuerNameHash
           forge.asn1.create(forge.asn1.Class.UNIVERSAL, forge.asn1.Type.OCTETSTRING, false,
-            forge.util.hexToBytes('0'.repeat(64))),
-          // issuerKeyHash (placeholder)
+            issuerNameHashBytes),
+          // issuerKeyHash
           forge.asn1.create(forge.asn1.Class.UNIVERSAL, forge.asn1.Type.OCTETSTRING, false,
-            forge.util.hexToBytes('0'.repeat(64))),
+            issuerKeyHashBytes),
           // serialNumber
           forge.asn1.create(forge.asn1.Class.UNIVERSAL, forge.asn1.Type.INTEGER, false,
             forge.util.hexToBytes(resp.serialNumber)),

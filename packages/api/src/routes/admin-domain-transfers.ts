@@ -9,6 +9,8 @@ import {
   organizations,
   users,
   domainActivityLog,
+  organizationMembers,
+  notifications,
   type DomainTransfer,
 } from '../db/schema.js';
 import {
@@ -19,6 +21,52 @@ import {
 import { notifyAdmins, broadcastAdminActivity } from '../websocket/admin.js';
 
 export const adminDomainTransfersRouter = new Hono();
+
+/**
+ * Notify organization admins about domain transfer events
+ */
+async function notifyOrgAdmins(
+  organizationId: string,
+  actorDid: string,
+  reason: string,
+  reasonSubject: string,
+  targetUri: string
+): Promise<void> {
+  // Get organization admins (owners and admins)
+  const orgAdmins = await db
+    .select({ userDid: organizationMembers.userDid })
+    .from(organizationMembers)
+    .where(
+      and(
+        eq(organizationMembers.organizationId, organizationId),
+        eq(organizationMembers.status, 'active'),
+        or(
+          eq(organizationMembers.role, 'owner'),
+          eq(organizationMembers.role, 'admin')
+        )
+      )
+    );
+
+  if (orgAdmins.length === 0) {
+    console.warn(`[DomainTransfer] No admins found for organization ${organizationId}`);
+    return;
+  }
+
+  // Create in-app notifications for each admin
+  const notificationValues = orgAdmins.map((admin) => ({
+    id: nanoid(),
+    userDid: admin.userDid,
+    actorDid,
+    reason,
+    reasonSubject,
+    targetUri,
+    isRead: false,
+    createdAt: new Date(),
+    indexedAt: new Date(),
+  }));
+
+  await db.insert(notifications).values(notificationValues);
+}
 
 // Apply admin auth middleware
 adminDomainTransfersRouter.use('*', adminAuthMiddleware);
@@ -157,7 +205,16 @@ adminDomainTransfersRouter.post(
 
     // Send notifications to target org/user admins
     if (body.targetOrganizationId) {
-      // TODO: Notify organization admins about incoming transfer request
+      // Notify organization admins about incoming transfer request
+      await notifyOrgAdmins(
+        body.targetOrganizationId,
+        actorDid,
+        'domain_transfer_incoming',
+        `domain:${body.domainId}`,
+        `at://transfer/${transferId}`
+      );
+
+      // Also broadcast to system admins
       await notifyAdmins({
         type: 'domain_transfer_incoming',
         title: 'Incoming Domain Transfer',

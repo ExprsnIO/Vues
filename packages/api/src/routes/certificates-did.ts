@@ -9,8 +9,8 @@ import { HTTPException } from 'hono/http-exception';
 import { ExprsnDidService } from '../services/did/index.js';
 import { authMiddleware, optionalAuthMiddleware } from '../auth/middleware.js';
 import { db } from '../db/index.js';
-import { exprsnDidCertificates, actorRepos } from '../db/schema.js';
-import { eq } from 'drizzle-orm';
+import { exprsnDidCertificates, actorRepos, adminUsers } from '../db/schema.js';
+import { eq, and } from 'drizzle-orm';
 
 type AuthContext = {
   Variables: {
@@ -203,16 +203,22 @@ certificatesDidRoutes.post('/io.exprsn.did.revokeDid', authMiddleware, async (c)
 
   // If revoking someone else's DID, check admin permissions
   if (targetDid !== userDid) {
-    // Get admin status from actor_repos (simplified - real implementation would check admin roles)
-    const adminCheck = await db
+    // Check if user is an admin with appropriate permissions
+    const [adminUser] = await db
       .select()
-      .from(actorRepos)
-      .where(eq(actorRepos.did, userDid))
+      .from(adminUsers)
+      .where(
+        and(
+          eq(adminUsers.userDid, userDid),
+          eq(adminUsers.status, 'active')
+        )
+      )
       .limit(1);
 
-    // For now, only allow self-revocation
-    // TODO: Add proper admin check
-    throw new HTTPException(403, { message: 'Cannot revoke another user\'s DID' });
+    // Only super_admin and admin roles can revoke other users' DIDs
+    if (!adminUser || !['super_admin', 'admin'].includes(adminUser.role)) {
+      throw new HTTPException(403, { message: 'Cannot revoke another user\'s DID - admin privileges required' });
+    }
   }
 
   if (!targetDid.startsWith('did:exprsn:')) {
