@@ -5,6 +5,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { formatCount } from '@/lib/utils';
 import { api } from '@/lib/api';
 import { ExportButton } from '@/components/admin/ExportModal';
+import { AdminChart } from '@/components/admin/charts/AdminChart';
 
 type TabType = 'jobs' | 'workers' | 'quotas' | 'batches';
 type JobStatus = 'all' | 'pending' | 'rendering' | 'completed' | 'failed' | 'paused';
@@ -421,6 +422,16 @@ export default function RenderPipelineAdmin() {
           ))}
         </div>
       </div>
+
+      {/* Render Jobs Chart */}
+      <AdminChart
+        title="Render Jobs Over Time"
+        metric="renders"
+        type="bar"
+        defaultPeriod="7d"
+        color="#8b5cf6"
+        height={200}
+      />
 
       {/* Tabs */}
       <div className="border-b border-border">

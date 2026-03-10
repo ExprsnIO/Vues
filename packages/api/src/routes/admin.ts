@@ -28,6 +28,7 @@ import {
   domainDnsRecords,
   domainHealthChecks,
   domainHealthSummaries,
+  renderJobs,
   type AdminUser,
 } from '../db/schema.js';
 import {
@@ -3688,8 +3689,15 @@ adminRouter.get(
           countResult = [{ count: Math.floor(dailyAvg * (0.7 + Math.random() * 0.6)) }];
           break;
         case 'renders':
-          // Use render jobs table if exists, or estimate
-          countResult = [{ count: Math.floor(Math.random() * 50 + 10) }];
+          countResult = await db
+            .select({ count: count() })
+            .from(renderJobs)
+            .where(
+              and(
+                gte(renderJobs.createdAt, dayStart),
+                lte(renderJobs.createdAt, dayEnd)
+              )
+            );
           break;
       }
 

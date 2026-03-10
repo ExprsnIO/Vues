@@ -8,6 +8,7 @@ import { api } from '@/lib/api';
 import { useAdminDomain } from '@/lib/admin-domain-context';
 import { formatCount } from '@/lib/utils';
 import toast from 'react-hot-toast';
+import { AdminChart } from '@/components/admin/charts/AdminChart';
 
 export default function DomainDashboardPage() {
   const params = useParams();
@@ -148,6 +149,24 @@ export default function DomainDashboardPage() {
           value="0"
           icon={ReportsIcon}
           href={`/admin/d/${domainId}/reports`}
+        />
+      </div>
+
+      {/* Growth Charts */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <AdminChart
+          title="User Growth"
+          metric="users"
+          domainId={domainId}
+          fill
+          color="#3b82f6"
+        />
+        <AdminChart
+          title="Video Uploads"
+          metric="videos"
+          domainId={domainId}
+          fill
+          color="#8b5cf6"
         />
       </div>
 
