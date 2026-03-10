@@ -3963,6 +3963,251 @@ class ApiClient {
     return this.fetch(`/xrpc/io.exprsn.admin.gpu.metrics?${params.toString()}`);
   }
 
+  // =============================================
+  // Global SSO Providers API
+  // =============================================
+
+  async adminAuthListProviders(options?: {
+    search?: string;
+    type?: string;
+    status?: string;
+  }): Promise<{
+    providers: Array<{
+      id: string;
+      name: string;
+      type: 'oauth2' | 'oidc' | 'saml' | 'ldap';
+      status: 'active' | 'inactive' | 'testing';
+      description?: string;
+      domainCount: number;
+      lastUsedAt?: string;
+      createdAt: string;
+    }>;
+    stats: {
+      total: number;
+      active: number;
+      oauth: number;
+      samlLdap: number;
+    };
+  }> {
+    const params = new URLSearchParams();
+    if (options?.search) params.set('search', options.search);
+    if (options?.type) params.set('type', options.type);
+    if (options?.status) params.set('status', options.status);
+    return this.fetch(`/xrpc/io.exprsn.admin.auth.listProviders?${params.toString()}`);
+  }
+
+  async adminAuthGetProvider(providerId: string): Promise<{
+    provider: {
+      id: string;
+      name: string;
+      type: string;
+      status: string;
+      description?: string;
+      clientId?: string;
+      issuerUrl?: string;
+      authorizationUrl?: string;
+      tokenUrl?: string;
+      userInfoUrl?: string;
+      scopes?: string[];
+      attributeMapping?: Record<string, string>;
+      domainCount: number;
+      lastUsedAt?: string;
+      createdAt: string;
+    };
+  }> {
+    return this.fetch(`/xrpc/io.exprsn.admin.auth.getProvider?providerId=${providerId}`);
+  }
+
+  async adminAuthCreateProvider(data: {
+    name: string;
+    type: 'oauth2' | 'oidc' | 'saml' | 'ldap';
+    clientId?: string;
+    clientSecret?: string;
+    issuerUrl?: string;
+    authorizationUrl?: string;
+    tokenUrl?: string;
+    userInfoUrl?: string;
+    scopes?: string[];
+    attributeMapping?: Record<string, string>;
+  }): Promise<{ provider: any }> {
+    return this.fetch('/xrpc/io.exprsn.admin.auth.createProvider', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async adminAuthUpdateProvider(providerId: string, data: Partial<{
+    name: string;
+    status: string;
+    description: string;
+    clientId: string;
+    clientSecret: string;
+    issuerUrl: string;
+    authorizationUrl: string;
+    tokenUrl: string;
+    userInfoUrl: string;
+    scopes: string[];
+    attributeMapping: Record<string, string>;
+  }>): Promise<{ provider: any }> {
+    return this.fetch('/xrpc/io.exprsn.admin.auth.updateProvider', {
+      method: 'POST',
+      body: JSON.stringify({ providerId, ...data }),
+    });
+  }
+
+  async adminAuthDeleteProvider(providerId: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.auth.deleteProvider', {
+      method: 'POST',
+      body: JSON.stringify({ providerId }),
+    });
+  }
+
+  // =============================================
+  // Platform Directories API
+  // =============================================
+
+  async adminDirectoriesList(search?: string): Promise<{
+    directories: Array<{
+      id: string;
+      name: string;
+      url: string;
+      description?: string;
+      status: 'online' | 'offline' | 'syncing' | 'error';
+      isPrimary: boolean;
+      version?: string;
+      recordCount: number;
+      lastSyncAt?: string;
+      createdAt: string;
+    }>;
+    stats: {
+      total: number;
+      online: number;
+      syncing: number;
+      totalRecords: number;
+    };
+  }> {
+    const params = new URLSearchParams();
+    if (search) params.set('search', search);
+    return this.fetch(`/xrpc/io.exprsn.admin.directories.list?${params.toString()}`);
+  }
+
+  async adminDirectoriesGet(directoryId: string): Promise<{
+    directory: {
+      id: string;
+      name: string;
+      url: string;
+      description?: string;
+      status: string;
+      isPrimary: boolean;
+      version?: string;
+      recordCount: number;
+      syncEnabled: boolean;
+      syncIntervalMinutes?: number;
+      lastSyncAt?: string;
+      lastSyncError?: string;
+      healthStatus?: string;
+      responseTimeMs?: number;
+      createdAt: string;
+    };
+  }> {
+    return this.fetch(`/xrpc/io.exprsn.admin.directories.get?directoryId=${directoryId}`);
+  }
+
+  async adminDirectoriesCreate(data: {
+    name: string;
+    url: string;
+    description?: string;
+    isPrimary?: boolean;
+  }): Promise<{ directory: any }> {
+    return this.fetch('/xrpc/io.exprsn.admin.directories.create', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async adminDirectoriesUpdate(directoryId: string, data: Partial<{
+    name: string;
+    url: string;
+    description: string;
+    isPrimary: boolean;
+    syncEnabled: boolean;
+    syncIntervalMinutes: number;
+  }>): Promise<{ directory: any }> {
+    return this.fetch('/xrpc/io.exprsn.admin.directories.update', {
+      method: 'POST',
+      body: JSON.stringify({ directoryId, ...data }),
+    });
+  }
+
+  async adminDirectoriesSync(directoryId: string): Promise<{ directory: any; message: string }> {
+    return this.fetch('/xrpc/io.exprsn.admin.directories.sync', {
+      method: 'POST',
+      body: JSON.stringify({ directoryId }),
+    });
+  }
+
+  async adminDirectoriesDelete(directoryId: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.directories.delete', {
+      method: 'POST',
+      body: JSON.stringify({ directoryId }),
+    });
+  }
+
+  // =============================================
+  // Live Streams Admin API
+  // =============================================
+
+  async adminLiveStats(): Promise<{
+    currentlyLive: number;
+    totalViewers: number;
+    scheduledStreams: number;
+    streamsToday: number;
+    peakConcurrentViewers: number;
+    avgStreamDuration: number;
+  }> {
+    return this.fetch('/xrpc/io.exprsn.admin.live.stats');
+  }
+
+  async adminLiveList(options?: {
+    status?: 'all' | 'live' | 'scheduled' | 'ended';
+    search?: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<{
+    streams: Array<{
+      id: string;
+      title: string;
+      streamerDid: string;
+      streamerHandle?: string;
+      streamerAvatar?: string;
+      status: 'live' | 'scheduled' | 'ended';
+      viewerCount: number;
+      peakViewers: number;
+      startedAt?: string;
+      scheduledAt?: string;
+      endedAt?: string;
+      duration?: number;
+      category?: string;
+      isAgeRestricted: boolean;
+      visibility?: string;
+      createdAt: string;
+    }>;
+  }> {
+    const params = new URLSearchParams();
+    if (options?.status) params.set('status', options.status);
+    if (options?.search) params.set('search', options.search);
+    if (options?.limit) params.set('limit', options.limit.toString());
+    if (options?.offset) params.set('offset', options.offset.toString());
+    return this.fetch(`/xrpc/io.exprsn.admin.live.list?${params.toString()}`);
+  }
+
+  async adminLiveEndStream(streamId: string, reason?: string): Promise<{ success: boolean; message: string }> {
+    return this.fetch('/xrpc/io.exprsn.admin.live.endStream', {
+      method: 'POST',
+      body: JSON.stringify({ streamId, reason }),
+    });
+  }
+
   async adminGPUWorkerDetails(workerId: string): Promise<{
     worker: {
       id: string;

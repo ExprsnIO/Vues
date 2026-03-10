@@ -115,101 +115,31 @@ export default function RenderPipelineAdmin() {
   // Fetch queue stats
   const { data: stats, isLoading: statsLoading } = useQuery({
     queryKey: ['admin', 'render', 'stats'],
-    queryFn: async () => {
-      try {
-        return await api.getRenderQueueStats();
-      } catch {
-        // Mock data for development
-        return {
-          pending: 8,
-          rendering: 3,
-          completed: 245,
-          failed: 12,
-          paused: 2,
-          totalToday: 45,
-          avgWaitTime: 120,
-          avgRenderTime: 340,
-          priorityBreakdown: {
-            urgent: 2,
-            high: 5,
-            normal: 15,
-            low: 3,
-          },
-        } as QueueStats;
-      }
-    },
+    queryFn: () => api.getRenderQueueStats(),
   });
 
   // Fetch jobs
   const { data: jobs, isLoading: jobsLoading } = useQuery({
     queryKey: ['admin', 'render', 'jobs', statusFilter, priorityFilter],
-    queryFn: async () => {
-      try {
-        return await api.listRenderJobs({
-          status: statusFilter === 'all' ? undefined : statusFilter,
-          priority: priorityFilter === 'all' ? undefined : priorityFilter,
-          limit: 50,
-        });
-      } catch {
-        // Mock data
-        return [] as RenderJob[];
-      }
-    },
+    queryFn: () => api.listRenderJobs({
+      status: statusFilter === 'all' ? undefined : statusFilter,
+      priority: priorityFilter === 'all' ? undefined : priorityFilter,
+      limit: 50,
+    }),
     enabled: activeTab === 'jobs',
   });
 
   // Fetch workers
   const { data: workers, isLoading: workersLoading } = useQuery({
     queryKey: ['admin', 'render', 'workers'],
-    queryFn: async () => {
-      try {
-        return await api.listRenderWorkers();
-      } catch {
-        // Mock data
-        return [
-          {
-            id: 'worker-1',
-            hostname: 'render-node-01',
-            status: 'active',
-            concurrency: 2,
-            activeJobs: 2,
-            totalProcessed: 156,
-            failedJobs: 3,
-            avgProcessingTime: 280,
-            gpuEnabled: false,
-            lastHeartbeat: new Date().toISOString(),
-            startedAt: new Date(Date.now() - 86400000).toISOString(),
-          },
-          {
-            id: 'worker-2',
-            hostname: 'render-node-02',
-            status: 'active',
-            concurrency: 2,
-            activeJobs: 1,
-            totalProcessed: 89,
-            failedJobs: 1,
-            avgProcessingTime: 310,
-            gpuEnabled: true,
-            gpuModel: 'NVIDIA RTX 4090',
-            lastHeartbeat: new Date().toISOString(),
-            startedAt: new Date(Date.now() - 43200000).toISOString(),
-          },
-        ] as RenderWorker[];
-      }
-    },
+    queryFn: () => api.listRenderWorkers(),
     enabled: activeTab === 'workers',
   });
 
   // Fetch batches
   const { data: batches, isLoading: batchesLoading } = useQuery({
     queryKey: ['admin', 'render', 'batches'],
-    queryFn: async () => {
-      try {
-        return await api.listRenderBatches();
-      } catch {
-        return [] as RenderBatch[];
-      }
-    },
+    queryFn: () => api.listRenderBatches(),
     enabled: activeTab === 'batches',
   });
 

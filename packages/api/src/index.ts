@@ -65,6 +65,7 @@ import { renderAdminRouter } from './routes/render-admin.js';
 import { presetsRouter } from './routes/presets.js';
 import { clusterAdminRouter } from './routes/cluster-admin.js';
 import { gpuAdminRouter } from './routes/gpu-admin.js';
+import { adminPlatformRouter } from './routes/admin-platform.js';
 import { studioRouter } from './routes/studio.js';
 import { effectsRouter } from './routes/effects.js';
 import soundsRouter from './routes/sounds.js';
@@ -403,6 +404,7 @@ async function main() {
   app.route('/', presetsRouter);
   app.route('/', clusterAdminRouter);
   app.route('/', gpuAdminRouter);
+  app.route('/', adminPlatformRouter);
   app.route('/', plcRouter);
 
   // Initialize OAuth client

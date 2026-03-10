@@ -5930,6 +5930,105 @@ export type DomainMfaSettings = typeof domainMfaSettings.$inferSelect;
 export type NewDomainMfaSettings = typeof domainMfaSettings.$inferInsert;
 
 // ==========================================
+// Global SSO Providers
+// ==========================================
+
+// SSO Providers - Global authentication provider configurations
+export const ssoProviders = pgTable(
+  'sso_providers',
+  {
+    id: text('id').primaryKey(),
+    name: text('name').notNull(),
+    type: text('type').notNull(), // 'oauth2' | 'oidc' | 'saml' | 'ldap'
+    status: text('status').default('inactive').notNull(), // 'active' | 'inactive' | 'testing'
+    description: text('description'),
+
+    // OAuth2/OIDC Settings
+    clientId: text('client_id'),
+    clientSecret: text('client_secret'),
+    issuerUrl: text('issuer_url'),
+    authorizationUrl: text('authorization_url'),
+    tokenUrl: text('token_url'),
+    userInfoUrl: text('user_info_url'),
+    jwksUrl: text('jwks_url'),
+    scopes: jsonb('scopes').$type<string[]>().default(['openid', 'profile', 'email']),
+
+    // SAML Settings
+    samlEntityId: text('saml_entity_id'),
+    samlSsoUrl: text('saml_sso_url'),
+    samlSloUrl: text('saml_slo_url'),
+    samlCertificate: text('saml_certificate'),
+    samlPrivateKey: text('saml_private_key'),
+
+    // LDAP Settings
+    ldapUrl: text('ldap_url'),
+    ldapBindDn: text('ldap_bind_dn'),
+    ldapBindPassword: text('ldap_bind_password'),
+    ldapBaseDn: text('ldap_base_dn'),
+    ldapUserFilter: text('ldap_user_filter'),
+
+    // Attribute Mapping
+    attributeMapping: jsonb('attribute_mapping').$type<Record<string, string>>().default({}),
+
+    // Audit
+    lastUsedAt: timestamp('last_used_at'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    typeIdx: index('sso_providers_type_idx').on(table.type),
+    statusIdx: index('sso_providers_status_idx').on(table.status),
+  })
+);
+
+// ==========================================
+// Platform Directories
+// ==========================================
+
+// Platform Directories - Exprsn directory servers for identity and content discovery
+export const platformDirectories = pgTable(
+  'platform_directories',
+  {
+    id: text('id').primaryKey(),
+    name: text('name').notNull(),
+    url: text('url').notNull(),
+    description: text('description'),
+    status: text('status').default('offline').notNull(), // 'online' | 'offline' | 'syncing' | 'error'
+    isPrimary: boolean('is_primary').default(false).notNull(),
+    version: text('version'),
+    recordCount: integer('record_count').default(0),
+
+    // Sync settings
+    syncEnabled: boolean('sync_enabled').default(true).notNull(),
+    syncIntervalMinutes: integer('sync_interval_minutes').default(15),
+    lastSyncAt: timestamp('last_sync_at'),
+    lastSyncError: text('last_sync_error'),
+    lastSyncDurationMs: integer('last_sync_duration_ms'),
+
+    // Health check
+    lastHealthCheckAt: timestamp('last_health_check_at'),
+    healthStatus: text('health_status'), // 'healthy' | 'degraded' | 'unhealthy'
+    responseTimeMs: integer('response_time_ms'),
+
+    // Configuration
+    config: jsonb('config').$type<Record<string, unknown>>().default({}),
+
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    statusIdx: index('platform_directories_status_idx').on(table.status),
+    primaryIdx: index('platform_directories_primary_idx').on(table.isPrimary),
+  })
+);
+
+// Type exports for SSO and Directories
+export type SsoProvider = typeof ssoProviders.$inferSelect;
+export type NewSsoProvider = typeof ssoProviders.$inferInsert;
+export type PlatformDirectory = typeof platformDirectories.$inferSelect;
+export type NewPlatformDirectory = typeof platformDirectories.$inferInsert;
+
+// ==========================================
 // Video Moderation & Deletion System
 // ==========================================
 

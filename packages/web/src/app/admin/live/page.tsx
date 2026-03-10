@@ -3,6 +3,8 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { formatCount } from '@/lib/utils';
+import { api } from '@/lib/api';
+import toast from 'react-hot-toast';
 
 type StreamStatus = 'all' | 'live' | 'scheduled' | 'ended';
 
@@ -31,88 +33,36 @@ export default function LiveStreamAdmin() {
   const [selectedStream, setSelectedStream] = useState<LiveStream | null>(null);
 
   // Fetch live stats
-  const { data: stats, isLoading: statsLoading } = useQuery({
+  const { data: stats, isLoading: statsLoading, error: statsError } = useQuery({
     queryKey: ['admin', 'live', 'stats'],
-    queryFn: async () => {
-      return {
-        currentlyLive: 12,
-        totalViewers: 4523,
-        scheduledStreams: 8,
-        streamsToday: 45,
-        peakConcurrentViewers: 8921,
-        avgStreamDuration: 62, // minutes
-      };
-    },
+    queryFn: () => api.adminLiveStats(),
   });
 
   // Fetch streams
-  const { data: streams, isLoading: streamsLoading } = useQuery({
-    queryKey: ['admin', 'live', 'streams', statusFilter],
-    queryFn: async () => {
-      const mockStreams: LiveStream[] = [
-        {
-          id: 'stream_001',
-          title: 'Late Night Gaming Session',
-          streamerDid: 'did:web:gamer1.exprsn.io',
-          streamerHandle: 'progamer',
-          status: 'live',
-          viewerCount: 1523,
-          peakViewers: 2100,
-          startedAt: new Date(Date.now() - 3600000).toISOString(),
-          category: 'Gaming',
-          isAgeRestricted: false,
-        },
-        {
-          id: 'stream_002',
-          title: 'Music Production Tutorial',
-          streamerDid: 'did:web:producer.exprsn.io',
-          streamerHandle: 'beatmaker',
-          status: 'live',
-          viewerCount: 892,
-          peakViewers: 1100,
-          startedAt: new Date(Date.now() - 7200000).toISOString(),
-          category: 'Music',
-          isAgeRestricted: false,
-        },
-        {
-          id: 'stream_003',
-          title: 'Upcoming Product Launch',
-          streamerDid: 'did:web:brand.exprsn.io',
-          streamerHandle: 'techbrand',
-          status: 'scheduled',
-          viewerCount: 0,
-          peakViewers: 0,
-          scheduledFor: new Date(Date.now() + 86400000).toISOString(),
-          category: 'Technology',
-          isAgeRestricted: false,
-        },
-        {
-          id: 'stream_004',
-          title: 'Cooking Show - Italian Night',
-          streamerDid: 'did:web:chef.exprsn.io',
-          streamerHandle: 'chefmario',
-          status: 'ended',
-          viewerCount: 0,
-          peakViewers: 3500,
-          startedAt: new Date(Date.now() - 14400000).toISOString(),
-          endedAt: new Date(Date.now() - 7200000).toISOString(),
-          duration: 120,
-          category: 'Food',
-          isAgeRestricted: false,
-        },
-      ];
-      return mockStreams;
-    },
+  const { data: streamsData, isLoading: streamsLoading } = useQuery({
+    queryKey: ['admin', 'live', 'streams', statusFilter, searchQuery],
+    queryFn: () => api.adminLiveList({
+      status: statusFilter,
+      search: searchQuery || undefined,
+      limit: 50,
+    }),
   });
+
+  const streams = streamsData?.streams?.map((s) => ({
+    ...s,
+    scheduledFor: s.scheduledAt,
+  })) as LiveStream[] || [];
 
   // End stream mutation
   const endStreamMutation = useMutation({
-    mutationFn: async (streamId: string) => {
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-    },
+    mutationFn: (streamId: string) => api.adminLiveEndStream(streamId),
     onSuccess: () => {
+      toast.success('Stream ended');
       queryClient.invalidateQueries({ queryKey: ['admin', 'live'] });
       setSelectedStream(null);
+    },
+    onError: (err: Error) => {
+      toast.error(err.message || 'Failed to end stream');
     },
   });
 
