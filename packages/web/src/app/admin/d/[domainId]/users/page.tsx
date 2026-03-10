@@ -8,6 +8,8 @@ import Link from 'next/link';
 import { api } from '@/lib/api';
 import { useAdminDomain } from '@/lib/admin-domain-context';
 import { RowActionMenu } from '@/components/admin/ui/ActionMenu';
+import { FilterBar } from '@/components/admin/ui/FilterBar';
+import { useAdminFilters } from '@/hooks/useAdminFilters';
 import { SuspendUserModal } from '@/components/admin/modals/SuspendUserModal';
 import { BanUserModal } from '@/components/admin/modals/BanUserModal';
 import toast from 'react-hot-toast';
@@ -43,14 +45,18 @@ export default function DomainUsersPage() {
   const domainId = params.domainId as string;
   const { setSelectedDomain } = useAdminDomain();
 
-  const [searchQuery, setSearchQuery] = useState('');
-  const [roleFilter, setRoleFilter] = useState<UserRole | ''>('');
+  const filters = useAdminFilters({
+    syncWithUrl: true,
+  });
+
+  const roleFilter = (filters.filters.role?.[0] || '') as UserRole | '';
+  const includeInheritedAdmins = filters.filters.inherited?.[0] === 'true';
+
   const [showAddUser, setShowAddUser] = useState(false);
   const [selectedUser, setSelectedUser] = useState<DomainUser | null>(null);
   const [selectedUserIds, setSelectedUserIds] = useState<Set<string>>(new Set());
   const [bulkAction, setBulkAction] = useState<'role' | 'remove' | null>(null);
   const [bulkRole, setBulkRole] = useState<UserRole>('member');
-  const [includeInheritedAdmins, setIncludeInheritedAdmins] = useState(false);
   const [activeModal, setActiveModal] = useState<ModalType>(null);
   const [modalUser, setModalUser] = useState<ModalUser>(null);
   const queryClient = useQueryClient();
@@ -196,12 +202,12 @@ export default function DomainUsersPage() {
   const users = useMemo(() => {
     return allUsers.filter((user) => {
       const matchesRole = !roleFilter || user.role === roleFilter;
-      const matchesSearch = !searchQuery ||
-        user.user?.handle?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        user.user?.displayName?.toLowerCase().includes(searchQuery.toLowerCase());
+      const matchesSearch = !filters.search ||
+        user.user?.handle?.toLowerCase().includes(filters.search.toLowerCase()) ||
+        user.user?.displayName?.toLowerCase().includes(filters.search.toLowerCase());
       return matchesRole && matchesSearch;
     });
-  }, [allUsers, roleFilter, searchQuery]);
+  }, [allUsers, roleFilter, filters.search]);
 
   const stats = useMemo(() => ({
     total: allUsers.length,
@@ -239,7 +245,7 @@ export default function DomainUsersPage() {
 
   useEffect(() => {
     setSelectedUserIds(new Set());
-  }, [roleFilter, searchQuery]);
+  }, [roleFilter, filters.search]);
 
   return (
     <div className="space-y-6">
@@ -298,34 +304,32 @@ export default function DomainUsersPage() {
       )}
 
       {/* Filters */}
-      <div className="flex flex-col sm:flex-row gap-4">
-        <input
-          type="text"
-          value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
-          placeholder="Search by handle or name..."
-          className="flex-1 px-4 py-2 bg-surface border border-border rounded-lg text-text-primary placeholder:text-text-muted"
-        />
-        <select
-          value={roleFilter}
-          onChange={(e) => setRoleFilter(e.target.value as UserRole | '')}
-          className="px-4 py-2 bg-surface border border-border rounded-lg text-text-primary"
-        >
-          <option value="">All Roles</option>
-          <option value="admin">Admins</option>
-          <option value="moderator">Moderators</option>
-          <option value="member">Members</option>
-        </select>
-        <label className="flex items-center gap-2 px-4 py-2 bg-surface border border-border rounded-lg text-sm text-text-muted">
-          <input
-            type="checkbox"
-            checked={includeInheritedAdmins}
-            onChange={(e) => setIncludeInheritedAdmins(e.target.checked)}
-            className="w-4 h-4 rounded border-border text-accent focus:ring-accent"
-          />
-          Include inherited admins
-        </label>
-      </div>
+      <FilterBar
+        filters={filters}
+        filterConfig={[
+          {
+            key: 'role',
+            label: 'Role',
+            multiple: false,
+            options: [
+              { value: 'admin', label: 'Admins' },
+              { value: 'moderator', label: 'Moderators' },
+              { value: 'member', label: 'Members' },
+            ],
+          },
+          {
+            key: 'inherited',
+            label: 'Source',
+            multiple: false,
+            options: [
+              { value: 'true', label: 'Include inherited' },
+              { value: 'false', label: 'Domain only' },
+            ],
+          },
+        ]}
+        searchPlaceholder="Search by handle or name..."
+        pageKey={`domain-${domainId}-users`}
+      />
 
       {/* Users List */}
       {isLoading ? (

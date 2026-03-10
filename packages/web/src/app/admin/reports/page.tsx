@@ -1,20 +1,28 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api';
 import { ExportButton } from '@/components/admin/ExportModal';
+import { FilterBar } from '@/components/admin/ui/FilterBar';
+import { useAdminFilters } from '@/hooks/useAdminFilters';
 import toast from 'react-hot-toast';
 
 export default function AdminReportsPage() {
-  const [status, setStatus] = useState('pending');
-  const [contentType, setContentType] = useState('');
-  const [reason, setReason] = useState('');
   const [selectedReport, setSelectedReport] = useState<any>(null);
   const queryClient = useQueryClient();
 
+  const filters = useAdminFilters({
+    defaultFilters: { status: ['pending'] },
+    syncWithUrl: true,
+  });
+
+  const status = filters.filters.status?.[0] || 'pending';
+  const contentType = filters.filters.contentType?.[0] || '';
+  const reason = filters.filters.reason?.[0] || '';
+
   const { data, isLoading } = useQuery({
-    queryKey: ['admin', 'reports', { status, contentType, reason }],
+    queryKey: ['admin', 'reports', { status, contentType, reason, search: filters.search }],
     queryFn: () =>
       api.getAdminReports({
         status,
@@ -52,14 +60,42 @@ export default function AdminReportsPage() {
 
   const reports = data?.reports || [];
 
-  const reasonLabels: Record<string, string> = {
-    spam: 'Spam',
-    harassment: 'Harassment',
-    violence: 'Violence',
-    nudity: 'Nudity',
-    copyright: 'Copyright',
-    other: 'Other',
-  };
+  const filterConfig = useMemo(() => [
+    {
+      key: 'status',
+      label: 'Status',
+      multiple: false,
+      options: [
+        { value: 'pending', label: 'Pending' },
+        { value: 'reviewed', label: 'Reviewed' },
+        { value: 'actioned', label: 'Actioned' },
+        { value: 'dismissed', label: 'Dismissed' },
+      ],
+    },
+    {
+      key: 'contentType',
+      label: 'Content Type',
+      multiple: false,
+      options: [
+        { value: 'video', label: 'Videos' },
+        { value: 'comment', label: 'Comments' },
+        { value: 'user', label: 'Users' },
+      ],
+    },
+    {
+      key: 'reason',
+      label: 'Reason',
+      multiple: false,
+      options: [
+        { value: 'spam', label: 'Spam' },
+        { value: 'harassment', label: 'Harassment' },
+        { value: 'violence', label: 'Violence' },
+        { value: 'nudity', label: 'Nudity' },
+        { value: 'copyright', label: 'Copyright' },
+        { value: 'other', label: 'Other' },
+      ],
+    },
+  ], []);
 
   return (
     <div className="space-y-6">
@@ -82,40 +118,12 @@ export default function AdminReportsPage() {
       </div>
 
       {/* Filters */}
-      <div className="flex flex-wrap gap-4">
-        <select
-          value={status}
-          onChange={(e) => setStatus(e.target.value)}
-          className="px-4 py-2 bg-surface border border-border rounded-lg text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
-        >
-          <option value="pending">Pending</option>
-          <option value="reviewed">Reviewed</option>
-          <option value="actioned">Actioned</option>
-          <option value="dismissed">Dismissed</option>
-        </select>
-        <select
-          value={contentType}
-          onChange={(e) => setContentType(e.target.value)}
-          className="px-4 py-2 bg-surface border border-border rounded-lg text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
-        >
-          <option value="">All content</option>
-          <option value="video">Videos</option>
-          <option value="comment">Comments</option>
-          <option value="user">Users</option>
-        </select>
-        <select
-          value={reason}
-          onChange={(e) => setReason(e.target.value)}
-          className="px-4 py-2 bg-surface border border-border rounded-lg text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
-        >
-          <option value="">All reasons</option>
-          {Object.entries(reasonLabels).map(([value, label]) => (
-            <option key={value} value={value}>
-              {label}
-            </option>
-          ))}
-        </select>
-      </div>
+      <FilterBar
+        filters={filters}
+        filterConfig={filterConfig}
+        searchPlaceholder="Search reports..."
+        pageKey="admin-reports"
+      />
 
       {/* Reports List */}
       <div className="space-y-4">

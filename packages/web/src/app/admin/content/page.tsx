@@ -1,8 +1,10 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api';
+import { FilterBar } from '@/components/admin/ui/FilterBar';
+import { useAdminFilters } from '@/hooks/useAdminFilters';
 import toast from 'react-hot-toast';
 
 type ContentType = 'video' | 'comment';
@@ -29,20 +31,24 @@ interface ContentItem {
 }
 
 export default function AdminContentPage() {
-  const [contentType, setContentType] = useState<ContentType | ''>('');
-  const [status, setStatus] = useState<ContentStatus>('');
-  const [search, setSearch] = useState('');
   const [selectedContent, setSelectedContent] = useState<ContentItem | null>(null);
   const [actionModal, setActionModal] = useState<'remove' | 'restore' | null>(null);
   const queryClient = useQueryClient();
 
+  const filters = useAdminFilters({
+    syncWithUrl: true,
+  });
+
+  const contentType = (filters.filters.type?.[0] || '') as ContentType | '';
+  const status = (filters.filters.status?.[0] || '') as ContentStatus;
+
   const { data, isLoading, error } = useQuery({
-    queryKey: ['admin', 'content', { type: contentType, status, q: search }],
+    queryKey: ['admin', 'content', { type: contentType, status, q: filters.search }],
     queryFn: () =>
       api.getAdminContent({
         type: contentType || undefined,
         status: status || undefined,
-        q: search || undefined,
+        q: filters.search || undefined,
         limit: 50,
       }),
   });
@@ -77,15 +83,37 @@ export default function AdminContentPage() {
 
   const content = data?.content || [];
 
-  const getStatusBadge = (status: string) => {
+  const filterConfig = useMemo(() => [
+    {
+      key: 'type',
+      label: 'Type',
+      multiple: false,
+      options: [
+        { value: 'video', label: 'Videos' },
+        { value: 'comment', label: 'Comments' },
+      ],
+    },
+    {
+      key: 'status',
+      label: 'Status',
+      multiple: false,
+      options: [
+        { value: 'active', label: 'Active' },
+        { value: 'flagged', label: 'Flagged' },
+        { value: 'removed', label: 'Removed' },
+      ],
+    },
+  ], []);
+
+  const getStatusBadge = (contentStatus: string) => {
     const colors: Record<string, string> = {
       active: 'bg-green-500/10 text-green-500',
       removed: 'bg-red-500/10 text-red-500',
       flagged: 'bg-yellow-500/10 text-yellow-500',
     };
     return (
-      <span className={`px-2 py-1 text-xs font-medium rounded-full ${colors[status] || 'bg-gray-500/10 text-gray-500'}`}>
-        {status}
+      <span className={`px-2 py-1 text-xs font-medium rounded-full ${colors[contentStatus] || 'bg-gray-500/10 text-gray-500'}`}>
+        {contentStatus}
       </span>
     );
   };
@@ -100,37 +128,12 @@ export default function AdminContentPage() {
       </div>
 
       {/* Filters */}
-      <div className="flex flex-wrap gap-4">
-        <div className="relative flex-1 min-w-[200px]">
-          <SearchIcon className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-text-muted" />
-          <input
-            type="text"
-            placeholder="Search by URI, handle, or content..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="w-full pl-10 pr-4 py-2 bg-surface border border-border rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-accent"
-          />
-        </div>
-        <select
-          value={contentType}
-          onChange={(e) => setContentType(e.target.value as ContentType | '')}
-          className="px-4 py-2 bg-surface border border-border rounded-lg text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
-        >
-          <option value="">All types</option>
-          <option value="video">Videos</option>
-          <option value="comment">Comments</option>
-        </select>
-        <select
-          value={status}
-          onChange={(e) => setStatus(e.target.value as ContentStatus)}
-          className="px-4 py-2 bg-surface border border-border rounded-lg text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
-        >
-          <option value="">All statuses</option>
-          <option value="active">Active</option>
-          <option value="flagged">Flagged</option>
-          <option value="removed">Removed</option>
-        </select>
-      </div>
+      <FilterBar
+        filters={filters}
+        filterConfig={filterConfig}
+        searchPlaceholder="Search by URI, handle, or content..."
+        pageKey="admin-content"
+      />
 
       {/* Content List */}
       {isLoading ? (
@@ -146,7 +149,7 @@ export default function AdminContentPage() {
           <ContentIcon className="w-12 h-12 text-text-muted mx-auto mb-4" />
           <h2 className="text-lg font-semibold text-text-primary mb-2">No content found</h2>
           <p className="text-text-muted">
-            {search || contentType || status
+            {filters.search || contentType || status
               ? 'Try adjusting your filters'
               : 'Content will appear here as it is created'}
           </p>
@@ -524,14 +527,6 @@ function ActionModal({
         </div>
       </div>
     </div>
-  );
-}
-
-function SearchIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-      <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-    </svg>
   );
 }
 
