@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Exprsn** is a decentralized short-form video platform built on the AT Protocol. It's a pnpm monorepo with TypeScript throughout.
+**Exprsn** is a decentralized short-form video platform built on the AT Protocol. It's a pnpm monorepo with TypeScript throughout. Requires Node.js >= 20.
 
 ## Development Commands
 
@@ -58,6 +58,7 @@ pnpm --filter @exprsn/api test:coverage
 pnpm --filter @exprsn/api db:seed
 pnpm --filter @exprsn/api seed:admin
 pnpm --filter @exprsn/api seed:community
+pnpm --filter @exprsn/api seed:federation
 ```
 
 ## Package Architecture
@@ -103,7 +104,9 @@ packages/
 - `moderation/` - Reports, sanctions, appeals
 - `organization/` - Org types, hierarchy, PLC publishing
 - `payments/` - Stripe, PayPal, Authorize.net
-- `sso/` - Authentication providers
+- `sso/` - OIDC, SAML, social login providers
+- `ca/` - Certificate Authority for did:exprsn
+- `federation/` - AT Protocol federation (BlobSync, firehose)
 
 ### Database (Drizzle ORM with PostgreSQL)
 
@@ -176,3 +179,22 @@ Copy `.env.example` to `.env`. Key variables:
 - `opensearch` (9200) - Full-text search (optional)
 - `render-worker` - FFmpeg video processing
 - `mailhog` (8025) - Email testing UI
+
+## Testing
+
+```bash
+# Run all tests
+pnpm test
+
+# Run tests for a specific package
+pnpm --filter @exprsn/api test
+
+# Run tests in watch mode
+pnpm --filter @exprsn/api test:watch
+
+# Run a single test file
+pnpm --filter @exprsn/api vitest run src/routes/__tests__/auth.test.ts
+
+# Run tests matching a pattern
+pnpm --filter @exprsn/api vitest run -t "should authenticate"
+```
