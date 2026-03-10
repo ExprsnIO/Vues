@@ -4,3 +4,4 @@
  */
 
 export * from './SecurityService.js';
+export * from './secrets.js';

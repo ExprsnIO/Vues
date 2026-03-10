@@ -9,6 +9,7 @@ import { certificatePins, pinViolationReports, caRootCertificates, caIntermediat
 import { eq, and, gte, desc } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import * as forge from 'node-forge';
+import { adminAuthMiddleware, requirePermission, ADMIN_PERMISSIONS } from '../auth/middleware.js';
 
 const pinningRouter = new Hono();
 
@@ -132,8 +133,9 @@ pinningRouter.post(
 // Get violation reports (admin only)
 pinningRouter.get(
   '/xrpc/io.exprsn.security.getPinViolations',
+  adminAuthMiddleware,
+  requirePermission(ADMIN_PERMISSIONS.SECURITY_VIEW),
   async (c) => {
-    // TODO: Add admin auth middleware
     const limit = parseInt(c.req.query('limit') || '50');
 
     const violations = await db.select()
@@ -195,8 +197,9 @@ async function generatePinsFromCertificates(): Promise<Array<{
 // Update pins (admin only)
 pinningRouter.post(
   '/xrpc/io.exprsn.security.updatePins',
+  adminAuthMiddleware,
+  requirePermission(ADMIN_PERMISSIONS.SECURITY_MANAGE),
   async (c) => {
-    // TODO: Add admin auth middleware
     const body = await c.req.json<UpdatePinsBody>();
 
     if (!body.pins || !Array.isArray(body.pins)) {
@@ -230,9 +233,9 @@ pinningRouter.post(
 // Generate pins from current CA certificates (admin utility)
 pinningRouter.post(
   '/xrpc/io.exprsn.security.regeneratePins',
+  adminAuthMiddleware,
+  requirePermission(ADMIN_PERMISSIONS.SECURITY_MANAGE),
   async (c) => {
-    // TODO: Add admin auth middleware
-
     // Get current certificates
     const [rootCA] = await db.select()
       .from(caRootCertificates)

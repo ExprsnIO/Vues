@@ -7,6 +7,7 @@ import {
   platformDirectories,
   liveStreams,
   users,
+  domainOAuthProviders,
 } from '../db/schema.js';
 import { adminAuthMiddleware, requirePermission, ADMIN_PERMISSIONS } from '../auth/middleware.js';
 
@@ -49,10 +50,23 @@ adminPlatformRouter.get(
 
     const providers = await query.orderBy(desc(ssoProviders.createdAt));
 
-    // Add placeholder domain counts (could be computed from usage tracking)
+    // Count domains using OAuth providers of each type
+    const domainCountsByType = await db
+      .select({
+        type: domainOAuthProviders.type,
+        domainCount: sql<number>`COUNT(DISTINCT ${domainOAuthProviders.domainId})`.as('domain_count'),
+      })
+      .from(domainOAuthProviders)
+      .where(eq(domainOAuthProviders.enabled, true))
+      .groupBy(domainOAuthProviders.type);
+
+    // Create lookup map for domain counts by provider type
+    const countMap = new Map(domainCountsByType.map((c) => [c.type, c.domainCount]));
+
+    // Add domain counts to providers based on their type
     const providersWithCounts = providers.map((p) => ({
       ...p,
-      domainCount: 0, // TODO: implement provider-domain linking
+      domainCount: countMap.get(p.type) || 0,
     }));
 
     // Get stats
@@ -94,10 +108,23 @@ adminPlatformRouter.get(
       return c.json({ error: 'NotFound', message: 'Provider not found' }, 404);
     }
 
+    // Count domains using OAuth providers of this type
+    const [domainCountResult] = await db
+      .select({
+        domainCount: sql<number>`COUNT(DISTINCT ${domainOAuthProviders.domainId})`.as('domain_count'),
+      })
+      .from(domainOAuthProviders)
+      .where(
+        and(
+          eq(domainOAuthProviders.type, provider.type),
+          eq(domainOAuthProviders.enabled, true)
+        )
+      );
+
     return c.json({
       provider: {
         ...provider,
-        domainCount: 0, // TODO: implement provider-domain linking
+        domainCount: domainCountResult?.domainCount || 0,
       },
     });
   }

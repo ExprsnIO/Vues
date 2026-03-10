@@ -442,6 +442,7 @@ export async function generateRootCertificate(
 
 /**
  * Generate ECDSA certificate using Node.js crypto
+ * Uses a hybrid approach: ASN.1 structure with node-forge, signing with Node.js crypto
  */
 async function generateECDSACertificate(options: {
   subject: SubjectFields;
@@ -458,16 +459,325 @@ async function generateECDSACertificate(options: {
   ocspResponderUrl?: string;
   pathLength?: number;
 }): Promise<Omit<CertificateResult, 'algorithm' | 'parameters'>> {
-  // For ECDSA certificates, we'll use a hybrid approach:
-  // Generate the certificate structure with forge but sign externally
-  // This is a simplified implementation - in production you might use
-  // a library like node-forge with EC support or @peculiar/x509
+  const {
+    subject,
+    privateKey,
+    publicKey,
+    validityDays,
+    isCA,
+    issuerCert,
+    issuerKey,
+    keyUsage,
+    extKeyUsage,
+    subjectAltNames,
+    crlDistributionPoint,
+    ocspResponderUrl,
+    pathLength = 0,
+  } = options;
 
-  // For now, fall back to RSA with a warning if ECDSA is requested
-  // TODO: Implement full ECDSA certificate generation
-  throw new Error(
-    'ECDSA certificate generation requires additional implementation. Please use RSA for now.'
+  // Set validity dates
+  const notBefore = new Date();
+  notBefore.setMinutes(notBefore.getMinutes() - 5); // Backdate 5 minutes
+  const notAfter = new Date();
+  notAfter.setDate(notBefore.getDate() + validityDays);
+
+  // Generate serial number
+  const serialNumber = generateTimestampedSerialNumber();
+
+  // Determine issuer details (self-signed if no issuer provided)
+  const isSelfSigned = !issuerCert || !issuerKey;
+  let issuerSubject: forge.pki.CertificateField[];
+  let signingKey: string;
+
+  if (isSelfSigned) {
+    issuerSubject = buildSubjectAttributes(subject);
+    signingKey = privateKey;
+  } else {
+    const parsedIssuer = pki.certificateFromPem(issuerCert!);
+    issuerSubject = parsedIssuer.subject.attributes;
+    signingKey = issuerKey!;
+  }
+
+  // Build TBS (To Be Signed) Certificate using ASN.1
+  const subjectAttrs = buildSubjectAttributes(subject);
+
+  // Create version (v3 = 2)
+  const versionAsn = asn1.create(asn1.Class.CONTEXT, 0, true, [
+    asn1.create(asn1.Class.UNIVERSAL, asn1.Type.INTEGER, false, asn1.integerToDer(2).getBytes()),
+  ]);
+
+  // Serial number
+  const serialAsn = asn1.create(
+    asn1.Class.UNIVERSAL,
+    asn1.Type.INTEGER,
+    false,
+    forge.util.hexToBytes(serialNumber)
   );
+
+  // Signature algorithm (ECDSA with SHA-256)
+  const signatureAlgoAsn = asn1.create(asn1.Class.UNIVERSAL, asn1.Type.SEQUENCE, true, [
+    asn1.create(asn1.Class.UNIVERSAL, asn1.Type.OID, false, asn1.oidToDer('1.2.840.10045.4.3.2').getBytes()),
+  ]);
+
+  // Issuer
+  const issuerAsn = buildDistinguishedName(issuerSubject);
+
+  // Validity
+  const validityAsn = asn1.create(asn1.Class.UNIVERSAL, asn1.Type.SEQUENCE, true, [
+    asn1.create(asn1.Class.UNIVERSAL, asn1.Type.UTCTIME, false, dateToUTCTime(notBefore)),
+    asn1.create(asn1.Class.UNIVERSAL, asn1.Type.UTCTIME, false, dateToUTCTime(notAfter)),
+  ]);
+
+  // Subject
+  const subjectAsn = buildDistinguishedName(subjectAttrs);
+
+  // Subject Public Key Info - parse from PEM
+  const pubKeyDer = pemToDer(publicKey);
+  const subjectPKInfoAsn = asn1.fromDer(pubKeyDer);
+
+  // Extensions
+  const extensions: forge.asn1.Asn1[] = [];
+
+  // Basic Constraints
+  if (isCA) {
+    extensions.push(
+      asn1.create(asn1.Class.UNIVERSAL, asn1.Type.SEQUENCE, true, [
+        asn1.create(asn1.Class.UNIVERSAL, asn1.Type.OID, false, asn1.oidToDer('2.5.29.19').getBytes()),
+        asn1.create(asn1.Class.UNIVERSAL, asn1.Type.BOOLEAN, false, '\xff'), // critical
+        asn1.create(
+          asn1.Class.UNIVERSAL,
+          asn1.Type.OCTETSTRING,
+          false,
+          asn1.toDer(
+            asn1.create(asn1.Class.UNIVERSAL, asn1.Type.SEQUENCE, true, [
+              asn1.create(asn1.Class.UNIVERSAL, asn1.Type.BOOLEAN, false, '\xff'), // cA = true
+              ...(pathLength >= 0
+                ? [asn1.create(asn1.Class.UNIVERSAL, asn1.Type.INTEGER, false, asn1.integerToDer(pathLength).getBytes())]
+                : []),
+            ])
+          ).getBytes()
+        ),
+      ])
+    );
+  }
+
+  // Key Usage
+  if (keyUsage.length > 0) {
+    let keyUsageBits = 0;
+    if (keyUsage.includes('digitalSignature')) keyUsageBits |= 0x80;
+    if (keyUsage.includes('nonRepudiation')) keyUsageBits |= 0x40;
+    if (keyUsage.includes('keyEncipherment')) keyUsageBits |= 0x20;
+    if (keyUsage.includes('dataEncipherment')) keyUsageBits |= 0x10;
+    if (keyUsage.includes('keyAgreement')) keyUsageBits |= 0x08;
+    if (keyUsage.includes('keyCertSign')) keyUsageBits |= 0x04;
+    if (keyUsage.includes('cRLSign')) keyUsageBits |= 0x02;
+
+    extensions.push(
+      asn1.create(asn1.Class.UNIVERSAL, asn1.Type.SEQUENCE, true, [
+        asn1.create(asn1.Class.UNIVERSAL, asn1.Type.OID, false, asn1.oidToDer('2.5.29.15').getBytes()),
+        asn1.create(asn1.Class.UNIVERSAL, asn1.Type.BOOLEAN, false, '\xff'), // critical
+        asn1.create(
+          asn1.Class.UNIVERSAL,
+          asn1.Type.OCTETSTRING,
+          false,
+          asn1.toDer(
+            asn1.create(asn1.Class.UNIVERSAL, asn1.Type.BITSTRING, false, String.fromCharCode(7) + String.fromCharCode(keyUsageBits))
+          ).getBytes()
+        ),
+      ])
+    );
+  }
+
+  // Extended Key Usage
+  if (extKeyUsage && extKeyUsage.length > 0) {
+    const ekuOids: string[] = [];
+    if (extKeyUsage.includes('serverAuth')) ekuOids.push('1.3.6.1.5.5.7.3.1');
+    if (extKeyUsage.includes('clientAuth')) ekuOids.push('1.3.6.1.5.5.7.3.2');
+    if (extKeyUsage.includes('codeSigning')) ekuOids.push('1.3.6.1.5.5.7.3.3');
+    if (extKeyUsage.includes('emailProtection')) ekuOids.push('1.3.6.1.5.5.7.3.4');
+
+    if (ekuOids.length > 0) {
+      extensions.push(
+        asn1.create(asn1.Class.UNIVERSAL, asn1.Type.SEQUENCE, true, [
+          asn1.create(asn1.Class.UNIVERSAL, asn1.Type.OID, false, asn1.oidToDer('2.5.29.37').getBytes()),
+          asn1.create(
+            asn1.Class.UNIVERSAL,
+            asn1.Type.OCTETSTRING,
+            false,
+            asn1.toDer(
+              asn1.create(
+                asn1.Class.UNIVERSAL,
+                asn1.Type.SEQUENCE,
+                true,
+                ekuOids.map((oid) =>
+                  asn1.create(asn1.Class.UNIVERSAL, asn1.Type.OID, false, asn1.oidToDer(oid).getBytes())
+                )
+              )
+            ).getBytes()
+          ),
+        ])
+      );
+    }
+  }
+
+  // Subject Alternative Names
+  if (subjectAltNames && subjectAltNames.length > 0) {
+    const sanEntries = subjectAltNames.map((san) => {
+      if (san.startsWith('DNS:')) {
+        return asn1.create(asn1.Class.CONTEXT, 2, false, san.substring(4));
+      } else if (san.startsWith('email:')) {
+        return asn1.create(asn1.Class.CONTEXT, 1, false, san.substring(6));
+      } else if (san.startsWith('URI:')) {
+        return asn1.create(asn1.Class.CONTEXT, 6, false, san.substring(4));
+      }
+      // Default to DNS
+      return asn1.create(asn1.Class.CONTEXT, 2, false, san);
+    });
+
+    extensions.push(
+      asn1.create(asn1.Class.UNIVERSAL, asn1.Type.SEQUENCE, true, [
+        asn1.create(asn1.Class.UNIVERSAL, asn1.Type.OID, false, asn1.oidToDer('2.5.29.17').getBytes()),
+        asn1.create(
+          asn1.Class.UNIVERSAL,
+          asn1.Type.OCTETSTRING,
+          false,
+          asn1.toDer(asn1.create(asn1.Class.UNIVERSAL, asn1.Type.SEQUENCE, true, sanEntries)).getBytes()
+        ),
+      ])
+    );
+  }
+
+  // Build extensions wrapper
+  const extensionsAsn =
+    extensions.length > 0
+      ? asn1.create(asn1.Class.CONTEXT, 3, true, [
+          asn1.create(asn1.Class.UNIVERSAL, asn1.Type.SEQUENCE, true, extensions),
+        ])
+      : null;
+
+  // Build TBS Certificate
+  const tbsCertAsn = asn1.create(asn1.Class.UNIVERSAL, asn1.Type.SEQUENCE, true, [
+    versionAsn,
+    serialAsn,
+    signatureAlgoAsn,
+    issuerAsn,
+    validityAsn,
+    subjectAsn,
+    subjectPKInfoAsn,
+    ...(extensionsAsn ? [extensionsAsn] : []),
+  ]);
+
+  // Get TBS bytes for signing
+  const tbsDer = asn1.toDer(tbsCertAsn).getBytes();
+  const tbsBuffer = Buffer.from(tbsDer, 'binary');
+
+  // Sign with ECDSA
+  const sign = crypto.createSign('SHA256');
+  sign.update(tbsBuffer);
+  const signature = sign.sign(signingKey);
+
+  // Build signature ASN.1 (BIT STRING)
+  const signatureAsn = asn1.create(
+    asn1.Class.UNIVERSAL,
+    asn1.Type.BITSTRING,
+    false,
+    String.fromCharCode(0) + signature.toString('binary')
+  );
+
+  // Build complete certificate
+  const certAsn = asn1.create(asn1.Class.UNIVERSAL, asn1.Type.SEQUENCE, true, [
+    tbsCertAsn,
+    signatureAlgoAsn,
+    signatureAsn,
+  ]);
+
+  // Convert to PEM
+  const certDer = asn1.toDer(certAsn).getBytes();
+  const certBase64 = forge.util.encode64(certDer);
+  const certificatePem =
+    '-----BEGIN CERTIFICATE-----\n' +
+    certBase64.match(/.{1,64}/g)!.join('\n') +
+    '\n-----END CERTIFICATE-----';
+
+  // Parse back to get fingerprints (also validates the certificate)
+  const cert = pki.certificateFromPem(certificatePem);
+  const fingerprint = calculateFingerprint(cert);
+  const sha1Fingerprint = calculateSHA1Fingerprint(cert);
+
+  return {
+    certificate: certificatePem,
+    privateKey,
+    publicKey,
+    serialNumber,
+    fingerprint,
+    sha1Fingerprint,
+    notBefore,
+    notAfter,
+  };
+}
+
+/**
+ * Convert Date to UTCTime string format
+ */
+function dateToUTCTime(date: Date): string {
+  const year = date.getUTCFullYear().toString().slice(-2);
+  const month = (date.getUTCMonth() + 1).toString().padStart(2, '0');
+  const day = date.getUTCDate().toString().padStart(2, '0');
+  const hour = date.getUTCHours().toString().padStart(2, '0');
+  const minute = date.getUTCMinutes().toString().padStart(2, '0');
+  const second = date.getUTCSeconds().toString().padStart(2, '0');
+  return `${year}${month}${day}${hour}${minute}${second}Z`;
+}
+
+/**
+ * Convert PEM to DER
+ */
+function pemToDer(pem: string): forge.util.ByteStringBuffer {
+  const lines = pem.split('\n');
+  const base64 = lines.filter((line) => !line.startsWith('-----')).join('');
+  const der = forge.util.decode64(base64);
+  return forge.util.createBuffer(der);
+}
+
+/**
+ * Build Distinguished Name ASN.1 from attributes
+ */
+function buildDistinguishedName(attrs: forge.pki.CertificateField[]): forge.asn1.Asn1 {
+  const rdnSequences = attrs.map((attr) => {
+    const oid = getAttributeOid(attr.name || attr.shortName || '');
+    const value = attr.value || '';
+
+    return asn1.create(asn1.Class.UNIVERSAL, asn1.Type.SET, true, [
+      asn1.create(asn1.Class.UNIVERSAL, asn1.Type.SEQUENCE, true, [
+        asn1.create(asn1.Class.UNIVERSAL, asn1.Type.OID, false, asn1.oidToDer(oid).getBytes()),
+        asn1.create(asn1.Class.UNIVERSAL, asn1.Type.PRINTABLESTRING, false, value),
+      ]),
+    ]);
+  });
+
+  return asn1.create(asn1.Class.UNIVERSAL, asn1.Type.SEQUENCE, true, rdnSequences);
+}
+
+/**
+ * Get OID for attribute name
+ */
+function getAttributeOid(name: string): string {
+  const oids: Record<string, string> = {
+    commonName: '2.5.4.3',
+    CN: '2.5.4.3',
+    countryName: '2.5.4.6',
+    C: '2.5.4.6',
+    stateOrProvinceName: '2.5.4.8',
+    ST: '2.5.4.8',
+    localityName: '2.5.4.7',
+    L: '2.5.4.7',
+    organizationName: '2.5.4.10',
+    O: '2.5.4.10',
+    organizationalUnitName: '2.5.4.11',
+    OU: '2.5.4.11',
+    emailAddress: '1.2.840.113549.1.9.1',
+  };
+  return oids[name] || '2.5.4.3'; // Default to CN
 }
 
 export interface IntermediateCertificateOptions extends SubjectFields {

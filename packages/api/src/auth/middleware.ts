@@ -34,6 +34,12 @@ export const ADMIN_PERMISSIONS = {
   ORGS_CREATE: 'admin.orgs.create',
   ORGS_DELETE: 'admin.orgs.delete',
   ORGS_MANAGE_HIERARCHY: 'admin.orgs.hierarchy',
+  // Security permissions
+  SECURITY_VIEW: 'admin.security.view',
+  SECURITY_MANAGE: 'admin.security.manage',
+  // Platform settings permissions
+  SETTINGS_VIEW: 'admin.settings.view',
+  SETTINGS_MANAGE: 'admin.settings.manage',
 } as const;
 
 // Role-based default permissions
@@ -54,6 +60,8 @@ export const ROLE_PERMISSIONS: Record<AdminRole, string[]> = {
     ADMIN_PERMISSIONS.DOMAINS_MANAGE,
     ADMIN_PERMISSIONS.ORGS_VIEW,
     ADMIN_PERMISSIONS.ORGS_CREATE,
+    ADMIN_PERMISSIONS.SECURITY_VIEW,
+    ADMIN_PERMISSIONS.SETTINGS_VIEW,
   ],
   moderator: [
     ADMIN_PERMISSIONS.USERS_VIEW,

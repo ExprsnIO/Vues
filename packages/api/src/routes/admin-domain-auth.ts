@@ -22,6 +22,7 @@ import {
   requirePermission,
   ADMIN_PERMISSIONS,
 } from '../auth/middleware.js';
+import { encryptSecret, safeDecryptSecret } from '../services/security/secrets.js';
 
 export const adminDomainAuthRouter = new Hono();
 
@@ -153,9 +154,13 @@ adminDomainAuthRouter.get(
     }
 
     // Include client secret for viewing (admins need it for config)
+    // Decrypt the client secret before returning
     return c.json({
       provider: {
         ...provider,
+        clientSecret: provider.clientSecret
+          ? safeDecryptSecret(provider.clientSecret)
+          : null,
         createdAt: provider.createdAt.toISOString(),
         updatedAt: provider.updatedAt.toISOString(),
         lastUsedAt: provider.lastUsedAt?.toISOString(),
@@ -249,7 +254,7 @@ adminDomainAuthRouter.post(
       description: body.description,
       type: body.type,
       clientId: body.clientId,
-      clientSecret: body.clientSecret, // TODO: Encrypt this
+      clientSecret: encryptSecret(body.clientSecret),
       authorizationEndpoint: body.authorizationEndpoint,
       tokenEndpoint: body.tokenEndpoint,
       userinfoEndpoint: body.userinfoEndpoint,
@@ -347,7 +352,7 @@ adminDomainAuthRouter.put(
     if (body.displayName !== undefined) updates.displayName = body.displayName;
     if (body.description !== undefined) updates.description = body.description;
     if (body.clientId !== undefined) updates.clientId = body.clientId;
-    if (body.clientSecret !== undefined) updates.clientSecret = body.clientSecret;
+    if (body.clientSecret !== undefined) updates.clientSecret = encryptSecret(body.clientSecret);
     if (body.authorizationEndpoint !== undefined)
       updates.authorizationEndpoint = body.authorizationEndpoint;
     if (body.tokenEndpoint !== undefined) updates.tokenEndpoint = body.tokenEndpoint;

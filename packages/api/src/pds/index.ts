@@ -5,11 +5,50 @@ import { readFile } from 'fs/promises';
 import { existsSync } from 'fs';
 import { createPdsRouter, PdsDependencies, PdsServerConfig, OnCommitCallback } from '@exprsn/pds';
 import { createDidService, DidWebConfig } from '@exprsn/pds';
-import { createLocalBlobStore, createS3BlobStore } from '@exprsn/pds';
+import { createLocalBlobStore, createS3BlobStore, BlockStore, Repository, CID } from '@exprsn/pds';
 import { db } from '../db/index.js';
 import { actorRepos, repoCommits, repoRecords, blobs, repoBlocks, sessions } from '../db/schema.js';
 
 export type { OnCommitCallback } from '@exprsn/pds';
+
+/**
+ * Database-backed BlockStore implementation
+ * Stores blocks in the repoBlocks table
+ */
+class DatabaseBlockStore implements BlockStore {
+  constructor(private did: string) {}
+
+  async get(cid: CID): Promise<Uint8Array | null> {
+    const result = await db
+      .select()
+      .from(repoBlocks)
+      .where(eq(repoBlocks.cid, cid.toString()))
+      .limit(1);
+    if (!result[0]) return null;
+    return Buffer.from(result[0].content, 'base64');
+  }
+
+  async put(cid: CID, bytes: Uint8Array): Promise<void> {
+    const contentBase64 = Buffer.from(bytes).toString('base64');
+    await db
+      .insert(repoBlocks)
+      .values({
+        cid: cid.toString(),
+        did: this.did,
+        content: contentBase64,
+      })
+      .onConflictDoNothing();
+  }
+
+  async has(cid: CID): Promise<boolean> {
+    const result = await db
+      .select({ cid: repoBlocks.cid })
+      .from(repoBlocks)
+      .where(eq(repoBlocks.cid, cid.toString()))
+      .limit(1);
+    return result.length > 0;
+  }
+}
 
 /**
  * PDS configuration from environment
@@ -140,28 +179,101 @@ function createSessionStore() {
 }
 
 /**
+ * Create a signing function from a private key
+ */
+function createSignFn(privateKeyBase64: string): (bytes: Uint8Array) => Promise<Uint8Array> {
+  return async (bytes: Uint8Array): Promise<Uint8Array> => {
+    const privateKeyBuffer = Buffer.from(privateKeyBase64, 'base64');
+
+    // Import the private key
+    const privateKey = await crypto.subtle.importKey(
+      'pkcs8',
+      privateKeyBuffer,
+      { name: 'ECDSA', namedCurve: 'P-256' },
+      false,
+      ['sign']
+    );
+
+    // Sign the data
+    const signature = await crypto.subtle.sign(
+      { name: 'ECDSA', hash: 'SHA-256' },
+      privateKey,
+      bytes
+    );
+
+    return new Uint8Array(signature);
+  };
+}
+
+/**
  * Repo store manager implementation
  * Implements RepoStoreManager & SyncRepoManager interfaces
  */
 function createRepoManager() {
+  // Cache for active repositories
+  const repoCache = new Map<string, Repository>();
+
   return {
     // RepoStoreManager interface
-    async getRepo(_did: string) {
-      // Full repository implementation requires MST/BlockStore
-      // Return null to indicate repo doesn't exist (will trigger creation)
-      return null;
+    async getRepo(did: string): Promise<Repository | null> {
+      // Check cache first
+      if (repoCache.has(did)) {
+        return repoCache.get(did)!;
+      }
+
+      // Check if repo exists in database
+      const actor = await db
+        .select({ rootCid: actorRepos.rootCid, signingKeyPrivate: actorRepos.signingKeyPrivate })
+        .from(actorRepos)
+        .where(eq(actorRepos.did, did))
+        .limit(1);
+
+      if (!actor[0]?.rootCid) {
+        return null;
+      }
+
+      // Load existing repository
+      const blockStore = new DatabaseBlockStore(did);
+      const signFn = createSignFn(actor[0].signingKeyPrivate);
+      const commitCid = CID.parse(actor[0].rootCid);
+
+      try {
+        const repo = await Repository.load(did, blockStore, signFn, commitCid);
+        repoCache.set(did, repo);
+        return repo;
+      } catch {
+        // If loading fails, return null
+        return null;
+      }
     },
 
-    async createRepo(_did: string) {
-      // Creating a full Repository requires MST/BlockStore/signing functions
-      // This is a stub - full PDS functionality requires complete implementation
-      throw new Error('Full PDS repository creation not implemented');
+    async createRepo(did: string): Promise<Repository> {
+      // Get account info
+      const actor = await db
+        .select({ signingKeyPrivate: actorRepos.signingKeyPrivate })
+        .from(actorRepos)
+        .where(eq(actorRepos.did, did))
+        .limit(1);
+
+      if (!actor[0]) {
+        throw new Error(`Account not found: ${did}`);
+      }
+
+      // Create new repository with database-backed block store
+      const blockStore = new DatabaseBlockStore(did);
+      const signFn = createSignFn(actor[0].signingKeyPrivate);
+
+      const repo = await Repository.create(did, blockStore, signFn);
+
+      // Cache the repo
+      repoCache.set(did, repo);
+
+      return repo;
     },
 
     // SyncRepoManager interface
-    async getBlockStore(_did: string) {
-      // Return null as block stores require full implementation
-      return null;
+    async getBlockStore(did: string): Promise<BlockStore> {
+      return new DatabaseBlockStore(did);
     },
 
     // Legacy methods for compatibility

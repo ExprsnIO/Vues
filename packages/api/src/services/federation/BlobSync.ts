@@ -69,58 +69,240 @@ export class BlobSync {
 
   /**
    * Resolve DID to PDS endpoint
-   * TODO: Implement proper DID resolution via PLC directory
+   * Supports did:plc, did:web, and did:exprsn methods with caching
    */
   async resolvePDS(did: string): Promise<string | null> {
-    // Check if we have cached PDS info
+    // Check if we have cached PDS info (not stale)
+    const cacheMaxAge = parseInt(process.env.DID_CACHE_TTL || '3600', 10) * 1000;
     const identity = await this.db.query.plcIdentities?.findFirst({
       where: eq(schema.plcIdentities.did, did),
     });
 
     if (identity?.pdsEndpoint) {
-      return identity.pdsEndpoint;
+      // Check if cache is still valid
+      const updatedAt = identity.updatedAt ? new Date(identity.updatedAt).getTime() : 0;
+      if (Date.now() - updatedAt < cacheMaxAge) {
+        return identity.pdsEndpoint;
+      }
     }
 
-    // Fallback: Try to resolve via did:plc or did:web
+    // Resolve based on DID method
+    let pdsEndpoint: string | null = null;
+    let didDocument: Record<string, unknown> | null = null;
+
     if (did.startsWith('did:plc:')) {
-      // Query PLC directory
-      const plcUrl = process.env.PLC_URL || 'https://plc.directory';
-      try {
-        const response = await fetch(`${plcUrl}/${did}`, {
-          signal: AbortSignal.timeout(5000),
-        });
-
-        if (response.ok) {
-          const data = await response.json() as { service?: Array<{ id: string; serviceEndpoint: string }> };
-          const pdsService = data.service?.find(
-            (s) => s.id === '#atproto_pds' || s.id === 'atproto_pds'
-          );
-          return pdsService?.serviceEndpoint || null;
-        }
-      } catch {
-        // PLC resolution failed
-      }
+      const result = await this.resolvePlcDid(did);
+      pdsEndpoint = result.pdsEndpoint;
+      didDocument = result.document;
     } else if (did.startsWith('did:web:')) {
-      // Extract domain from did:web
-      const domain = did.replace('did:web:', '').replace(/%3A/g, ':');
-      try {
-        const response = await fetch(`https://${domain}/.well-known/did.json`, {
-          signal: AbortSignal.timeout(5000),
-        });
-
-        if (response.ok) {
-          const data = await response.json() as { service?: Array<{ id: string; serviceEndpoint: string }> };
-          const pdsService = data.service?.find(
-            (s) => s.id === '#atproto_pds' || s.id === 'atproto_pds'
-          );
-          return pdsService?.serviceEndpoint || null;
-        }
-      } catch {
-        // did:web resolution failed
-      }
+      const result = await this.resolveWebDid(did);
+      pdsEndpoint = result.pdsEndpoint;
+      didDocument = result.document;
+    } else if (did.startsWith('did:exprsn:')) {
+      const result = await this.resolveExprsnDid(did);
+      pdsEndpoint = result.pdsEndpoint;
+      didDocument = result.document;
     }
 
-    return null;
+    // Cache the resolved endpoint if successful
+    if (pdsEndpoint && didDocument) {
+      await this.cacheDidResolution(did, pdsEndpoint, didDocument);
+    }
+
+    return pdsEndpoint;
+  }
+
+  /**
+   * Resolve did:plc via PLC directory
+   */
+  private async resolvePlcDid(did: string): Promise<{
+    pdsEndpoint: string | null;
+    document: Record<string, unknown> | null;
+  }> {
+    const plcUrl = process.env.PLC_URL || 'https://plc.directory';
+
+    try {
+      const response = await fetch(`${plcUrl}/${did}`, {
+        signal: AbortSignal.timeout(5000),
+        headers: { Accept: 'application/json' },
+      });
+
+      if (!response.ok) {
+        console.warn(`PLC resolution failed for ${did}: HTTP ${response.status}`);
+        return { pdsEndpoint: null, document: null };
+      }
+
+      const data = (await response.json()) as {
+        service?: Array<{ id: string; type?: string; serviceEndpoint: string }>;
+        alsoKnownAs?: string[];
+        verificationMethod?: unknown[];
+      };
+
+      // Find PDS service endpoint
+      const pdsService = data.service?.find(
+        (s) =>
+          s.id === '#atproto_pds' ||
+          s.id === 'atproto_pds' ||
+          s.type === 'AtprotoPersonalDataServer'
+      );
+
+      return {
+        pdsEndpoint: pdsService?.serviceEndpoint || null,
+        document: data as Record<string, unknown>,
+      };
+    } catch (error) {
+      console.warn(`PLC resolution error for ${did}:`, error);
+      return { pdsEndpoint: null, document: null };
+    }
+  }
+
+  /**
+   * Resolve did:web via .well-known/did.json
+   */
+  private async resolveWebDid(did: string): Promise<{
+    pdsEndpoint: string | null;
+    document: Record<string, unknown> | null;
+  }> {
+    // Extract domain from did:web (handle port encoding)
+    const domain = did.replace('did:web:', '').replace(/%3A/g, ':');
+
+    try {
+      const response = await fetch(`https://${domain}/.well-known/did.json`, {
+        signal: AbortSignal.timeout(5000),
+        headers: { Accept: 'application/did+json, application/json' },
+      });
+
+      if (!response.ok) {
+        console.warn(`did:web resolution failed for ${did}: HTTP ${response.status}`);
+        return { pdsEndpoint: null, document: null };
+      }
+
+      const data = (await response.json()) as {
+        service?: Array<{ id: string; type?: string; serviceEndpoint: string }>;
+      };
+
+      const pdsService = data.service?.find(
+        (s) =>
+          s.id === '#atproto_pds' ||
+          s.id === 'atproto_pds' ||
+          s.type === 'AtprotoPersonalDataServer'
+      );
+
+      return {
+        pdsEndpoint: pdsService?.serviceEndpoint || null,
+        document: data as Record<string, unknown>,
+      };
+    } catch (error) {
+      console.warn(`did:web resolution error for ${did}:`, error);
+      return { pdsEndpoint: null, document: null };
+    }
+  }
+
+  /**
+   * Resolve did:exprsn via internal CA/certificate lookup
+   */
+  private async resolveExprsnDid(did: string): Promise<{
+    pdsEndpoint: string | null;
+    document: Record<string, unknown> | null;
+  }> {
+    // did:exprsn DIDs are resolved via our internal certificate authority
+    // Format: did:exprsn:<identifier>
+    const identifier = did.replace('did:exprsn:', '');
+
+    try {
+      // Check local DID certificates table
+      const certificate = await this.db.query.didCertificates?.findFirst({
+        where: and(
+          eq(schema.didCertificates.did, did),
+          eq(schema.didCertificates.status, 'active')
+        ),
+      });
+
+      if (certificate?.pdsEndpoint) {
+        // Build DID document from certificate data
+        const document = {
+          '@context': ['https://www.w3.org/ns/did/v1'],
+          id: did,
+          service: [
+            {
+              id: '#atproto_pds',
+              type: 'AtprotoPersonalDataServer',
+              serviceEndpoint: certificate.pdsEndpoint,
+            },
+          ],
+        };
+
+        return {
+          pdsEndpoint: certificate.pdsEndpoint,
+          document: document as Record<string, unknown>,
+        };
+      }
+
+      // Fallback: Try internal PLC directory
+      const serviceUrl = process.env.APP_URL || 'http://localhost:3000';
+      const response = await fetch(`${serviceUrl}/plc/${did}`, {
+        signal: AbortSignal.timeout(3000),
+        headers: { Accept: 'application/json' },
+      });
+
+      if (response.ok) {
+        const data = (await response.json()) as {
+          service?: Array<{ id: string; type?: string; serviceEndpoint: string }>;
+        };
+
+        const pdsService = data.service?.find(
+          (s) => s.id === '#atproto_pds' || s.type === 'AtprotoPersonalDataServer'
+        );
+
+        return {
+          pdsEndpoint: pdsService?.serviceEndpoint || null,
+          document: data as Record<string, unknown>,
+        };
+      }
+
+      return { pdsEndpoint: null, document: null };
+    } catch (error) {
+      console.warn(`did:exprsn resolution error for ${did}:`, error);
+      return { pdsEndpoint: null, document: null };
+    }
+  }
+
+  /**
+   * Cache DID resolution result
+   */
+  private async cacheDidResolution(
+    did: string,
+    pdsEndpoint: string,
+    document: Record<string, unknown>
+  ): Promise<void> {
+    try {
+      // Extract handle from alsoKnownAs if available
+      const alsoKnownAs = document.alsoKnownAs as string[] | undefined;
+      const handle = alsoKnownAs?.find((aka) => aka.startsWith('at://'))?.replace('at://', '');
+
+      // Upsert into plcIdentities
+      await this.db
+        .insert(schema.plcIdentities)
+        .values({
+          did,
+          handle: handle || null,
+          pdsEndpoint,
+          didDocument: document,
+          status: 'active',
+          updatedAt: new Date(),
+        })
+        .onConflictDoUpdate({
+          target: schema.plcIdentities.did,
+          set: {
+            pdsEndpoint,
+            didDocument: document,
+            updatedAt: new Date(),
+          },
+        });
+    } catch (error) {
+      // Non-fatal: caching failure shouldn't break resolution
+      console.warn(`Failed to cache DID resolution for ${did}:`, error);
+    }
   }
 
   /**
