@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { VideoFeed } from '@/components/VideoFeed';
 import { Sidebar } from '@/components/Sidebar';
+import { FeedTabsHeader } from '@/components/FeedTabsHeader';
 import { useAuth } from '@/lib/auth-context';
 
 export default function FollowingPage() {
@@ -11,7 +12,8 @@ export default function FollowingPage() {
   return (
     <div className="flex min-h-screen bg-background">
       <Sidebar />
-      <main className="flex-1 ml-0 lg:ml-60 pt-14 lg:pt-0 pb-16 lg:pb-0">
+      <main className="flex-1 ml-0 lg:ml-60 pt-14 lg:pt-0 pb-16 lg:pb-0 relative">
+        <FeedTabsHeader />
         {isLoading ? (
           <div className="h-screen flex items-center justify-center">
             <div className="w-12 h-12 border-4 border-accent border-t-transparent rounded-full animate-spin" />

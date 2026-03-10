@@ -5,7 +5,8 @@ import { readFile } from 'fs/promises';
 import { existsSync } from 'fs';
 import { createPdsRouter, PdsDependencies, PdsServerConfig, OnCommitCallback } from '@exprsn/pds';
 import { createDidService, DidWebConfig } from '@exprsn/pds';
-import { createLocalBlobStore, createS3BlobStore, BlockStore, Repository, CID } from '@exprsn/pds';
+import { createLocalBlobStore, createS3BlobStore, BlockStore, Repository } from '@exprsn/pds';
+import { CID } from 'multiformats/cid';
 import { db } from '../db/index.js';
 import { actorRepos, repoCommits, repoRecords, blobs, repoBlocks, sessions } from '../db/schema.js';
 

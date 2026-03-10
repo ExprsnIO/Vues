@@ -8,6 +8,8 @@ import { VideoPlayer, type VideoPlayerHandle } from './VideoPlayer';
 import { VideoActions } from './VideoActions';
 import { VideoOverlay } from './VideoOverlay';
 import { SuggestedUsers } from './SuggestedUsers';
+import { useFeedStore } from '@/stores/feed-store';
+import { usePullToRefresh } from '@/hooks/use-pull-to-refresh';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3002';
 
@@ -32,8 +34,11 @@ export function VideoFeed({ feedType }: VideoFeedProps) {
   const viewTrackedRef = useRef<Set<string>>(new Set());
   const watchProgressRef = useRef<Map<string, WatchProgress>>(new Map());
   const preloadedVideosRef = useRef<Set<string>>(new Set());
+  const hasRestoredPosition = useRef(false);
 
-  const { data, fetchNextPage, hasNextPage, isFetchingNextPage, isLoading } =
+  const { savePosition, getPosition } = useFeedStore();
+
+  const { data, fetchNextPage, hasNextPage, isFetchingNextPage, isLoading, refetch } =
     useInfiniteQuery({
       queryKey: ['feed', feedType],
       queryFn: ({ pageParam }) => api.getFeed(feedType, pageParam),
@@ -42,6 +47,17 @@ export function VideoFeed({ feedType }: VideoFeedProps) {
     });
 
   const videos = data?.pages.flatMap((page) => page.feed) ?? [];
+
+  // Pull to refresh
+  const handleRefresh = useCallback(async () => {
+    await refetch();
+  }, [refetch]);
+
+  const { isPulling, isRefreshing, pullDistance } = usePullToRefresh({
+    onRefresh: handleRefresh,
+    threshold: 80,
+    enabled: true,
+  });
 
   // Preload next videos when current video changes
   useEffect(() => {
@@ -225,6 +241,50 @@ export function VideoFeed({ feedType }: VideoFeedProps) {
     }
   }, [videos]);
 
+  // Restore scroll position when component mounts
+  useEffect(() => {
+    if (!hasRestoredPosition.current && videos.length > 0 && containerRef.current) {
+      const savedPosition = getPosition(feedType);
+      if (savedPosition) {
+        // Wait a tick for the DOM to settle
+        setTimeout(() => {
+          if (containerRef.current) {
+            containerRef.current.scrollTop = savedPosition.scrollTop;
+            setCurrentIndex(savedPosition.currentIndex);
+            hasRestoredPosition.current = true;
+          }
+        }, 0);
+      } else {
+        hasRestoredPosition.current = true;
+      }
+    }
+  }, [videos.length, feedType, getPosition]);
+
+  // Save scroll position when scrolling
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const handleScrollForPosition = () => {
+      if (hasRestoredPosition.current) {
+        savePosition(feedType, container.scrollTop, currentIndex);
+      }
+    };
+
+    // Throttle position saving
+    let timeoutId: NodeJS.Timeout;
+    const throttledSave = () => {
+      clearTimeout(timeoutId);
+      timeoutId = setTimeout(handleScrollForPosition, 500);
+    };
+
+    container.addEventListener('scroll', throttledSave);
+    return () => {
+      clearTimeout(timeoutId);
+      container.removeEventListener('scroll', throttledSave);
+    };
+  }, [feedType, currentIndex, savePosition]);
+
   // Memoize context value for video items
   const feedContext = useMemo(
     () => ({
@@ -236,7 +296,7 @@ export function VideoFeed({ feedType }: VideoFeedProps) {
 
   if (isLoading) {
     return (
-      <div className="h-screen flex items-center justify-center bg-black">
+      <div className="h-[calc(100vh-3rem)] flex items-center justify-center bg-black">
         <div className="w-12 h-12 border-4 border-primary-500 border-t-transparent rounded-full loading-spinner" />
       </div>
     );
@@ -245,7 +305,7 @@ export function VideoFeed({ feedType }: VideoFeedProps) {
   if (videos.length === 0) {
     const isFollowingFeed = feedType === 'following';
     return (
-      <div className="h-screen flex flex-col items-center justify-center bg-background text-text-primary px-4 text-center">
+      <div className="h-[calc(100vh-3rem)] flex flex-col items-center justify-center bg-background text-text-primary px-4 text-center">
         <EmptyIcon className="w-16 h-16 text-text-muted mb-4" />
         <h2 className="text-xl font-semibold mb-2">
           {isFollowingFeed ? 'No videos from people you follow' : 'No videos yet'}
@@ -267,8 +327,35 @@ export function VideoFeed({ feedType }: VideoFeedProps) {
   return (
     <div
       ref={containerRef}
-      className="h-screen overflow-y-scroll snap-feed no-scrollbar"
+      className="h-[calc(100vh-3rem)] overflow-y-scroll snap-feed no-scrollbar"
     >
+      {/* Pull to refresh indicator */}
+      {(isPulling || isRefreshing) && (
+        <div
+          className="fixed top-0 left-0 right-0 z-50 flex items-center justify-center pointer-events-none transition-all"
+          style={{
+            transform: `translateY(${isPulling ? Math.min(pullDistance, 80) : 0}px)`,
+            opacity: isPulling || isRefreshing ? 1 : 0,
+          }}
+        >
+          <div className="bg-surface/95 backdrop-blur-sm rounded-full px-4 py-2 flex items-center gap-2 shadow-lg">
+            {isRefreshing ? (
+              <>
+                <div className="w-4 h-4 border-2 border-accent border-t-transparent rounded-full animate-spin" />
+                <span className="text-sm font-medium text-text-primary">Refreshing...</span>
+              </>
+            ) : (
+              <>
+                <RefreshIcon className="w-4 h-4 text-accent" />
+                <span className="text-sm font-medium text-text-primary">
+                  {pullDistance >= 80 ? 'Release to refresh' : 'Pull to refresh'}
+                </span>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
       {videos.map((video, index) => (
         <VideoItem
           key={video.uri}
@@ -385,6 +472,24 @@ function EmptyIcon({ className }: { className?: string }) {
         strokeLinecap="round"
         strokeLinejoin="round"
         d="M15.75 10.5l4.72-4.72a.75.75 0 011.28.53v11.38a.75.75 0 01-1.28.53l-4.72-4.72M4.5 18.75h9a2.25 2.25 0 002.25-2.25v-9a2.25 2.25 0 00-2.25-2.25h-9A2.25 2.25 0 002.25 7.5v9a2.25 2.25 0 002.25 2.25z"
+      />
+    </svg>
+  );
+}
+
+function RefreshIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      viewBox="0 0 24 24"
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
       />
     </svg>
   );

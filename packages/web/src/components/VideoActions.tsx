@@ -11,6 +11,7 @@ import { CollabLoopModal } from './CollabLoopModal';
 import { ReportModal } from './ReportModal';
 import { ReactionPicker } from './ReactionPicker';
 import { TipModal } from './TipModal';
+import { ShareModal } from './ShareModal';
 import { useVideoShare } from '@/hooks/useVideoShare';
 import toast from 'react-hot-toast';
 
@@ -30,6 +31,7 @@ export function VideoActions({ video, onEngagement }: VideoActionsProps) {
   const [showReportModal, setShowReportModal] = useState(false);
   const [showMoreMenu, setShowMoreMenu] = useState(false);
   const [showTipModal, setShowTipModal] = useState(false);
+  const [showShareModal, setShowShareModal] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [isHidden, setIsHidden] = useState(false);
   const [isDeleted, setIsDeleted] = useState(false);
@@ -235,7 +237,7 @@ export function VideoActions({ video, onEngagement }: VideoActionsProps) {
         </button>
 
         {/* Share */}
-        <button onClick={share} className="flex flex-col items-center">
+        <button onClick={() => setShowShareModal(true)} className="flex flex-col items-center">
           <div className={`p-2 rounded-full ${shareState === 'shared' ? 'text-accent' : 'text-white'}`}>
             <ShareIcon className="w-8 h-8" />
           </div>
@@ -321,6 +323,7 @@ export function VideoActions({ video, onEngagement }: VideoActionsProps) {
       {showComments && (
         <CommentThread
           videoUri={video.uri}
+          videoAuthorDid={video.author.did}
           onClose={() => setShowComments(false)}
         />
       )}
@@ -355,6 +358,14 @@ export function VideoActions({ video, onEngagement }: VideoActionsProps) {
         onClose={() => setShowTipModal(false)}
         recipient={video.author}
         videoUri={video.uri}
+      />
+
+      {/* Share modal */}
+      <ShareModal
+        isOpen={showShareModal}
+        onClose={() => setShowShareModal(false)}
+        video={video}
+        userHandle={user?.handle}
       />
 
       {/* Delete confirmation modal */}

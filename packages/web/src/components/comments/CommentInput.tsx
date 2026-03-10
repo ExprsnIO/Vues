@@ -2,6 +2,7 @@
 
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { useAuth } from '@/lib/auth-context';
+import { MentionInput } from './MentionInput';
 
 interface CommentInputProps {
   onSubmit: (text: string) => void;
@@ -69,26 +70,16 @@ export function CommentInput({
         </div>
       </div>
 
-      {/* Input area */}
-      <div className="flex-1 relative">
-        <textarea
-          ref={textareaRef}
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder={placeholder}
-          maxLength={500}
-          rows={1}
-          className="w-full bg-surface text-text-primary placeholder-text-muted rounded-lg px-3 py-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-accent/50"
-          style={{
-            minHeight: '36px',
-            maxHeight: '120px',
-          }}
-        />
-        <span className="absolute right-2 bottom-1 text-text-muted text-xs">
-          {text.length}/500
-        </span>
-      </div>
+      {/* Input area with mentions support */}
+      <MentionInput
+        value={text}
+        onChange={setText}
+        onKeyDown={handleKeyDown}
+        placeholder={placeholder}
+        maxLength={500}
+        autoFocus={autoFocus}
+        textareaRef={textareaRef}
+      />
 
       {/* Actions */}
       <div className="flex gap-2">

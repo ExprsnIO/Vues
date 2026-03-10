@@ -6,10 +6,10 @@ import Link from 'next/link';
 import { Sidebar, useSidebar } from '@/components/Sidebar';
 import { UserActionsMenu } from '@/components/UserActionsMenu';
 import { BlockedMutedSettings } from '@/components/settings/BlockedMutedSettings';
-import { api, VideoView, OrganizationView } from '@/lib/api';
+import { api, VideoView, OrganizationView, CollectionView } from '@/lib/api';
 import { useAuth } from '@/lib/auth-context';
 import { cn } from '@/lib/utils';
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import toast from 'react-hot-toast';
 
 interface ProfileClientProps {
@@ -21,7 +21,8 @@ export default function ProfileClient({ handle }: ProfileClientProps) {
   const { user, isLoading: authLoading } = useAuth();
   const queryClient = useQueryClient();
   const { openSettings } = useSidebar();
-  const [activeTab, setActiveTab] = useState<'videos' | 'liked' | 'blocked' | 'account'>('videos');
+  const [activeTab, setActiveTab] = useState<'videos' | 'liked' | 'collections' | 'blocked' | 'account'>('videos');
+  const [showStatsModal, setShowStatsModal] = useState(false);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['profile', handle],
@@ -135,7 +136,7 @@ export default function ProfileClient({ handle }: ProfileClientProps) {
                   </div>
 
                   {/* Stats */}
-                  <div className="flex items-center gap-6 mb-4">
+                  <div className="flex items-center gap-6 mb-4 flex-wrap">
                     <Link href={`/profile/${handle}/following`} className="hover:underline">
                       <span className="font-semibold text-text-primary">{formatCount(data.profile.followingCount)}</span>
                       <span className="text-text-muted ml-1">Following</span>
@@ -148,6 +149,20 @@ export default function ProfileClient({ handle }: ProfileClientProps) {
                       <span className="font-semibold text-text-primary">{formatCount(data.profile.videoCount)}</span>
                       <span className="text-text-muted ml-1">Videos</span>
                     </div>
+                    {data.profile.totalViews !== undefined && (
+                      <div>
+                        <span className="font-semibold text-text-primary">{formatCount(data.profile.totalViews)}</span>
+                        <span className="text-text-muted ml-1">Total Views</span>
+                      </div>
+                    )}
+                    {(data.profile.totalViews !== undefined || data.profile.averageEngagement !== undefined || data.profile.mostPopularVideo) && (
+                      <button
+                        onClick={() => setShowStatsModal(true)}
+                        className="text-accent hover:underline text-sm font-medium"
+                      >
+                        View detailed stats
+                      </button>
+                    )}
                   </div>
 
                   {/* Bio */}
@@ -315,6 +330,20 @@ export default function ProfileClient({ handle }: ProfileClientProps) {
                       <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-accent" />
                     )}
                   </button>
+                  <button
+                    onClick={() => setActiveTab('collections')}
+                    className={cn(
+                      'pb-4 px-2 font-medium transition-colors relative',
+                      activeTab === 'collections'
+                        ? 'text-text-primary'
+                        : 'text-text-muted hover:text-text-primary'
+                    )}
+                  >
+                    Collections
+                    {activeTab === 'collections' && (
+                      <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-accent" />
+                    )}
+                  </button>
                   {isOwnProfile && (
                     <>
                       <button
@@ -358,12 +387,29 @@ export default function ProfileClient({ handle }: ProfileClientProps) {
                 />
               ) : activeTab === 'blocked' && isOwnProfile ? (
                 <BlockedMutedSettings />
+              ) : activeTab === 'collections' ? (
+                <CollectionsSection handle={handle} />
               ) : (
                 <>
+                  {/* Pinned Videos Section */}
+                  {activeTab === 'videos' && data.pinnedVideos && data.pinnedVideos.length > 0 && (
+                    <div className="mb-8">
+                      <div className="flex items-center gap-2 mb-4">
+                        <PinIcon className="w-5 h-5 text-text-muted" />
+                        <h2 className="text-lg font-semibold text-text-primary">Pinned Videos</h2>
+                      </div>
+                      <div className="grid grid-cols-3 gap-4">
+                        {data.pinnedVideos.map((video) => (
+                          <VideoThumbnail key={video.uri} video={video} isPinned={true} isOwnProfile={isOwnProfile} />
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
                   {/* Video Grid */}
                   <div className="grid grid-cols-3 gap-4">
                     {data.videos.map((video) => (
-                      <VideoThumbnail key={video.uri} video={video} />
+                      <VideoThumbnail key={video.uri} video={video} isOwnProfile={isOwnProfile} />
                     ))}
                   </div>
 
@@ -380,6 +426,14 @@ export default function ProfileClient({ handle }: ProfileClientProps) {
           ) : null}
         </div>
       </main>
+
+      {/* Enhanced Stats Modal */}
+      {showStatsModal && data && (
+        <StatsModal
+          profile={data.profile}
+          onClose={() => setShowStatsModal(false)}
+        />
+      )}
     </div>
   );
 }
@@ -408,50 +462,195 @@ function ProfileSkeleton() {
   );
 }
 
-function VideoThumbnail({ video }: { video: VideoView }) {
+function VideoThumbnail({ video, isPinned = false, isOwnProfile = false }: { video: VideoView; isPinned?: boolean; isOwnProfile?: boolean }) {
+  const queryClient = useQueryClient();
   const videoUrl = video.video?.cdnUrl || video.cdnUrl;
+  const [isHovering, setIsHovering] = useState(false);
+  const [showPreview, setShowPreview] = useState(false);
+  const [showActions, setShowActions] = useState(false);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const hoverTimeoutRef = useRef<NodeJS.Timeout>();
+
+  // Check if device supports hover (desktop)
+  const supportsHover = typeof window !== 'undefined' && window.matchMedia('(hover: hover)').matches;
+
+  const pinMutation = useMutation({
+    mutationFn: () => api.pinVideo(video.uri),
+    onSuccess: () => {
+      toast.success('Video pinned to profile');
+      queryClient.invalidateQueries({ queryKey: ['profile'] });
+    },
+    onError: () => {
+      toast.error('Failed to pin video');
+    },
+  });
+
+  const unpinMutation = useMutation({
+    mutationFn: () => api.unpinVideo(video.uri),
+    onSuccess: () => {
+      toast.success('Video unpinned');
+      queryClient.invalidateQueries({ queryKey: ['profile'] });
+    },
+    onError: () => {
+      toast.error('Failed to unpin video');
+    },
+  });
+
+  const handleMouseEnter = () => {
+    if (!supportsHover || !videoUrl) return;
+
+    setIsHovering(true);
+    // Delay preview start to avoid accidental triggers
+    hoverTimeoutRef.current = setTimeout(() => {
+      setShowPreview(true);
+      if (videoRef.current) {
+        videoRef.current.currentTime = 0;
+        videoRef.current.play().catch(() => {
+          // Ignore autoplay errors
+        });
+      }
+    }, 300);
+  };
+
+  const handleMouseLeave = () => {
+    setIsHovering(false);
+    setShowPreview(false);
+    if (hoverTimeoutRef.current) {
+      clearTimeout(hoverTimeoutRef.current);
+    }
+    if (videoRef.current) {
+      videoRef.current.pause();
+      videoRef.current.currentTime = 0;
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      if (hoverTimeoutRef.current) {
+        clearTimeout(hoverTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  const handlePinClick = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (isPinned) {
+      unpinMutation.mutate();
+    } else {
+      pinMutation.mutate();
+    }
+  };
 
   return (
-    <Link
-      href={`/video/${encodeURIComponent(video.uri)}`}
-      className="relative aspect-[9/16] bg-surface rounded-lg overflow-hidden group"
-    >
+    <div className="relative aspect-[9/16] bg-surface rounded-lg overflow-hidden group">
+      <Link
+        href={`/video/${encodeURIComponent(video.uri)}`}
+        className="absolute inset-0"
+        onMouseEnter={handleMouseEnter}
+        onMouseLeave={handleMouseLeave}
+      >
+      {/* Thumbnail image */}
       {video.video?.thumbnail || video.thumbnailUrl ? (
         <img
           src={video.video?.thumbnail || video.thumbnailUrl}
           alt={video.caption || 'Video thumbnail'}
-          className="w-full h-full object-cover"
+          className={cn(
+            "w-full h-full object-cover transition-opacity duration-300",
+            showPreview && "opacity-0"
+          )}
         />
-      ) : videoUrl ? (
-        <video
-          src={videoUrl.startsWith('/') ? `http://localhost:3002${videoUrl}` : videoUrl}
-          className="w-full h-full object-cover"
-          muted
-          preload="metadata"
-        />
-      ) : (
+      ) : !videoUrl && (
         <div className="w-full h-full flex items-center justify-center text-text-muted">
           <PlayIcon className="w-12 h-12" />
         </div>
       )}
 
-      {/* Hover overlay */}
-      <div className="absolute inset-0 bg-black/30 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
-        <PlayIcon className="w-12 h-12 text-white" />
+      {/* Preview video (only on desktop hover) */}
+      {videoUrl && supportsHover && (
+        <video
+          ref={videoRef}
+          src={videoUrl.startsWith('/') ? `http://localhost:3002${videoUrl}` : videoUrl}
+          className={cn(
+            "absolute inset-0 w-full h-full object-cover transition-opacity duration-300",
+            showPreview ? "opacity-100" : "opacity-0"
+          )}
+          muted
+          playsInline
+          preload="metadata"
+          onTimeUpdate={(e) => {
+            // Stop after 5 seconds
+            if (e.currentTarget.currentTime >= 5) {
+              e.currentTarget.pause();
+            }
+          }}
+        />
+      )}
+
+      {/* Hover overlay with enhanced view count */}
+      <div className={cn(
+        "absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent transition-opacity duration-300",
+        isHovering ? "opacity-100" : "opacity-0"
+      )}>
+        <div className="absolute inset-0 flex items-center justify-center">
+          {!showPreview && <PlayIcon className="w-12 h-12 text-white drop-shadow-lg" />}
+        </div>
+
+        {/* Enhanced view count on hover */}
+        {isHovering && (
+          <div className="absolute top-2 left-2 right-2">
+            <div className="bg-black/70 backdrop-blur-sm rounded-md px-3 py-2">
+              <div className="flex items-center gap-2 text-white text-sm font-medium">
+                <PlayIcon className="w-4 h-4" />
+                <span>{formatCount(video.viewCount)} views</span>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
-      {/* Stats overlay */}
-      <div className="absolute bottom-2 left-2 right-2 flex items-center gap-3 text-white text-sm">
-        <span className="flex items-center gap-1">
-          <PlayIcon className="w-4 h-4" />
-          {formatCount(video.viewCount)}
-        </span>
-        <span className="flex items-center gap-1">
-          <HeartIcon className="w-4 h-4" />
-          {formatCount(video.likeCount)}
-        </span>
-      </div>
-    </Link>
+        {/* Stats overlay (always visible at bottom) */}
+        <div className="absolute bottom-2 left-2 right-2 flex items-center gap-3 text-white text-sm drop-shadow-lg">
+          <span className="flex items-center gap-1">
+            <PlayIcon className="w-4 h-4" />
+            {formatCount(video.viewCount)}
+          </span>
+          <span className="flex items-center gap-1">
+            <HeartIcon className="w-4 h-4" />
+            {formatCount(video.likeCount)}
+          </span>
+        </div>
+      </Link>
+
+      {/* Pin badge (for pinned videos) */}
+      {isPinned && (
+        <div className="absolute top-2 right-2 bg-accent text-white rounded-full p-1.5 shadow-lg z-10">
+          <PinIcon className="w-4 h-4" />
+        </div>
+      )}
+
+      {/* Pin/Unpin action button (for own videos on hover) */}
+      {isOwnProfile && supportsHover && (
+        <button
+          onClick={handlePinClick}
+          disabled={pinMutation.isPending || unpinMutation.isPending}
+          className={cn(
+            "absolute top-2 right-2 bg-black/70 backdrop-blur-sm text-white rounded-full p-2 shadow-lg transition-opacity z-10",
+            "hover:bg-black/90",
+            isHovering ? "opacity-100" : "opacity-0 pointer-events-none"
+          )}
+          title={isPinned ? "Unpin from profile" : "Pin to profile"}
+        >
+          {pinMutation.isPending || unpinMutation.isPending ? (
+            <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+          ) : isPinned ? (
+            <UnpinIcon className="w-4 h-4" />
+          ) : (
+            <PinIcon className="w-4 h-4" />
+          )}
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -669,6 +868,318 @@ function StudioIcon({ className }: { className?: string }) {
   return (
     <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
       <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 10.5l4.72-4.72a.75.75 0 011.28.53v11.38a.75.75 0 01-1.28.53l-4.72-4.72M4.5 18.75h9a2.25 2.25 0 002.25-2.25v-9a2.25 2.25 0 00-2.25-2.25h-9A2.25 2.25 0 002.25 7.5v9a2.25 2.25 0 002.25 2.25z" />
+    </svg>
+  );
+}
+
+function PinIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="currentColor" viewBox="0 0 24 24">
+      <path d="M16 12V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v8l-2 2v2h5v6h2v-6h5v-2l-2-2zm-6 0V4h4v8.5l1.5 1.5h-7l1.5-1.5z" />
+    </svg>
+  );
+}
+
+function UnpinIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="currentColor" viewBox="0 0 24 24">
+      <path d="M2 5.27L3.28 4 20 20.72 18.73 22l-3.73-3.73V22h-2v-6H8v-2l2-2V9.27L2 1.27 3.28 0 2 5.27zM16 12V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.04 0-.08.01-.12.01l9.11 9.11V12h-.01L18 14v2h-3.73L16 12zm-6 0V9.27l1.73 1.73L10 12z" />
+    </svg>
+  );
+}
+
+function StatsModal({ profile, onClose }: { profile: any; onClose: () => void }) {
+  useEffect(() => {
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', handleEscape);
+    return () => document.removeEventListener('keydown', handleEscape);
+  }, [onClose]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm" onClick={onClose}>
+      <div className="bg-surface rounded-2xl max-w-2xl w-full max-h-[80vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+        {/* Header */}
+        <div className="sticky top-0 bg-surface border-b border-border px-6 py-4 flex items-center justify-between">
+          <h2 className="text-xl font-bold text-text-primary">Profile Statistics</h2>
+          <button
+            onClick={onClose}
+            className="p-2 hover:bg-surface-hover rounded-lg transition-colors"
+            aria-label="Close"
+          >
+            <CloseIcon className="w-5 h-5 text-text-muted" />
+          </button>
+        </div>
+
+        {/* Content */}
+        <div className="p-6 space-y-6">
+          {/* Overview Stats */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+            <StatCard
+              label="Total Videos"
+              value={formatCount(profile.videoCount)}
+              icon={<VideoIcon className="w-5 h-5 text-blue-500" />}
+            />
+            <StatCard
+              label="Total Views"
+              value={formatCount(profile.totalViews || 0)}
+              icon={<EyeIcon className="w-5 h-5 text-purple-500" />}
+            />
+            <StatCard
+              label="Followers"
+              value={formatCount(profile.followerCount)}
+              icon={<UsersIcon className="w-5 h-5 text-green-500" />}
+            />
+            <StatCard
+              label="Following"
+              value={formatCount(profile.followingCount)}
+              icon={<FollowingIcon className="w-5 h-5 text-yellow-500" />}
+            />
+            {profile.averageEngagement !== undefined && (
+              <StatCard
+                label="Avg Engagement"
+                value={`${profile.averageEngagement.toFixed(1)}%`}
+                icon={<ChartIcon className="w-5 h-5 text-pink-500" />}
+              />
+            )}
+            {profile.videoCount > 0 && profile.totalViews && (
+              <StatCard
+                label="Avg Views/Video"
+                value={formatCount(Math.floor(profile.totalViews / profile.videoCount))}
+                icon={<TrendingIcon className="w-5 h-5 text-accent" />}
+              />
+            )}
+          </div>
+
+          {/* Most Popular Video */}
+          {profile.mostPopularVideo && (
+            <div className="bg-background rounded-xl p-4">
+              <h3 className="text-sm font-semibold text-text-muted mb-3 uppercase">Most Popular Video</h3>
+              <Link
+                href={`/video/${encodeURIComponent(profile.mostPopularVideo.uri)}`}
+                className="flex gap-4 hover:bg-surface-hover rounded-lg p-2 -m-2 transition-colors"
+              >
+                <div className="w-24 h-32 bg-surface rounded-lg overflow-hidden flex-shrink-0">
+                  {profile.mostPopularVideo.video?.thumbnail || profile.mostPopularVideo.thumbnailUrl ? (
+                    <img
+                      src={profile.mostPopularVideo.video?.thumbnail || profile.mostPopularVideo.thumbnailUrl}
+                      alt="Most popular video"
+                      className="w-full h-full object-cover"
+                    />
+                  ) : (
+                    <div className="w-full h-full flex items-center justify-center">
+                      <PlayIcon className="w-8 h-8 text-text-muted" />
+                    </div>
+                  )}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-text-primary font-medium line-clamp-2 mb-2">
+                    {profile.mostPopularVideo.caption || 'Untitled video'}
+                  </p>
+                  <div className="flex flex-wrap gap-3 text-sm text-text-muted">
+                    <span className="flex items-center gap-1">
+                      <PlayIcon className="w-4 h-4" />
+                      {formatCount(profile.mostPopularVideo.viewCount)} views
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <HeartIcon className="w-4 h-4" />
+                      {formatCount(profile.mostPopularVideo.likeCount)} likes
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <CommentIcon className="w-4 h-4" />
+                      {formatCount(profile.mostPopularVideo.commentCount)} comments
+                    </span>
+                  </div>
+                </div>
+              </Link>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function StatCard({ label, value, icon }: { label: string; value: string; icon: React.ReactNode }) {
+  return (
+    <div className="bg-background rounded-xl p-4">
+      <div className="flex items-center gap-3 mb-2">
+        <div className="w-10 h-10 rounded-lg bg-surface flex items-center justify-center">
+          {icon}
+        </div>
+      </div>
+      <p className="text-2xl font-bold text-text-primary mb-1">{value}</p>
+      <p className="text-sm text-text-muted">{label}</p>
+    </div>
+  );
+}
+
+function CloseIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+    </svg>
+  );
+}
+
+function VideoIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 10.5l4.72-4.72a.75.75 0 011.28.53v11.38a.75.75 0 01-1.28.53l-4.72-4.72M12 18.75H4.5a2.25 2.25 0 01-2.25-2.25V9m12.841 9.091L16.5 19.5m-1.409-1.409c.407-.407.659-.97.659-1.591v-9a2.25 2.25 0 00-2.25-2.25h-9c-.621 0-1.184.252-1.591.659m12.182 12.182L2.909 5.909M1.5 4.5l1.409 1.409" />
+    </svg>
+  );
+}
+
+function EyeIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M2.036 12.322a1.012 1.012 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178z" />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+    </svg>
+  );
+}
+
+function UsersIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M15 19.128a9.38 9.38 0 002.625.372 9.337 9.337 0 004.121-.952 4.125 4.125 0 00-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 018.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0111.964-3.07M12 6.375a3.375 3.375 0 11-6.75 0 3.375 3.375 0 016.75 0zm8.25 2.25a2.625 2.625 0 11-5.25 0 2.625 2.625 0 015.25 0z" />
+    </svg>
+  );
+}
+
+function FollowingIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M19 7.5v3m0 0v3m0-3h3m-3 0h-3m-2.25-4.125a3.375 3.375 0 11-6.75 0 3.375 3.375 0 016.75 0zM4 19.235v-.11a6.375 6.375 0 0112.75 0v.109A12.318 12.318 0 0110.374 21c-2.331 0-4.512-.645-6.374-1.766z" />
+    </svg>
+  );
+}
+
+function ChartIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z" />
+    </svg>
+  );
+}
+
+function TrendingIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 18L9 11.25l4.306 4.307a11.95 11.95 0 015.814-5.519l2.74-1.22m0 0l-5.94-2.28m5.94 2.28l-2.28 5.941" />
+    </svg>
+  );
+}
+
+function CommentIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M8.625 12a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H8.25m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H12m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0h-.375M21 12c0 4.556-4.03 8.25-9 8.25a9.764 9.764 0 01-2.555-.337A5.972 5.972 0 015.41 20.97a5.969 5.969 0 01-.474-.065 4.48 4.48 0 00.978-2.025c.09-.457-.133-.901-.467-1.226C3.93 16.178 3 14.189 3 12c0-4.556 4.03-8.25 9-8.25s9 3.694 9 8.25z" />
+    </svg>
+  );
+}
+
+function CollectionsSection({ handle }: { handle: string }) {
+  const { data: collectionsData, isLoading } = useQuery({
+    queryKey: ['collections', handle],
+    queryFn: () => api.getUserCollections(handle),
+  });
+
+  if (isLoading) {
+    return (
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+        {[...Array(6)].map((_, i) => (
+          <div key={i} className="aspect-square bg-surface rounded-lg animate-pulse" />
+        ))}
+      </div>
+    );
+  }
+
+  const collections = collectionsData?.collections || [];
+
+  if (collections.length === 0) {
+    return (
+      <div className="text-center py-16">
+        <CollectionGridIcon className="w-16 h-16 text-text-muted mx-auto mb-4" />
+        <p className="text-text-muted mb-2">No collections yet</p>
+        <p className="text-sm text-text-muted">Collections will appear here</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+      {collections.map((collection) => (
+        <CollectionCard key={collection.id} collection={collection} />
+      ))}
+    </div>
+  );
+}
+
+function CollectionCard({ collection }: { collection: CollectionView }) {
+  return (
+    <Link
+      href={`/collection/${collection.id}`}
+      className="bg-surface rounded-lg overflow-hidden hover:bg-surface-hover transition-colors group"
+    >
+      {/* Thumbnail Grid (2x2) */}
+      <div className="aspect-square grid grid-cols-2 gap-0.5 bg-background">
+        {collection.thumbnails.slice(0, 4).map((thumb, i) => (
+          <div key={i} className="relative bg-surface overflow-hidden">
+            <img
+              src={thumb}
+              alt=""
+              className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+            />
+          </div>
+        ))}
+        {/* Fill empty slots if less than 4 thumbnails */}
+        {[...Array(Math.max(0, 4 - collection.thumbnails.length))].map((_, i) => (
+          <div key={`empty-${i}`} className="bg-surface flex items-center justify-center">
+            <PlayIcon className="w-8 h-8 text-text-muted opacity-30" />
+          </div>
+        ))}
+      </div>
+
+      {/* Collection Info */}
+      <div className="p-4">
+        <h3 className="font-semibold text-text-primary mb-1 line-clamp-1">
+          {collection.name}
+        </h3>
+        {collection.description && (
+          <p className="text-sm text-text-muted mb-2 line-clamp-2">
+            {collection.description}
+          </p>
+        )}
+        <div className="flex items-center gap-2 text-sm text-text-muted">
+          <CollectionGridIcon className="w-4 h-4" />
+          <span>{collection.videoCount} video{collection.videoCount !== 1 ? 's' : ''}</span>
+          {!collection.isPublic && (
+            <>
+              <span>•</span>
+              <LockIcon className="w-4 h-4" />
+              <span>Private</span>
+            </>
+          )}
+        </div>
+      </div>
+    </Link>
+  );
+}
+
+function CollectionGridIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 7.125C2.25 6.504 2.754 6 3.375 6h6c.621 0 1.125.504 1.125 1.125v3.75c0 .621-.504 1.125-1.125 1.125h-6a1.125 1.125 0 01-1.125-1.125v-3.75zM14.25 8.625c0-.621.504-1.125 1.125-1.125h5.25c.621 0 1.125.504 1.125 1.125v8.25c0 .621-.504 1.125-1.125 1.125h-5.25a1.125 1.125 0 01-1.125-1.125v-8.25zM3.75 16.125c0-.621.504-1.125 1.125-1.125h5.25c.621 0 1.125.504 1.125 1.125v2.25c0 .621-.504 1.125-1.125 1.125h-5.25a1.125 1.125 0 01-1.125-1.125v-2.25z" />
+    </svg>
+  );
+}
+
+function LockIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z" />
     </svg>
   );
 }

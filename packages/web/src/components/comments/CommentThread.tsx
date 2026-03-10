@@ -12,12 +12,13 @@ type CommentsPosition = 'side' | 'bottom';
 
 interface CommentThreadProps {
   videoUri: string;
+  videoAuthorDid?: string;
   onClose?: () => void;
   inline?: boolean;
   position?: CommentsPosition;
 }
 
-export function CommentThread({ videoUri, onClose, inline = false, position = 'side' }: CommentThreadProps) {
+export function CommentThread({ videoUri, videoAuthorDid, onClose, inline = false, position = 'side' }: CommentThreadProps) {
   const { user } = useAuth();
   const queryClient = useQueryClient();
   const [sort, setSort] = useState<CommentSortType>('top');
@@ -112,6 +113,8 @@ export function CommentThread({ videoUri, onClose, inline = false, position = 's
                 isReplying={replyingTo === comment.uri}
                 onSubmitReply={(text) => handleSubmitComment(text, comment.uri)}
                 onCancelReply={handleCancelReply}
+                videoUri={videoUri}
+                videoAuthorDid={videoAuthorDid}
               />
             ))}
             {hasNextPage && (

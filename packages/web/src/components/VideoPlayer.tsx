@@ -60,6 +60,10 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [isMuted, setIsMuted] = useState(muted);
+  const [volume, setVolume] = useState(1);
+  const [showVolumeSlider, setShowVolumeSlider] = useState(false);
+  const [playbackSpeed, setPlaybackSpeed] = useState(1);
+  const [showSpeedMenu, setShowSpeedMenu] = useState(false);
   const [showPlayIcon, setShowPlayIcon] = useState(false);
   const [showLikeAnimation, setShowLikeAnimation] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -71,6 +75,37 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
   const [currentQuality, setCurrentQuality] = useState(-1); // -1 = auto
   const [showQualityMenu, setShowQualityMenu] = useState(false);
   const [isSeeking, setIsSeeking] = useState(false);
+  const [hoverTime, setHoverTime] = useState<number | null>(null);
+  const [hoverPosition, setHoverPosition] = useState<number>(0);
+  const [isPiPSupported, setIsPiPSupported] = useState(false);
+  const [isPiPActive, setIsPiPActive] = useState(false);
+
+  // Load saved preferences
+  useEffect(() => {
+    const savedVolume = localStorage.getItem('exprsn-video-volume');
+    const savedSpeed = localStorage.getItem('exprsn-video-speed');
+
+    if (savedVolume) {
+      const vol = parseFloat(savedVolume);
+      setVolume(vol);
+      if (videoRef.current) {
+        videoRef.current.volume = vol;
+      }
+    }
+
+    if (savedSpeed) {
+      const speed = parseFloat(savedSpeed);
+      setPlaybackSpeed(speed);
+      if (videoRef.current) {
+        videoRef.current.playbackRate = speed;
+      }
+    }
+
+    // Check PiP support
+    if (document.pictureInPictureEnabled) {
+      setIsPiPSupported(true);
+    }
+  }, []);
 
   // Expose controls to parent
   useImperativeHandle(ref, () => ({
@@ -252,6 +287,53 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
     setIsMuted(video.muted);
   }, []);
 
+  const handleVolumeChange = useCallback((newVolume: number) => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    video.volume = newVolume;
+    setVolume(newVolume);
+    localStorage.setItem('exprsn-video-volume', newVolume.toString());
+
+    // Unmute if volume is increased from 0
+    if (newVolume > 0 && video.muted) {
+      video.muted = false;
+      setIsMuted(false);
+    }
+    // Mute if volume is set to 0
+    if (newVolume === 0 && !video.muted) {
+      video.muted = true;
+      setIsMuted(true);
+    }
+  }, []);
+
+  const handleSpeedChange = useCallback((speed: number) => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    video.playbackRate = speed;
+    setPlaybackSpeed(speed);
+    localStorage.setItem('exprsn-video-speed', speed.toString());
+    setShowSpeedMenu(false);
+  }, []);
+
+  const togglePiP = useCallback(async () => {
+    const video = videoRef.current;
+    if (!video || !isPiPSupported) return;
+
+    try {
+      if (document.pictureInPictureElement) {
+        await document.exitPictureInPicture();
+        setIsPiPActive(false);
+      } else {
+        await video.requestPictureInPicture();
+        setIsPiPActive(true);
+      }
+    } catch (error) {
+      console.error('PiP error:', error);
+    }
+  }, [isPiPSupported]);
+
   // Handle click with double-tap detection
   const handleClick = useCallback((e: React.MouseEvent) => {
     const now = Date.now();
@@ -347,6 +429,26 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
   const handleMouseLeave = useCallback(() => {
     setShowControlsOverlay(false);
     setShowQualityMenu(false);
+    setShowVolumeSlider(false);
+    setShowSpeedMenu(false);
+  }, []);
+
+  // Handle progress bar hover for time preview
+  const handleProgressHover = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    const progressBar = progressRef.current;
+    if (!progressBar || !duration) return;
+
+    const rect = progressBar.getBoundingClientRect();
+    const hoverX = e.clientX - rect.left;
+    const percentage = Math.max(0, Math.min(1, hoverX / rect.width));
+    const time = percentage * duration;
+
+    setHoverTime(time);
+    setHoverPosition(percentage * 100);
+  }, [duration]);
+
+  const handleProgressLeave = useCallback(() => {
+    setHoverTime(null);
   }, []);
 
   const progressPercentage = duration > 0 ? (currentTime / duration) * 100 : 0;
@@ -414,6 +516,8 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
             ref={progressRef}
             className="relative h-1 bg-white/30 rounded-full cursor-pointer mb-3 group/progress"
             onMouseDown={handleSeekStart}
+            onMouseMove={handleProgressHover}
+            onMouseLeave={handleProgressLeave}
           >
             {/* Buffered progress */}
             <div
@@ -430,6 +534,15 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
               className="absolute top-1/2 -translate-y-1/2 w-3 h-3 bg-white rounded-full shadow-lg opacity-0 group-hover/progress:opacity-100 transition-opacity"
               style={{ left: `calc(${progressPercentage}% - 6px)` }}
             />
+            {/* Time tooltip on hover */}
+            {hoverTime !== null && (
+              <div
+                className="absolute bottom-full mb-2 -translate-x-1/2 px-2 py-1 bg-black/90 text-white text-xs rounded whitespace-nowrap pointer-events-none"
+                style={{ left: `${hoverPosition}%` }}
+              >
+                {formatTime(hoverTime)}
+              </div>
+            )}
           </div>
 
           {/* Controls row */}
@@ -454,8 +567,44 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
               </span>
             </div>
 
-            {/* Right side: Quality and Mute */}
+            {/* Right side: Speed, Quality, Volume, and PiP */}
             <div className="flex items-center gap-2">
+              {/* Playback speed */}
+              <div className="relative">
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setShowSpeedMenu(!showSpeedMenu);
+                  }}
+                  className="p-1.5 hover:bg-white/20 rounded transition-colors flex items-center gap-1"
+                >
+                  <span className="text-white text-xs font-medium min-w-[32px]">
+                    {playbackSpeed}x
+                  </span>
+                </button>
+
+                {/* Speed menu */}
+                {showSpeedMenu && (
+                  <div className="absolute bottom-full right-0 mb-2 bg-black/90 rounded-lg overflow-hidden min-w-[80px]">
+                    {[0.5, 0.75, 1, 1.25, 1.5, 2].map((speed) => (
+                      <button
+                        key={speed}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleSpeedChange(speed);
+                        }}
+                        className={cn(
+                          'w-full px-3 py-2 text-left text-sm hover:bg-white/10 transition-colors',
+                          playbackSpeed === speed ? 'text-accent' : 'text-white'
+                        )}
+                      >
+                        {speed}x
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+
               {/* Quality selector */}
               {qualityLevels.length > 1 && (
                 <div className="relative">
@@ -517,20 +666,78 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
                 </div>
               )}
 
-              {/* Mute button */}
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  toggleMute();
-                }}
-                className="p-1.5 hover:bg-white/20 rounded transition-colors"
+              {/* Volume control with slider */}
+              <div
+                className="relative group/volume"
+                onMouseEnter={() => setShowVolumeSlider(true)}
+                onMouseLeave={() => setShowVolumeSlider(false)}
               >
-                {isMuted ? (
-                  <MutedIcon className="w-5 h-5 text-white" />
-                ) : (
-                  <VolumeIcon className="w-5 h-5 text-white" />
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    toggleMute();
+                  }}
+                  onTouchStart={(e) => {
+                    e.stopPropagation();
+                    setShowVolumeSlider(!showVolumeSlider);
+                  }}
+                  className="p-1.5 hover:bg-white/20 rounded transition-colors"
+                >
+                  {isMuted || volume === 0 ? (
+                    <MutedIcon className="w-5 h-5 text-white" />
+                  ) : volume < 0.5 ? (
+                    <VolumeLowIcon className="w-5 h-5 text-white" />
+                  ) : (
+                    <VolumeIcon className="w-5 h-5 text-white" />
+                  )}
+                </button>
+
+                {/* Volume slider */}
+                {showVolumeSlider && (
+                  <div className="absolute bottom-full right-0 mb-2 p-2 bg-black/90 rounded-lg">
+                    <div className="flex flex-col items-center h-24 w-8">
+                      <input
+                        type="range"
+                        min="0"
+                        max="1"
+                        step="0.01"
+                        value={volume}
+                        onChange={(e) => {
+                          e.stopPropagation();
+                          handleVolumeChange(parseFloat(e.target.value));
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                        className="volume-slider h-20 w-1"
+                        style={{
+                          writingMode: 'vertical-lr' as React.CSSProperties['writingMode'],
+                          WebkitAppearance: 'slider-vertical' as any,
+                          appearance: 'auto',
+                          transform: 'rotate(180deg)',
+                        }}
+                      />
+                      <span className="text-white text-xs mt-1">
+                        {Math.round(volume * 100)}%
+                      </span>
+                    </div>
+                  </div>
                 )}
-              </button>
+              </div>
+
+              {/* Picture-in-Picture */}
+              {isPiPSupported && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    togglePiP();
+                  }}
+                  className={cn(
+                    'p-1.5 hover:bg-white/20 rounded transition-colors',
+                    isPiPActive && 'bg-white/20'
+                  )}
+                >
+                  <PiPIcon className="w-5 h-5 text-white" />
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -601,6 +808,23 @@ function SettingsIcon({ className }: { className?: string }) {
     <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
       <path strokeLinecap="round" strokeLinejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
       <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+    </svg>
+  );
+}
+
+function VolumeLowIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="currentColor" viewBox="0 0 24 24">
+      <path d="M7 9v6h4l5 5V4l-5 5H7z" />
+    </svg>
+  );
+}
+
+function PiPIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M7 9a2 2 0 012-2h6a2 2 0 012 2v6a2 2 0 01-2 2H9a2 2 0 01-2-2V9z" />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M13 7h6a2 2 0 012 2v10a2 2 0 01-2 2H5a2 2 0 01-2-2V9a2 2 0 012-2h6" />
     </svg>
   );
 }

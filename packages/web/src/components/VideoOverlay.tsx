@@ -9,6 +9,15 @@ interface VideoOverlayProps {
 }
 
 export function VideoOverlay({ video }: VideoOverlayProps) {
+  // Type guard for sound property
+  const videoWithSound = video as VideoView & {
+    sound?: {
+      id: string;
+      title: string;
+      artist?: string;
+    }
+  };
+
   return (
     <div className="absolute bottom-0 left-0 right-20 p-4 pb-6 bg-gradient-to-t from-black/80 via-black/40 to-transparent">
       {/* Author info */}
@@ -44,16 +53,22 @@ export function VideoOverlay({ video }: VideoOverlayProps) {
         </div>
       )}
 
-      {/* Sound - if available */}
-      {video.tags && video.tags.includes('music') && (
-        <div className="flex items-center gap-2 mt-2">
-          <MusicIcon className="w-4 h-4 text-white" />
-          <div className="overflow-hidden">
-            <p className="text-white text-sm truncate animate-marquee">
-              Original Sound - @{video.author.handle}
+      {/* Sound attribution - clickable link to sound page */}
+      {videoWithSound.sound && (
+        <Link
+          href={`/sound/${videoWithSound.sound.id}`}
+          className="flex items-center gap-2 mt-2 group cursor-pointer"
+        >
+          <MusicIcon className="w-4 h-4 text-white animate-spin-slow" />
+          <div className="flex-1 overflow-hidden">
+            <p className="text-white text-sm truncate group-hover:underline">
+              {videoWithSound.sound.artist
+                ? `${videoWithSound.sound.title} - ${videoWithSound.sound.artist}`
+                : videoWithSound.sound.title || `Original Sound - @${video.author.handle}`
+              }
             </p>
           </div>
-        </div>
+        </Link>
       )}
 
       {/* Timestamp */}

@@ -4,7 +4,9 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { api, type CommentView, type ReactionType } from '@/lib/api';
 import { ReactionPicker } from './ReactionPicker';
+import { CommentEmojiPicker, type CommentEmojiType } from './CommentEmojiPicker';
 import { CommentInput } from './CommentInput';
+import { CommentText } from './CommentText';
 import { ReportModal } from '@/components/ReportModal';
 import { useAuth } from '@/lib/auth-context';
 import { useLoginModal } from '@/components/LoginModal';
@@ -17,6 +19,8 @@ interface CommentItemProps {
   onSubmitReply: (text: string) => void;
   onCancelReply: () => void;
   isNested?: boolean;
+  videoUri?: string;
+  videoAuthorDid?: string;
 }
 
 export function CommentItem({
@@ -26,6 +30,8 @@ export function CommentItem({
   onSubmitReply,
   onCancelReply,
   isNested = false,
+  videoUri,
+  videoAuthorDid,
 }: CommentItemProps) {
   const { user } = useAuth();
   const { open: openLoginModal } = useLoginModal();
@@ -42,6 +48,23 @@ export function CommentItem({
     love: comment.loveCount,
     dislike: comment.dislikeCount,
   });
+  const [currentEmoji, setCurrentEmoji] = useState<CommentEmojiType | undefined>(
+    comment.viewer?.emoji
+  );
+  const [emojiCounts, setEmojiCounts] = useState<Record<CommentEmojiType, number>>(
+    comment.emojiCounts || {
+      heart: 0,
+      laugh: 0,
+      wow: 0,
+      sad: 0,
+      angry: 0,
+      clap: 0,
+    }
+  );
+  const [isPinned, setIsPinned] = useState(comment.isPinned || false);
+
+  // Check if current user is video owner (can pin comments)
+  const isVideoOwner = user?.did === videoAuthorDid;
 
   // Close menu when clicking outside
   useEffect(() => {
@@ -112,6 +135,73 @@ export function CommentItem({
     [user, reactionMutation]
   );
 
+  const emojiReactionMutation = useMutation({
+    mutationFn: async (emojiType: CommentEmojiType) => {
+      if (currentEmoji === emojiType) {
+        await api.removeCommentEmoji(comment.uri);
+        return { removed: true, type: emojiType };
+      }
+      await api.addCommentEmoji(comment.uri, emojiType);
+      return { removed: false, type: emojiType };
+    },
+    onMutate: async (emojiType) => {
+      const prevEmoji = currentEmoji;
+      const newCounts = { ...emojiCounts };
+
+      if (prevEmoji) {
+        newCounts[prevEmoji] = Math.max(0, newCounts[prevEmoji] - 1);
+      }
+
+      if (emojiType !== prevEmoji) {
+        newCounts[emojiType] = newCounts[emojiType] + 1;
+        setCurrentEmoji(emojiType);
+      } else {
+        setCurrentEmoji(undefined);
+      }
+
+      setEmojiCounts(newCounts);
+      return { prevEmoji, prevCounts: emojiCounts };
+    },
+    onError: (_, __, context) => {
+      if (context) {
+        setCurrentEmoji(context.prevEmoji);
+        setEmojiCounts(context.prevCounts);
+      }
+    },
+  });
+
+  const handleEmojiReaction = useCallback(
+    (emojiType: CommentEmojiType) => {
+      if (!user) {
+        openLoginModal('Log in to react to this comment');
+        return;
+      }
+      emojiReactionMutation.mutate(emojiType);
+    },
+    [user, openLoginModal, emojiReactionMutation]
+  );
+
+  const pinMutation = useMutation({
+    mutationFn: async () => {
+      if (isPinned) {
+        await api.unpinComment(videoUri!);
+        return { pinned: false };
+      }
+      await api.pinComment(comment.uri, videoUri!);
+      return { pinned: true };
+    },
+    onSuccess: (data) => {
+      setIsPinned(data.pinned);
+      queryClient.invalidateQueries({ queryKey: ['comments', videoUri] });
+    },
+  });
+
+  const handlePin = useCallback(() => {
+    if (!isVideoOwner || !videoUri) return;
+    setShowMenu(false);
+    pinMutation.mutate();
+  }, [isVideoOwner, videoUri, pinMutation]);
+
   const handleReplyClick = useCallback(() => {
     onReply(comment.uri);
   }, [comment.uri, onReply]);
@@ -144,26 +234,38 @@ export function CommentItem({
 
         {/* Content */}
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <span className="font-medium text-text-primary text-sm">
               {comment.author.displayName || `@${comment.author.handle}`}
             </span>
             <span className="text-text-muted text-xs">
               {formatDistanceToNow(new Date(comment.createdAt))}
             </span>
+            {isPinned && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-accent/20 text-accent text-xs font-medium rounded-full">
+                <PinIcon className="w-3 h-3" />
+                Pinned
+              </span>
+            )}
           </div>
 
-          <p className="text-text-primary text-sm mt-1 whitespace-pre-wrap">
-            {comment.text}
-          </p>
+          <CommentText text={comment.text} />
 
           {/* Actions */}
-          <div className="flex items-center gap-4 mt-2">
+          <div className="flex items-center gap-4 mt-2 flex-wrap">
             <ReactionPicker
               currentReaction={currentReaction}
               counts={reactionCounts}
               onReact={handleReaction}
               disabled={!user}
+            />
+
+            <CommentEmojiPicker
+              currentEmoji={currentEmoji}
+              counts={emojiCounts}
+              onReact={handleEmojiReaction}
+              disabled={!user}
+              compact
             />
 
             {!isNested && (
@@ -185,7 +287,17 @@ export function CommentItem({
               </button>
 
               {showMenu && (
-                <div className="absolute left-0 top-full mt-1 py-1 bg-surface border border-border rounded-lg shadow-lg z-10 min-w-[120px]">
+                <div className="absolute left-0 top-full mt-1 py-1 bg-surface border border-border rounded-lg shadow-lg z-10 min-w-[140px]">
+                  {isVideoOwner && !isNested && videoUri && (
+                    <button
+                      onClick={handlePin}
+                      disabled={pinMutation.isPending}
+                      className="w-full px-3 py-2 text-left text-sm text-text-primary hover:bg-surface-hover flex items-center gap-2"
+                    >
+                      <PinIcon className="w-4 h-4" />
+                      {isPinned ? 'Unpin comment' : 'Pin comment'}
+                    </button>
+                  )}
                   <button
                     onClick={handleReport}
                     className="w-full px-3 py-2 text-left text-sm text-red-500 hover:bg-surface-hover flex items-center gap-2"
@@ -233,6 +345,8 @@ export function CommentItem({
                       onSubmitReply={() => {}}
                       onCancelReply={() => {}}
                       isNested
+                      videoUri={videoUri}
+                      videoAuthorDid={videoAuthorDid}
                     />
                   ))}
                   {comment.replyCount > comment.replies.length && (
@@ -275,6 +389,14 @@ function FlagIcon({ className }: { className?: string }) {
   return (
     <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
       <path strokeLinecap="round" strokeLinejoin="round" d="M3 3v1.5M3 21v-6m0 0l2.77-.693a9 9 0 016.208.682l.108.054a9 9 0 006.086.71l3.114-.732a48.524 48.524 0 01-.005-10.499l-3.11.732a9 9 0 01-6.085-.711l-.108-.054a9 9 0 00-6.208-.682L3 4.5M3 15V4.5" />
+    </svg>
+  );
+}
+
+function PinIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M15 11.25l-3-3m0 0l-3 3m3-3v7.5M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
     </svg>
   );
 }

@@ -33,6 +33,7 @@ export interface VideoView {
   createdAt: string;
   indexedAt: string;
   viewerLike?: string;
+  isPinned?: boolean;
   viewer?: {
     liked?: boolean;
     likeUri?: string;
@@ -46,6 +47,7 @@ export interface FeedResponse {
 
 export type ReactionType = 'like' | 'love' | 'dislike';
 export type VideoReactionType = 'fire' | 'love' | 'laugh' | 'wow' | 'sad' | 'angry';
+export type CommentEmojiType = 'heart' | 'laugh' | 'wow' | 'sad' | 'angry' | 'clap';
 export type CommentSortType = 'top' | 'recent' | 'hot';
 
 export interface VideoReactionsResponse {
@@ -126,8 +128,11 @@ export interface CommentView {
   replyCount: number;
   hotScore: number;
   createdAt: string;
+  isPinned?: boolean;
+  emojiCounts?: Record<CommentEmojiType, number>;
   viewer?: {
     reaction?: ReactionType;
+    emoji?: CommentEmojiType;
   };
   replies?: CommentView[];
 }
@@ -309,6 +314,37 @@ class ApiClient {
     return this.fetch('/xrpc/io.exprsn.video.unreactToComment', {
       method: 'POST',
       body: JSON.stringify({ commentUri }),
+    });
+  }
+
+  async addCommentEmoji(
+    commentUri: string,
+    emojiType: CommentEmojiType
+  ): Promise<{ success: boolean; emojiType: CommentEmojiType }> {
+    return this.fetch('/xrpc/io.exprsn.video.addCommentEmoji', {
+      method: 'POST',
+      body: JSON.stringify({ commentUri, emojiType }),
+    });
+  }
+
+  async removeCommentEmoji(commentUri: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.video.removeCommentEmoji', {
+      method: 'POST',
+      body: JSON.stringify({ commentUri }),
+    });
+  }
+
+  async pinComment(commentUri: string, videoUri: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.video.pinComment', {
+      method: 'POST',
+      body: JSON.stringify({ commentUri, videoUri }),
+    });
+  }
+
+  async unpinComment(videoUri: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.video.unpinComment', {
+      method: 'POST',
+      body: JSON.stringify({ videoUri }),
     });
   }
 
@@ -2407,6 +2443,36 @@ class ApiClient {
       method: 'POST',
       body: JSON.stringify({ uri }),
     });
+  }
+
+  async pinVideo(videoUri: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.video.pin', {
+      method: 'POST',
+      body: JSON.stringify({ videoUri }),
+    });
+  }
+
+  async unpinVideo(videoUri: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.video.unpin', {
+      method: 'POST',
+      body: JSON.stringify({ videoUri }),
+    });
+  }
+
+  async getPinnedVideos(did: string): Promise<{ videos: VideoView[] }> {
+    const params = new URLSearchParams({ did });
+    return this.fetch(`/xrpc/io.exprsn.video.getPinnedVideos?${params}`);
+  }
+
+  async getUserCollections(handleOrDid: string): Promise<{ collections: CollectionView[] }> {
+    const param = handleOrDid.startsWith('did:') ? 'did' : 'handle';
+    const params = new URLSearchParams({ [param]: handleOrDid });
+    return this.fetch(`/xrpc/io.exprsn.collection.list?${params}`);
+  }
+
+  async getCollection(collectionId: string): Promise<{ collection: CollectionView; videos: VideoView[] }> {
+    const params = new URLSearchParams({ collectionId });
+    return this.fetch(`/xrpc/io.exprsn.collection.get?${params}`);
   }
 
   async updateVideo(data: {
@@ -8378,6 +8444,9 @@ export interface ProfileView {
   videoCount: number;
   verified: boolean;
   createdAt: string;
+  totalViews?: number;
+  averageEngagement?: number;
+  mostPopularVideo?: VideoView;
   viewer?: {
     following: boolean;
     followUri?: string;
@@ -8390,9 +8459,21 @@ export interface ProfileView {
   };
 }
 
+export interface CollectionView {
+  id: string;
+  name: string;
+  description?: string;
+  videoCount: number;
+  thumbnails: string[]; // Up to 4 video thumbnails
+  isPublic: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface ProfileResponse {
   profile: ProfileView;
   videos: VideoView[];
+  pinnedVideos?: VideoView[];
 }
 
 export interface UserListItem {
