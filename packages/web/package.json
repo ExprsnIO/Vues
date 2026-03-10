@@ -12,6 +12,7 @@
   "dependencies": {
     "@atproto/api": "^0.14.0",
     "@atproto/oauth-client-browser": "^0.3.41",
+    "@exprsn/api": "workspace:*",
     "@exprsn/shared": "workspace:*",
     "@tanstack/react-query": "^5.62.0",
     "chart.js": "^4.5.1",

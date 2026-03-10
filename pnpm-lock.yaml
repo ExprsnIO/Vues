@@ -553,6 +553,9 @@ importers:
       '@atproto/oauth-client-browser':
         specifier: ^0.3.41
         version: 0.3.41
+      '@exprsn/api':
+        specifier: workspace:*
+        version: link:../api
       '@exprsn/shared':
         specifier: workspace:*
         version: link:../shared
