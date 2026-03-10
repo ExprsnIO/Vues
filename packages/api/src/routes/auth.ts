@@ -4,7 +4,8 @@ import bcrypt from 'bcryptjs';
 import { eq, and, ne, desc } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import crypto from 'crypto';
-import { db, actorRepos, users, sessions, ssoAuditLog } from '../db/index.js';
+import { db, actorRepos, users, sessions, ssoAuditLog, userSettings, notificationSubscriptions, userRenderQuotas, userFeedPreferences, apiTokens, organizations, organizationMembers, organizationRoles } from '../db/index.js';
+import { SYSTEM_ROLES, SYSTEM_ROLE_PERMISSIONS, type SystemRoleName } from '@exprsn/shared';
 import { PlcService, getPlcConfig, type DidMethod } from '../services/plc/index.js';
 import { ExprsnDidService } from '../services/did/index.js';
 import type { OrganizationType } from '@exprsn/shared';
@@ -144,6 +145,262 @@ function determineDefaultDidMethod(accountType?: AccountType): DidMethod {
 }
 
 /**
+ * Generate default user settings based on account type
+ */
+function getDefaultUserSettings(accountType?: AccountType) {
+  // Base defaults for all users
+  const baseSettings = {
+    themeId: 'slate',
+    colorMode: 'dark' as const,
+    accessibility: {
+      reducedMotion: false,
+      highContrast: false,
+      largeText: false,
+      screenReaderOptimized: false,
+    },
+    playback: {
+      autoplay: true,
+      defaultQuality: 'auto' as const,
+      defaultMuted: false,
+      loopVideos: false,
+      dataSaver: false,
+    },
+    content: {
+      language: 'en',
+      contentWarnings: true,
+      sensitiveContent: false,
+    },
+    layout: {
+      commentsPosition: 'side' as const,
+    },
+  };
+
+  // Creator accounts get semi-private defaults (DMs/comments from followers only)
+  if (accountType === 'creator') {
+    return {
+      ...baseSettings,
+      privacy: {
+        privateAccount: false, // Profile visible for discoverability
+        showActivityStatus: true,
+        allowDuets: true,
+        allowStitches: true,
+        allowComments: 'following' as const, // Comments from followers only
+        allowMessages: 'following' as const, // DMs from followers only
+      },
+    };
+  }
+
+  // Business/organization accounts - public by default for brand presence
+  if (accountType === 'business' || accountType === 'organization') {
+    return {
+      ...baseSettings,
+      privacy: {
+        privateAccount: false,
+        showActivityStatus: true,
+        allowDuets: false, // Brands typically don't want duets
+        allowStitches: false,
+        allowComments: 'everyone' as const,
+        allowMessages: 'everyone' as const,
+      },
+    };
+  }
+
+  // Personal accounts - balanced defaults
+  return {
+    ...baseSettings,
+    privacy: {
+      privateAccount: false,
+      showActivityStatus: true,
+      allowDuets: true,
+      allowStitches: true,
+      allowComments: 'everyone' as const,
+      allowMessages: 'everyone' as const,
+    },
+  };
+}
+
+/**
+ * Get render quota limits based on account type
+ */
+function getRenderQuotaLimits(accountType?: AccountType) {
+  switch (accountType) {
+    case 'creator':
+      return { dailyLimit: 25, weeklyLimit: 150, concurrentLimit: 3, maxQuality: 'ultra' as const };
+    case 'business':
+      return { dailyLimit: 50, weeklyLimit: 300, concurrentLimit: 5, maxQuality: 'ultra' as const };
+    case 'organization':
+      return { dailyLimit: 100, weeklyLimit: 500, concurrentLimit: 10, maxQuality: 'ultra' as const };
+    default: // personal
+      return { dailyLimit: 10, weeklyLimit: 50, concurrentLimit: 2, maxQuality: 'high' as const };
+  }
+}
+
+/**
+ * Generate a secure API token
+ */
+function generateApiToken(): { token: string; tokenHash: string; tokenPrefix: string } {
+  const token = `exp_${nanoid(32)}`;
+  const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+  const tokenPrefix = token.slice(0, 12);
+  return { token, tokenHash, tokenPrefix };
+}
+
+/**
+ * Get default API token scopes based on account type
+ */
+function getDefaultApiScopes(accountType?: AccountType): string[] {
+  const baseScopes = ['read:profile', 'write:profile', 'read:videos', 'write:videos', 'read:feed'];
+
+  switch (accountType) {
+    case 'creator':
+      return [...baseScopes, 'read:analytics', 'write:comments'];
+    case 'business':
+    case 'organization':
+      return [...baseScopes, 'read:analytics', 'write:comments', 'read:members', 'write:members'];
+    default:
+      return baseScopes;
+  }
+}
+
+/**
+ * Create additional user data during signup
+ */
+async function createUserSignupData(
+  did: string,
+  accountType?: AccountType,
+  organizationData?: { name: string; type: string }
+) {
+  const now = new Date();
+  const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+  const nextWeek = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+
+  // Create notification subscriptions (all enabled by default)
+  await db.insert(notificationSubscriptions).values({
+    userDid: did,
+    likes: true,
+    comments: true,
+    follows: true,
+    mentions: true,
+    reposts: true,
+    messages: true,
+    fromFollowingOnly: false,
+    pushEnabled: true,
+    emailEnabled: false, // Requires email verification first
+  });
+
+  // Create render quotas based on account type
+  const quotaLimits = getRenderQuotaLimits(accountType);
+  await db.insert(userRenderQuotas).values({
+    userDid: did,
+    dailyLimit: quotaLimits.dailyLimit,
+    dailyUsed: 0,
+    dailyResetAt: tomorrow,
+    weeklyLimit: quotaLimits.weeklyLimit,
+    weeklyUsed: 0,
+    weeklyResetAt: nextWeek,
+    concurrentLimit: quotaLimits.concurrentLimit,
+    maxQuality: quotaLimits.maxQuality,
+    priorityBoost: 0,
+  });
+
+  // Create empty feed preferences for algorithm
+  await db.insert(userFeedPreferences).values({
+    userDid: did,
+    tagAffinities: [],
+    authorAffinities: [],
+    soundAffinities: [],
+    negativeSignals: {
+      hiddenAuthors: [],
+      hiddenTags: [],
+      notInterestedVideos: [],
+      seeLessAuthors: [],
+      seeLessTags: [],
+    },
+    avgWatchCompletion: 0.5,
+    likeThreshold: 0.7,
+    commentThreshold: 0.8,
+    totalInteractions: 0,
+    totalWatchTime: 0,
+  });
+
+  // Generate personal API token
+  const { token, tokenHash, tokenPrefix } = generateApiToken();
+  const scopes = getDefaultApiScopes(accountType);
+
+  await db.insert(apiTokens).values({
+    id: nanoid(),
+    tokenHash,
+    tokenPrefix,
+    name: 'Personal API Token',
+    description: 'Auto-generated during signup',
+    ownerDid: did,
+    tokenType: 'personal',
+    scopes,
+    rateLimit: accountType === 'organization' ? 1000 : accountType === 'business' ? 500 : 100,
+    status: 'active',
+  });
+
+  // Auto-create organization for organization/business account types
+  let createdOrganization: { id: string; name: string } | null = null;
+  if ((accountType === 'organization' || accountType === 'business') && organizationData) {
+    const orgId = nanoid();
+
+    await db.insert(organizations).values({
+      id: orgId,
+      ownerDid: did,
+      name: organizationData.name,
+      type: organizationData.type || (accountType === 'business' ? 'company' : 'team'),
+      memberCount: 1,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    // Create system roles for the organization
+    const systemRoleNames = Object.keys(SYSTEM_ROLES) as SystemRoleName[];
+    const roleIdMap: Record<string, string> = {};
+
+    for (const roleName of systemRoleNames) {
+      const roleConfig = SYSTEM_ROLES[roleName];
+      const permissions = SYSTEM_ROLE_PERMISSIONS[roleName];
+      const roleId = nanoid();
+      roleIdMap[roleName] = roleId;
+
+      await db.insert(organizationRoles).values({
+        id: roleId,
+        organizationId: orgId,
+        name: roleName,
+        displayName: roleConfig.displayName,
+        description: roleConfig.description,
+        permissions: permissions,
+        priority: roleConfig.priority,
+        color: roleConfig.color,
+        isSystem: true,
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+
+    // Add owner as member
+    await db.insert(organizationMembers).values({
+      id: nanoid(),
+      organizationId: orgId,
+      userDid: did,
+      role: 'owner',
+      roleId: roleIdMap['owner'],
+      permissions: SYSTEM_ROLE_PERMISSIONS['owner'],
+      joinedAt: now,
+    });
+
+    createdOrganization = { id: orgId, name: organizationData.name };
+  }
+
+  return {
+    apiToken: token, // Return token once - not stored in plain text
+    organization: createdOrganization,
+  };
+}
+
+/**
  * Create a new account
  * POST /xrpc/io.exprsn.auth.createAccount
  * Rate limited: 3 signups per hour per IP
@@ -156,6 +413,7 @@ authRouter.post('/io.exprsn.auth.createAccount', authRateLimiter('signup'), asyn
     displayName?: string;
     accountType?: AccountType;
     organizationType?: OrganizationType;
+    organizationName?: string;
     didMethod?: DidMethod;
   }>();
 
@@ -243,6 +501,13 @@ authRouter.post('/io.exprsn.auth.createAccount', authRateLimiter('signup'), asyn
         bio: null,
       });
 
+      // Create default user settings based on account type
+      const defaultSettings = getDefaultUserSettings(body.accountType);
+      await db.insert(userSettings).values({
+        userDid: result.did,
+        ...defaultSettings,
+      });
+
       // Create session
       await db.insert(sessions).values({
         id: nanoid(),
@@ -252,6 +517,16 @@ authRouter.post('/io.exprsn.auth.createAccount', authRateLimiter('signup'), asyn
         expiresAt,
       });
 
+      // Create additional user data (notifications, quotas, feed prefs, API token, org)
+      const signupData = await createUserSignupData(
+        result.did,
+        body.accountType,
+        body.organizationName ? {
+          name: body.organizationName,
+          type: body.organizationType || (body.accountType === 'business' ? 'company' : 'team'),
+        } : undefined
+      );
+
       // Send welcome email (non-blocking)
       getNotificationService().sendWelcomeEmail(
         result.did,
@@ -260,7 +535,7 @@ authRouter.post('/io.exprsn.auth.createAccount', authRateLimiter('signup'), asyn
         body.displayName
       ).catch((err) => console.error('Failed to send welcome email:', err));
 
-      // Return response with certificate (one-time)
+      // Return response with certificates (one-time download)
       return c.json({
         success: true,
         accessJwt: accessToken,
@@ -274,13 +549,26 @@ authRouter.post('/io.exprsn.auth.createAccount', authRateLimiter('signup'), asyn
           displayName: body.displayName || handle,
           avatar: null,
         },
-        // Certificate info for download
+        // Client auth certificate for mTLS authentication
         certificate: {
           pem: result.certificate.pem,
           privateKey: result.privateKey,
           fingerprint: result.certificate.fingerprint,
           validUntil: result.certificate.validUntil.toISOString(),
+          type: 'client',
         },
+        // Code signing certificate for signing commits/content
+        codeSigningCertificate: result.additionalCertificates?.codeSigning ? {
+          pem: result.additionalCertificates.codeSigning.pem,
+          privateKey: result.additionalCertificates.codeSigning.privateKey,
+          fingerprint: result.additionalCertificates.codeSigning.fingerprint,
+          validUntil: result.additionalCertificates.codeSigning.validUntil.toISOString(),
+          type: 'code_signing',
+        } : undefined,
+        // Personal API token (one-time)
+        apiToken: signupData.apiToken,
+        // Auto-created organization (if applicable)
+        organization: signupData.organization,
       });
     } catch (error) {
       console.error('Failed to create did:exprsn account:', error);
@@ -341,6 +629,13 @@ authRouter.post('/io.exprsn.auth.createAccount', authRateLimiter('signup'), asyn
     bio: null,
   });
 
+  // Create default user settings based on account type
+  const defaultSettings = getDefaultUserSettings(body.accountType);
+  await db.insert(userSettings).values({
+    userDid: did,
+    ...defaultSettings,
+  });
+
   // Create session
   await db.insert(sessions).values({
     id: nanoid(),
@@ -349,6 +644,16 @@ authRouter.post('/io.exprsn.auth.createAccount', authRateLimiter('signup'), asyn
     refreshJwt: refreshToken,
     expiresAt,
   });
+
+  // Create additional user data (notifications, quotas, feed prefs, API token, org)
+  const signupData = await createUserSignupData(
+    did,
+    body.accountType,
+    body.organizationName ? {
+      name: body.organizationName,
+      type: body.organizationType || (body.accountType === 'business' ? 'company' : 'team'),
+    } : undefined
+  );
 
   // Send welcome email (non-blocking)
   getNotificationService().sendWelcomeEmail(
@@ -371,6 +676,10 @@ authRouter.post('/io.exprsn.auth.createAccount', authRateLimiter('signup'), asyn
       displayName: body.displayName || handle,
       avatar: null,
     },
+    // Personal API token (one-time)
+    apiToken: signupData.apiToken,
+    // Auto-created organization (if applicable)
+    organization: signupData.organization,
   });
 });
 

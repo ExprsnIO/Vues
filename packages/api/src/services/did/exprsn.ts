@@ -36,6 +36,14 @@ const BASE32_CHARS = 'abcdefghijklmnopqrstuvwxyz234567';
 /**
  * Result from creating a did:exprsn
  */
+export interface CertificateInfo {
+  id: string;
+  pem: string;
+  fingerprint: string;
+  validUntil: Date;
+  type: 'client' | 'code_signing';
+}
+
 export interface ExprsnDidResult {
   did: string;
   handle: string;
@@ -47,6 +55,16 @@ export interface ExprsnDidResult {
   };
   privateKey: string; // PEM - returned once, not stored on server
   publicKeyMultibase: string;
+  // Additional certificates (code signing, etc.)
+  additionalCertificates?: {
+    codeSigning?: {
+      id: string;
+      pem: string;
+      privateKey: string;
+      fingerprint: string;
+      validUntil: Date;
+    };
+  };
 }
 
 /**
@@ -152,8 +170,8 @@ export class ExprsnDidService {
     // Ensure root CA exists
     await certificateManager.ensureRootCA();
 
-    // Issue entity certificate from root CA
-    const certResult = await certificateManager.issueEntityCertificate({
+    // Issue client auth certificate from root CA
+    const clientCertResult = await certificateManager.issueEntityCertificate({
       commonName: `@${input.handle}.exprsn`,
       type: 'client',
       email: input.email,
@@ -161,33 +179,53 @@ export class ExprsnDidService {
       validityDays: 365, // 1 year default
     });
 
-    // Generate DID from certificate fingerprint
-    const did = this.generateDid(certResult.fingerprint);
+    // Also issue code signing certificate
+    const codeSigningCertResult = await certificateManager.issueEntityCertificate({
+      commonName: `@${input.handle}.exprsn (Code Signing)`,
+      type: 'code_signing',
+      email: input.email,
+      organization: 'Exprsn Creator',
+      validityDays: 365,
+    });
+
+    // Generate DID from client certificate fingerprint (primary cert)
+    const did = this.generateDid(clientCertResult.fingerprint);
 
     // Get certificate details for valid until date
-    const certDetails = await certificateManager.getEntityCertificate(certResult.id);
-    if (!certDetails) {
-      throw new Error('Failed to retrieve certificate after creation');
+    const clientCertDetails = await certificateManager.getEntityCertificate(clientCertResult.id);
+    if (!clientCertDetails) {
+      throw new Error('Failed to retrieve client certificate after creation');
+    }
+
+    const codeSigningCertDetails = await certificateManager.getEntityCertificate(codeSigningCertResult.id);
+    if (!codeSigningCertDetails) {
+      throw new Error('Failed to retrieve code signing certificate after creation');
     }
 
     // Convert public key to multibase
     const entityCert = await db
       .select({ publicKey: caEntityCertificates.publicKey })
       .from(caEntityCertificates)
-      .where(eq(caEntityCertificates.id, certResult.id))
+      .where(eq(caEntityCertificates.id, clientCertResult.id))
       .limit(1);
 
     const publicKeyMultibase = this.publicKeyToMultibase(entityCert[0]?.publicKey || '');
 
-    // Store the DID-certificate link
+    // Store the DID-certificate link (primary client cert)
     await db.insert(exprsnDidCertificates).values({
       id: nanoid(),
       did,
-      certificateId: certResult.id,
+      certificateId: clientCertResult.id,
       certificateType: 'platform',
       publicKeyMultibase,
       status: 'active',
     });
+
+    // Link code signing certificate to the same DID
+    await db
+      .update(caEntityCertificates)
+      .set({ subjectDid: did })
+      .where(eq(caEntityCertificates.id, codeSigningCertResult.id));
 
     // Also create PLC identity record for compatibility
     await db.insert(plcIdentities).values({
@@ -202,8 +240,8 @@ export class ExprsnDidService {
           endpoint: process.env.PDS_ENDPOINT || 'https://pds.exprsn.io',
         },
       },
-      certificateId: certResult.id,
-      certificateFingerprint: certResult.fingerprint,
+      certificateId: clientCertResult.id,
+      certificateFingerprint: clientCertResult.fingerprint,
       status: 'active',
     });
 
@@ -211,13 +249,22 @@ export class ExprsnDidService {
       did,
       handle: `${input.handle}.exprsn`,
       certificate: {
-        id: certResult.id,
-        pem: certResult.certificate,
-        fingerprint: certResult.fingerprint,
-        validUntil: certDetails.notAfter,
+        id: clientCertResult.id,
+        pem: clientCertResult.certificate,
+        fingerprint: clientCertResult.fingerprint,
+        validUntil: clientCertDetails.notAfter,
       },
-      privateKey: certResult.privateKey,
+      privateKey: clientCertResult.privateKey,
       publicKeyMultibase,
+      additionalCertificates: {
+        codeSigning: {
+          id: codeSigningCertResult.id,
+          pem: codeSigningCertResult.certificate,
+          privateKey: codeSigningCertResult.privateKey,
+          fingerprint: codeSigningCertResult.fingerprint,
+          validUntil: codeSigningCertDetails.notAfter,
+        },
+      },
     };
   }
 

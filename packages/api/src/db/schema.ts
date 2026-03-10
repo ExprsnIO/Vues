@@ -4805,6 +4805,37 @@ export const domainUsers = pgTable(
   })
 );
 
+// Domain Invites - invite users to join a domain
+export const domainInvites = pgTable(
+  'domain_invites',
+  {
+    id: text('id').primaryKey(),
+    domainId: text('domain_id')
+      .notNull()
+      .references(() => domains.id, { onDelete: 'cascade' }),
+    email: text('email'), // Invite by email
+    invitedDid: text('invited_did').references(() => users.did, { onDelete: 'cascade' }), // Or invite by DID
+    role: text('role').notNull().default('member'), // 'admin' | 'moderator' | 'member'
+    permissions: jsonb('permissions').$type<string[]>().default([]),
+    invitedBy: text('invited_by')
+      .notNull()
+      .references(() => users.did),
+    token: text('token').notNull(), // Unique invite token/code
+    message: text('message'), // Optional invite message
+    status: text('status').default('pending').notNull(), // 'pending' | 'accepted' | 'expired' | 'revoked'
+    expiresAt: timestamp('expires_at').notNull(),
+    acceptedAt: timestamp('accepted_at'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    domainIdx: index('domain_invites_domain_idx').on(table.domainId),
+    emailIdx: index('domain_invites_email_idx').on(table.email),
+    invitedDidIdx: index('domain_invites_did_idx').on(table.invitedDid),
+    tokenIdx: uniqueIndex('domain_invites_token_idx').on(table.token),
+    statusIdx: index('domain_invites_status_idx').on(table.status),
+  })
+);
+
 // Domain Groups - groups within domains
 export const domainGroups = pgTable(
   'domain_groups',

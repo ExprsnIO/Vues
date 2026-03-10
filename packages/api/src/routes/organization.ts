@@ -18,6 +18,9 @@ import {
   organizationBlockedWords,
   organizationActivity,
   actorRepos,
+  domains,
+  domainInvites,
+  domainUsers,
 } from '../db/schema.js';
 import {
   ORG_PERMISSIONS,
@@ -145,13 +148,39 @@ organizationRoutes.post('/io.exprsn.org.create', authMiddleware, async (c) => {
     updatedAt: now,
   });
 
-  // Add owner as member
+  // Create system roles for the organization
+  const systemRoleNames = Object.keys(SYSTEM_ROLES) as SystemRoleName[];
+  const roleIdMap: Record<string, string> = {};
+
+  for (const roleName of systemRoleNames) {
+    const roleConfig = SYSTEM_ROLES[roleName];
+    const permissions = SYSTEM_ROLE_PERMISSIONS[roleName];
+    const roleId = nanoid();
+    roleIdMap[roleName] = roleId;
+
+    await db.insert(organizationRoles).values({
+      id: roleId,
+      organizationId: orgId,
+      name: roleName,
+      displayName: roleConfig.displayName,
+      description: roleConfig.description,
+      permissions: permissions,
+      priority: roleConfig.priority,
+      color: roleConfig.color,
+      isSystem: true,
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+
+  // Add owner as member with roleId reference
   await db.insert(organizationMembers).values({
     id: nanoid(),
     organizationId: orgId,
     userDid,
     role: 'owner',
-    permissions: ['bulk_import', 'manage_members', 'edit_settings', 'delete_org'],
+    roleId: roleIdMap['owner'],
+    permissions: SYSTEM_ROLE_PERMISSIONS['owner'],
     joinedAt: now,
   });
 
@@ -441,7 +470,7 @@ organizationRoutes.post('/io.exprsn.org.setup', authMiddleware, async (c) => {
           permissions: role.permissions as OrgPermission[],
           color: role.color,
           isSystem: false,
-          sortOrder: rolesCreated + 10, // After system roles
+          priority: rolesCreated + 10, // After system roles
         });
         rolesCreated++;
       } catch (e) {
@@ -450,19 +479,23 @@ organizationRoutes.post('/io.exprsn.org.setup', authMiddleware, async (c) => {
     }
   }
 
-  // Create groups - store in customFields for now until organization_tags table is created
+  // Create groups using organizationTags table with type='group'
   if (body.groups && body.groups.length > 0) {
-    try {
-      // Store groups in organization custom fields
-      await db
-        .update(organizations)
-        .set({
-          customFields: sql`COALESCE(custom_fields, '{}'::jsonb) || ${JSON.stringify({ groups: body.groups })}::jsonb`,
-        })
-        .where(eq(organizations.id, orgId));
-      groupsCreated = body.groups.length;
-    } catch (e) {
-      console.warn('Failed to save groups:', e);
+    for (const group of body.groups) {
+      try {
+        await db.insert(organizationTags).values({
+          id: nanoid(),
+          organizationId: orgId,
+          name: group.name,
+          color: group.color || '#6366f1',
+          description: group.description,
+          type: 'group',
+          createdBy: userDid,
+        });
+        groupsCreated++;
+      } catch (e) {
+        console.warn('Failed to create group:', group.name, e);
+      }
     }
   }
 
@@ -479,9 +512,9 @@ organizationRoutes.post('/io.exprsn.org.setup', authMiddleware, async (c) => {
           id: inviteId,
           organizationId: orgId,
           email: member.email.toLowerCase(),
-          role: member.role === 'moderator' ? 'moderator' : member.role,
+          roleName: member.role === 'moderator' ? 'moderator' : member.role,
           invitedBy: userDid,
-          code: inviteCode,
+          token: inviteCode,
           expiresAt,
           status: 'pending',
         });
@@ -3721,6 +3754,216 @@ organizationRoutes.post('/io.exprsn.org.setDomain', authMiddleware, async (c) =>
     .where(eq(organizations.id, organizationId));
 
   return c.json({ success: true });
+});
+
+// ============================================
+// Domain Invites - Join domains via invite code
+// ============================================
+
+// Create domain invite
+organizationRoutes.post('/io.exprsn.domain.invites.create', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const body = await c.req.json<{
+    domainId: string;
+    email?: string;
+    invitedDid?: string;
+    role?: string;
+    message?: string;
+    expiresInDays?: number;
+  }>();
+
+  if (!body.domainId) {
+    throw new HTTPException(400, { message: 'Domain ID required' });
+  }
+
+  if (!body.email && !body.invitedDid) {
+    throw new HTTPException(400, { message: 'Either email or DID required' });
+  }
+
+  // Check if user is admin of the domain
+  const domainUser = await db
+    .select()
+    .from(domainUsers)
+    .where(
+      and(
+        eq(domainUsers.domainId, body.domainId),
+        eq(domainUsers.userDid, userDid)
+      )
+    )
+    .limit(1);
+
+  if (!domainUser[0] || !['admin', 'owner'].includes(domainUser[0].role)) {
+    throw new HTTPException(403, { message: 'Only domain admins can create invites' });
+  }
+
+  const inviteId = nanoid();
+  const token = nanoid(16); // Shorter, user-friendly code
+  const expiresAt = new Date(Date.now() + (body.expiresInDays || 7) * 24 * 60 * 60 * 1000);
+
+  await db.insert(domainInvites).values({
+    id: inviteId,
+    domainId: body.domainId,
+    email: body.email?.toLowerCase(),
+    invitedDid: body.invitedDid,
+    role: body.role || 'member',
+    invitedBy: userDid,
+    token,
+    message: body.message,
+    status: 'pending',
+    expiresAt,
+  });
+
+  return c.json({
+    success: true,
+    invite: {
+      id: inviteId,
+      token,
+      expiresAt: expiresAt.toISOString(),
+    },
+  });
+});
+
+// Accept domain invite
+organizationRoutes.post('/io.exprsn.domain.invites.accept', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const body = await c.req.json<{ token: string }>();
+
+  if (!body.token) {
+    throw new HTTPException(400, { message: 'Invite token required' });
+  }
+
+  // Get invite
+  const inviteResult = await db
+    .select()
+    .from(domainInvites)
+    .where(eq(domainInvites.token, body.token))
+    .limit(1);
+
+  const invite = inviteResult[0];
+  if (!invite) {
+    throw new HTTPException(404, { message: 'Invite not found' });
+  }
+
+  if (invite.status !== 'pending') {
+    throw new HTTPException(400, { message: 'Invite is no longer valid' });
+  }
+
+  if (invite.expiresAt < new Date()) {
+    await db
+      .update(domainInvites)
+      .set({ status: 'expired' })
+      .where(eq(domainInvites.id, invite.id));
+    throw new HTTPException(400, { message: 'Invite has expired' });
+  }
+
+  // Check if already a domain member
+  const existingMember = await db
+    .select()
+    .from(domainUsers)
+    .where(
+      and(
+        eq(domainUsers.domainId, invite.domainId),
+        eq(domainUsers.userDid, userDid)
+      )
+    )
+    .limit(1);
+
+  if (existingMember[0]) {
+    throw new HTTPException(400, { message: 'Already a member of this domain' });
+  }
+
+  const now = new Date();
+
+  // Add user to domain
+  await db.insert(domainUsers).values({
+    id: nanoid(),
+    domainId: invite.domainId,
+    userDid,
+    role: invite.role,
+    permissions: invite.permissions || [],
+    isActive: true,
+    createdAt: now,
+    updatedAt: now,
+  });
+
+  // Update invite status
+  await db
+    .update(domainInvites)
+    .set({ status: 'accepted', acceptedAt: now })
+    .where(eq(domainInvites.id, invite.id));
+
+  // Get domain info for response
+  const domain = await db
+    .select({ id: domains.id, name: domains.name, domain: domains.domain })
+    .from(domains)
+    .where(eq(domains.id, invite.domainId))
+    .limit(1);
+
+  return c.json({
+    success: true,
+    domain: domain[0] || { id: invite.domainId },
+  });
+});
+
+// Get invite details by token (for preview before accepting)
+organizationRoutes.get('/io.exprsn.domain.invites.info', async (c) => {
+  const token = c.req.query('token');
+
+  if (!token) {
+    throw new HTTPException(400, { message: 'Token required' });
+  }
+
+  const invite = await db
+    .select({
+      id: domainInvites.id,
+      domainId: domainInvites.domainId,
+      role: domainInvites.role,
+      message: domainInvites.message,
+      status: domainInvites.status,
+      expiresAt: domainInvites.expiresAt,
+      domainName: domains.name,
+      domainDomain: domains.domain,
+    })
+    .from(domainInvites)
+    .leftJoin(domains, eq(domainInvites.domainId, domains.id))
+    .where(eq(domainInvites.token, token))
+    .limit(1);
+
+  if (!invite[0]) {
+    throw new HTTPException(404, { message: 'Invite not found' });
+  }
+
+  const inv = invite[0];
+
+  if (inv.status !== 'pending') {
+    throw new HTTPException(400, { message: 'Invite is no longer valid' });
+  }
+
+  if (inv.expiresAt && inv.expiresAt < new Date()) {
+    throw new HTTPException(400, { message: 'Invite has expired' });
+  }
+
+  return c.json({
+    invite: {
+      id: inv.id,
+      role: inv.role,
+      message: inv.message,
+      expiresAt: inv.expiresAt?.toISOString(),
+      domain: {
+        id: inv.domainId,
+        name: inv.domainName,
+        domain: inv.domainDomain,
+      },
+    },
+  });
 });
 
 export default organizationRoutes;
