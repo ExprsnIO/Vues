@@ -57,3 +57,8 @@ android/app/build
 credentials.json
 service-account.json
 data/
+
+# SQLite databases
+*.db
+*.db-shm
+*.db-wal
