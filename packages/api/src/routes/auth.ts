@@ -1,10 +1,10 @@
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import bcrypt from 'bcryptjs';
-import { eq } from 'drizzle-orm';
+import { eq, and, ne, desc } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import crypto from 'crypto';
-import { db, actorRepos, users, sessions } from '../db/index.js';
+import { db, actorRepos, users, sessions, ssoAuditLog } from '../db/index.js';
 import { PlcService, getPlcConfig, type DidMethod } from '../services/plc/index.js';
 import { ExprsnDidService } from '../services/did/index.js';
 import type { OrganizationType } from '@exprsn/shared';
@@ -605,4 +605,209 @@ authRouter.post('/io.exprsn.auth.deleteSession', async (c) => {
   await db.delete(sessions).where(eq(sessions.accessJwt, accessToken));
 
   return c.json({ success: true });
+});
+
+// =============================================================================
+// Session Management
+// =============================================================================
+
+/**
+ * List all sessions for the current user
+ * GET /xrpc/io.exprsn.auth.listSessions
+ */
+authRouter.get('/io.exprsn.auth.listSessions', async (c) => {
+  const auth = c.req.header('Authorization');
+  if (!auth?.startsWith('Bearer ')) {
+    throw new HTTPException(401, { message: 'Not authenticated' });
+  }
+
+  const accessToken = auth.slice(7);
+
+  // Get current session to find the user
+  const currentSession = await db.query.sessions.findFirst({
+    where: eq(sessions.accessJwt, accessToken),
+  });
+
+  if (!currentSession || currentSession.expiresAt < new Date()) {
+    throw new HTTPException(401, { message: 'Invalid or expired session' });
+  }
+
+  // Get all sessions for this user
+  const userSessions = await db.query.sessions.findMany({
+    where: eq(sessions.did, currentSession.did),
+  });
+
+  return c.json({
+    sessions: userSessions.map((s) => ({
+      id: s.id,
+      deviceName: 'Unknown Device',
+      browser: 'Web Browser',
+      location: undefined,
+      lastActive: s.createdAt.toISOString(),
+      createdAt: s.createdAt.toISOString(),
+      isCurrent: s.id === currentSession.id,
+    })),
+  });
+});
+
+/**
+ * Revoke a specific session
+ * POST /xrpc/io.exprsn.auth.revokeSession
+ */
+authRouter.post('/io.exprsn.auth.revokeSession', async (c) => {
+  const auth = c.req.header('Authorization');
+  if (!auth?.startsWith('Bearer ')) {
+    throw new HTTPException(401, { message: 'Not authenticated' });
+  }
+
+  const accessToken = auth.slice(7);
+  const body = await c.req.json<{ sessionId: string }>();
+
+  if (!body.sessionId) {
+    throw new HTTPException(400, { message: 'Session ID is required' });
+  }
+
+  // Get current session to verify ownership
+  const currentSession = await db.query.sessions.findFirst({
+    where: eq(sessions.accessJwt, accessToken),
+  });
+
+  if (!currentSession || currentSession.expiresAt < new Date()) {
+    throw new HTTPException(401, { message: 'Invalid or expired session' });
+  }
+
+  // Find the session to revoke
+  const targetSession = await db.query.sessions.findFirst({
+    where: eq(sessions.id, body.sessionId),
+  });
+
+  if (!targetSession) {
+    throw new HTTPException(404, { message: 'Session not found' });
+  }
+
+  // Ensure the session belongs to the current user
+  if (targetSession.did !== currentSession.did) {
+    throw new HTTPException(403, { message: 'Cannot revoke session belonging to another user' });
+  }
+
+  // Cannot revoke current session with this endpoint
+  if (targetSession.id === currentSession.id) {
+    throw new HTTPException(400, { message: 'Cannot revoke current session. Use deleteSession instead.' });
+  }
+
+  await db.delete(sessions).where(eq(sessions.id, body.sessionId));
+
+  return c.json({ success: true });
+});
+
+/**
+ * Revoke all other sessions (except current)
+ * POST /xrpc/io.exprsn.auth.revokeAllSessions
+ */
+authRouter.post('/io.exprsn.auth.revokeAllSessions', async (c) => {
+  const auth = c.req.header('Authorization');
+  if (!auth?.startsWith('Bearer ')) {
+    throw new HTTPException(401, { message: 'Not authenticated' });
+  }
+
+  const accessToken = auth.slice(7);
+
+  // Get current session
+  const currentSession = await db.query.sessions.findFirst({
+    where: eq(sessions.accessJwt, accessToken),
+  });
+
+  if (!currentSession || currentSession.expiresAt < new Date()) {
+    throw new HTTPException(401, { message: 'Invalid or expired session' });
+  }
+
+  // Delete all sessions for this user except the current one
+  const deletedSessions = await db.delete(sessions).where(
+    and(
+      eq(sessions.did, currentSession.did),
+      ne(sessions.id, currentSession.id)
+    )
+  ).returning({ id: sessions.id });
+
+  return c.json({ success: true, revokedCount: deletedSessions.length });
+});
+
+/**
+ * Get login history for the current user
+ * GET /xrpc/io.exprsn.auth.getLoginHistory
+ */
+authRouter.get('/io.exprsn.auth.getLoginHistory', async (c) => {
+  const auth = c.req.header('Authorization');
+  if (!auth?.startsWith('Bearer ')) {
+    throw new HTTPException(401, { message: 'Not authenticated' });
+  }
+
+  const accessToken = auth.slice(7);
+
+  // Get current session to find the user
+  const currentSession = await db.query.sessions.findFirst({
+    where: eq(sessions.accessJwt, accessToken),
+  });
+
+  if (!currentSession || currentSession.expiresAt < new Date()) {
+    throw new HTTPException(401, { message: 'Invalid or expired session' });
+  }
+
+  // Get login history from SSO audit log
+  const loginEvents = await db
+    .select()
+    .from(ssoAuditLog)
+    .where(
+      and(
+        eq(ssoAuditLog.userDid, currentSession.did),
+        eq(ssoAuditLog.eventType, 'login')
+      )
+    )
+    .orderBy(desc(ssoAuditLog.createdAt))
+    .limit(50);
+
+  // Parse user agent to extract device and browser info
+  const parseUserAgent = (ua: string | null): { deviceName: string; browser: string } => {
+    if (!ua) return { deviceName: 'Unknown Device', browser: 'Unknown Browser' };
+
+    let browser = 'Unknown Browser';
+    let deviceName = 'Desktop';
+
+    // Detect browser
+    if (ua.includes('Chrome') && !ua.includes('Edg')) {
+      browser = 'Chrome';
+    } else if (ua.includes('Safari') && !ua.includes('Chrome')) {
+      browser = 'Safari';
+    } else if (ua.includes('Firefox')) {
+      browser = 'Firefox';
+    } else if (ua.includes('Edg')) {
+      browser = 'Edge';
+    } else if (ua.includes('Opera') || ua.includes('OPR')) {
+      browser = 'Opera';
+    }
+
+    // Detect device type
+    if (ua.includes('Mobile') || ua.includes('Android')) {
+      deviceName = 'Mobile';
+    } else if (ua.includes('Tablet') || ua.includes('iPad')) {
+      deviceName = 'Tablet';
+    }
+
+    return { deviceName, browser };
+  };
+
+  return c.json({
+    history: loginEvents.map((event) => {
+      const { deviceName, browser } = parseUserAgent(event.userAgent);
+      return {
+        id: event.id,
+        deviceName,
+        browser,
+        location: undefined,
+        ipAddress: event.ipAddress,
+        timestamp: event.createdAt.toISOString(),
+        success: event.success,
+      };
+    }),
+  });
 });

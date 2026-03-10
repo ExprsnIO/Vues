@@ -2,6 +2,7 @@ import { CID } from 'multiformats/cid';
 import * as dagCbor from '@ipld/dag-cbor';
 import { sha256 } from 'multiformats/hashes/sha2';
 import { generateTid } from './tid.js';
+import * as crypto from '@atproto/crypto';
 
 /**
  * Commit structure for ATProto repositories
@@ -142,23 +143,28 @@ export async function createCommitCid(commit: Commit): Promise<CID> {
 }
 
 /**
- * Verify commit signature (placeholder - needs crypto implementation)
+ * Verify commit signature using @atproto/crypto
  */
 export async function verifyCommitSignature(
   commit: Commit,
   publicKey: Uint8Array
 ): Promise<boolean> {
-  // TODO: Implement actual signature verification using @atproto/crypto
-  // For now, return true as placeholder
-  const _unsigned: UnsignedCommit = {
-    did: commit.did,
-    version: commit.version,
-    data: commit.data,
-    prev: commit.prev,
-    rev: commit.rev,
-  };
-  const _signBytes = getSignBytes(_unsigned);
+  try {
+    // Build the unsigned commit to get the bytes that were signed
+    const unsigned: UnsignedCommit = {
+      did: commit.did,
+      version: commit.version,
+      data: commit.data,
+      prev: commit.prev,
+      rev: commit.rev,
+    };
+    const signBytes = getSignBytes(unsigned);
 
-  // Placeholder: actual verification would use secp256k1 or ed25519
-  return publicKey.length > 0 && commit.sig.length > 0;
+    // Verify signature using @atproto/crypto
+    // The public key is expected to be in compressed format
+    return await crypto.verifySignature(publicKey, signBytes, commit.sig);
+  } catch (error) {
+    console.error('[Commit] Signature verification failed:', error);
+    return false;
+  }
 }

@@ -109,23 +109,24 @@ export default function CertificatesAdmin() {
         const result = await api.caAdminGetStats();
         return {
           ...result,
-          totalTokens: 89, // TODO: Add token stats endpoint
-          activeTokens: 76,
-          singleUseTokens: 15,
+          // Token enrollment feature not yet implemented
+          totalTokens: 0,
+          activeTokens: 0,
+          singleUseTokens: 0,
         };
       } catch {
-        // Fallback to mock data if API not available
+        // Fallback to empty stats if API not available
         return {
-          totalCertificates: 156,
-          activeCertificates: 142,
-          revokedCertificates: 8,
-          expiredCertificates: 6,
-          rootCertificates: 2,
-          intermediateCAs: 3,
-          expiringIn30Days: 12,
-          totalTokens: 89,
-          activeTokens: 76,
-          singleUseTokens: 15,
+          totalCertificates: 0,
+          activeCertificates: 0,
+          revokedCertificates: 0,
+          expiredCertificates: 0,
+          rootCertificates: 0,
+          intermediateCAs: 0,
+          expiringIn30Days: 0,
+          totalTokens: 0,
+          activeTokens: 0,
+          singleUseTokens: 0,
         };
       }
     },

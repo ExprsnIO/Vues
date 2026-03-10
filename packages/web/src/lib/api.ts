@@ -167,6 +167,49 @@ class ApiClient {
     });
   }
 
+  // Session Management
+  async getSessions(): Promise<{
+    sessions: Array<{
+      id: string;
+      deviceName: string;
+      browser: string;
+      location?: string;
+      lastActive: string;
+      createdAt: string;
+      isCurrent: boolean;
+    }>;
+  }> {
+    return this.fetch('/xrpc/io.exprsn.auth.listSessions');
+  }
+
+  async revokeSession(sessionId: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.auth.revokeSession', {
+      method: 'POST',
+      body: JSON.stringify({ sessionId }),
+    });
+  }
+
+  async revokeAllSessions(): Promise<{ success: boolean; revokedCount: number }> {
+    return this.fetch('/xrpc/io.exprsn.auth.revokeAllSessions', {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+  }
+
+  async getLoginHistory(): Promise<{
+    history: Array<{
+      id: string;
+      deviceName: string;
+      browser: string;
+      location?: string;
+      ipAddress?: string;
+      timestamp: string;
+      success: boolean;
+    }>;
+  }> {
+    return this.fetch('/xrpc/io.exprsn.auth.getLoginHistory');
+  }
+
   private async fetch<T>(
     endpoint: string,
     options: RequestInit = {}
@@ -3369,7 +3412,10 @@ class ApiClient {
   // Admin Organization Management
   async adminCreateOrganization(data: {
     name: string;
-    type: 'team' | 'enterprise' | 'nonprofit' | 'business';
+    handle?: string;
+    description?: string;
+    type: 'team' | 'enterprise' | 'nonprofit' | 'business' | 'standard';
+    visibility?: 'public' | 'private' | 'unlisted';
     domainId?: string;
     parentOrganizationId?: string;
     ownerDid?: string;

@@ -366,11 +366,56 @@ export class JetstreamConsumer {
   }
 
   private async ensureUser(did: string) {
-    // TODO: Fetch profile from PDS if not exists
+    // Check if user already exists
+    const existing = await db.execute(sql`SELECT did FROM users WHERE did = ${did}`);
+    const rows = Array.isArray(existing) ? existing : (existing as { rows?: unknown[] }).rows;
+    if (rows && rows.length > 0) {
+      return;
+    }
+
+    // Try to fetch profile from AT Protocol public API
+    let handle = did; // Default to DID as handle if fetch fails
+    let displayName: string | null = null;
+    let avatar: string | null = null;
+    let bio: string | null = null;
+
+    try {
+      const pdsUrl = process.env.PDS_URL || 'https://public.api.bsky.app';
+      const response = await fetch(
+        `${pdsUrl}/xrpc/app.bsky.actor.getProfile?actor=${encodeURIComponent(did)}`,
+        {
+          headers: { 'Accept': 'application/json' },
+          signal: AbortSignal.timeout(5000), // 5 second timeout
+        }
+      );
+
+      if (response.ok) {
+        const profile = await response.json() as {
+          handle?: string;
+          displayName?: string;
+          avatar?: string;
+          description?: string;
+        };
+        handle = profile.handle || did;
+        displayName = profile.displayName || null;
+        avatar = profile.avatar || null;
+        bio = profile.description || null;
+      }
+    } catch (error) {
+      // Silently fail and use DID as handle
+      console.warn(`[Jetstream] Failed to fetch profile for ${did}:`, error);
+    }
+
+    // Insert user with fetched or default profile data
     await db.execute(sql`
-      INSERT INTO users (did, handle, created_at, updated_at, indexed_at)
-      VALUES (${did}, ${did}, NOW(), NOW(), NOW())
-      ON CONFLICT (did) DO NOTHING
+      INSERT INTO users (did, handle, display_name, avatar, bio, created_at, updated_at, indexed_at)
+      VALUES (${did}, ${handle}, ${displayName}, ${avatar}, ${bio}, NOW(), NOW(), NOW())
+      ON CONFLICT (did) DO UPDATE SET
+        handle = COALESCE(NULLIF(${handle}, users.did), users.handle),
+        display_name = COALESCE(${displayName}, users.display_name),
+        avatar = COALESCE(${avatar}, users.avatar),
+        bio = COALESCE(${bio}, users.bio),
+        updated_at = NOW()
     `);
   }
 }

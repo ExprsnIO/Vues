@@ -448,6 +448,65 @@ class OIDCProviderServiceImpl {
     };
   }
 
+  /**
+   * Issue tokens for client credentials grant (machine-to-machine)
+   * No user is involved - the client authenticates as itself
+   *
+   * Note: Client credentials tokens are stateless JWTs and are not persisted
+   * to the oauthTokens table (which requires a valid user reference).
+   * The JWT signature provides authenticity verification.
+   */
+  async issueClientCredentialsToken(
+    client: typeof oauthClients.$inferSelect,
+    requestedScope?: string
+  ): Promise<TokenResponse> {
+    const accessTokenTtl = client.accessTokenTtlSeconds || this.DEFAULT_ACCESS_TOKEN_TTL;
+
+    // Validate and filter requested scopes against client's allowed scopes
+    // allowedScopes is already an array
+    const allowedScopes = client.allowedScopes || [];
+    let grantedScopes: string[];
+
+    if (requestedScope) {
+      const requested = requestedScope.split(' ').filter(Boolean);
+      grantedScopes = requested.filter((s) => allowedScopes.includes(s));
+      if (grantedScopes.length === 0) {
+        // No valid scopes requested, use client's default scopes
+        grantedScopes = allowedScopes;
+      }
+    } else {
+      grantedScopes = allowedScopes;
+    }
+
+    const scope = grantedScopes.join(' ');
+
+    // Use client ID as the subject (sub) for client credentials tokens
+    const clientSub = `client:${client.id}`;
+
+    // Create access token with client ID as subject (no user)
+    const { token: accessToken } = await JWTService.createAccessToken(
+      clientSub, // Use client: prefix to indicate this is a client token
+      client.id,
+      scope,
+      accessTokenTtl
+    );
+
+    // Log the token issuance (no user DID for audit, just note it's a client grant)
+    await this.logAuditEvent('token_issue', undefined, client.id, true, {
+      grantType: 'client_credentials',
+      clientSub,
+      scopes: scope,
+    });
+
+    // Client credentials grant does not include refresh_token or id_token
+    return {
+      access_token: accessToken,
+      token_type: 'Bearer',
+      expires_in: accessTokenTtl,
+      scope,
+    };
+  }
+
   // ==========================================
   // Token Introspection & Revocation
   // ==========================================
@@ -865,7 +924,7 @@ class OIDCProviderServiceImpl {
 
   private async logAuditEvent(
     eventType: string,
-    userDid: string,
+    userDid: string | undefined,
     clientId: string,
     success: boolean,
     details?: Record<string, unknown>,

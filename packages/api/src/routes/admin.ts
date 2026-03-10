@@ -10087,7 +10087,10 @@ adminRouter.post(
     const adminDid = c.get('did');
     const body = await c.req.json<{
       name: string;
-      type: 'team' | 'enterprise' | 'nonprofit' | 'business';
+      handle?: string;
+      description?: string;
+      type: 'team' | 'enterprise' | 'nonprofit' | 'business' | 'standard';
+      visibility?: 'public' | 'private' | 'unlisted';
       domainId?: string;
       parentOrganizationId?: string;
       ownerDid?: string;
@@ -10097,6 +10100,9 @@ adminRouter.post(
     if (!body.name || !body.type) {
       return c.json({ error: 'InvalidRequest', message: 'Missing required fields' }, 400);
     }
+
+    // Map 'standard' type to 'team' for backwards compatibility
+    const orgType = body.type === 'standard' ? 'team' : body.type;
 
     const ownerDid = body.ownerDid || adminDid;
 
@@ -10153,7 +10159,10 @@ adminRouter.post(
     await db.insert(organizations).values({
       id: orgId,
       name: body.name,
-      type: body.type,
+      handle: body.handle,
+      description: body.description,
+      type: orgType,
+      isPublic: body.visibility !== 'private',
       website: body.website,
       ownerDid,
       domainId: body.domainId,

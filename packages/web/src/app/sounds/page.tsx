@@ -13,6 +13,13 @@ export default function SoundsPage() {
   const { data: trendingData, isLoading: trendingLoading } = useQuery({
     queryKey: ['sounds', 'trending'],
     queryFn: () => api.getSounds({ trending: true, limit: 20 }),
+    enabled: activeTab === 'trending' && searchQuery.length === 0,
+  });
+
+  const { data: allData, isLoading: allLoading } = useQuery({
+    queryKey: ['sounds', 'all'],
+    queryFn: () => api.getSounds({ limit: 50 }),
+    enabled: activeTab === 'all' && searchQuery.length === 0,
   });
 
   const { data: searchData, isLoading: searchLoading } = useQuery({
@@ -25,9 +32,13 @@ export default function SoundsPage() {
     ? searchData?.sounds
     : activeTab === 'trending'
       ? trendingData?.sounds
-      : trendingData?.sounds; // TODO: fetch "all" sounds with different sorting
+      : allData?.sounds;
 
-  const isLoading = searchQuery.length > 0 ? searchLoading : trendingLoading;
+  const isLoading = searchQuery.length > 0
+    ? searchLoading
+    : activeTab === 'trending'
+      ? trendingLoading
+      : allLoading;
 
   return (
     <div className="flex min-h-screen bg-background">

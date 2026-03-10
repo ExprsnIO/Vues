@@ -35,9 +35,16 @@ export default function CreateOrganizationPage() {
 
   const createMutation = useMutation({
     mutationFn: async (data: CreateOrganizationForm) => {
-      // TODO: Replace with actual API call
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-      return { id: 'new-org-id', ...data };
+      const result = await api.adminCreateOrganization({
+        name: data.name,
+        handle: data.handle,
+        description: data.description,
+        type: data.type,
+        visibility: data.visibility,
+        domainId,
+        website: data.website || undefined,
+      });
+      return result.organization;
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['admin', 'domain', domainId, 'organizations'] });

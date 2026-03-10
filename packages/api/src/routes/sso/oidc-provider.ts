@@ -390,11 +390,8 @@ app.post('/oauth/token', async (c) => {
       }
 
       // Issue tokens for the client itself (no user)
-      // For now, return error - implement based on requirements
-      return c.json(
-        { error: 'unsupported_grant_type', error_description: 'Not implemented' },
-        400
-      );
+      const tokens = await OIDCProviderService.issueClientCredentialsToken(client, scope);
+      return c.json(tokens);
     }
 
     default:
