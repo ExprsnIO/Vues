@@ -3016,6 +3016,10 @@ export const renderWorkers = pgTable(
     avgProcessingTime: real('avg_processing_time'), // seconds
     gpuEnabled: boolean('gpu_enabled').default(false),
     gpuModel: text('gpu_model'),
+    gpuMemoryMB: integer('gpu_memory_mb'), // Total GPU memory in MB
+    gpuCount: integer('gpu_count').default(0), // Number of GPUs on this worker
+    gpuUtilization: real('gpu_utilization'), // Current GPU utilization percentage
+    gpuMemoryUsed: integer('gpu_memory_used'), // Current GPU memory used in MB
     lastHeartbeat: timestamp('last_heartbeat'),
     startedAt: timestamp('started_at').defaultNow().notNull(),
     metadata: jsonb('metadata').$type<Record<string, unknown>>(),
@@ -3023,6 +3027,71 @@ export const renderWorkers = pgTable(
   (table) => ({
     statusIdx: index('render_workers_status_idx').on(table.status),
     heartbeatIdx: index('render_workers_heartbeat_idx').on(table.lastHeartbeat),
+    gpuEnabledIdx: index('render_workers_gpu_enabled_idx').on(table.gpuEnabled),
+  })
+);
+
+// GPU Allocations - track which jobs are using which GPUs
+export const gpuAllocations = pgTable(
+  'gpu_allocations',
+  {
+    id: text('id').primaryKey(),
+    workerId: text('worker_id')
+      .notNull()
+      .references(() => renderWorkers.id, { onDelete: 'cascade' }),
+    jobId: text('job_id')
+      .notNull()
+      .references(() => renderJobs.id, { onDelete: 'cascade' }),
+    gpuIndex: integer('gpu_index').notNull(), // GPU index on the worker (0, 1, 2, etc.)
+    jobType: text('job_type').notNull(), // 'render' | 'transcode' | 'inference' | 'other'
+    allocatedAt: timestamp('allocated_at').defaultNow().notNull(),
+    releasedAt: timestamp('released_at'),
+    memoryAllocatedMB: integer('memory_allocated_mb'), // Memory allocated to this job
+  },
+  (table) => ({
+    workerIdx: index('gpu_allocations_worker_idx').on(table.workerId),
+    jobIdx: index('gpu_allocations_job_idx').on(table.jobId),
+    activeIdx: index('gpu_allocations_active_idx').on(table.releasedAt),
+  })
+);
+
+// GPU Job Priorities - configure priority routing for GPU workloads
+export const gpuJobPriorities = pgTable(
+  'gpu_job_priorities',
+  {
+    id: text('id').primaryKey(),
+    jobType: text('job_type').notNull().unique(), // 'render' | 'transcode' | 'inference' | 'other'
+    priority: integer('priority').notNull().default(50), // 0-100, higher = more priority
+    requiresGPU: boolean('requires_gpu').default(false).notNull(),
+    preferredGPUModel: text('preferred_gpu_model'), // null = any GPU
+    maxGPUMemoryMB: integer('max_gpu_memory_mb'), // Max memory this job type can use
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    priorityIdx: index('gpu_job_priorities_priority_idx').on(table.priority),
+  })
+);
+
+// GPU Metrics - historical GPU usage data
+export const gpuMetrics = pgTable(
+  'gpu_metrics',
+  {
+    id: text('id').primaryKey(),
+    workerId: text('worker_id')
+      .notNull()
+      .references(() => renderWorkers.id, { onDelete: 'cascade' }),
+    gpuIndex: integer('gpu_index').notNull(),
+    utilization: real('utilization').notNull(), // 0-100
+    memoryUsedMB: integer('memory_used_mb').notNull(),
+    memoryTotalMB: integer('memory_total_mb').notNull(),
+    temperature: real('temperature'), // Celsius
+    powerWatts: real('power_watts'),
+    timestamp: timestamp('timestamp').defaultNow().notNull(),
+  },
+  (table) => ({
+    workerIdx: index('gpu_metrics_worker_idx').on(table.workerId),
+    timestampIdx: index('gpu_metrics_timestamp_idx').on(table.timestamp),
   })
 );
 
@@ -3087,6 +3156,12 @@ export type RenderWorker = typeof renderWorkers.$inferSelect;
 export type NewRenderWorker = typeof renderWorkers.$inferInsert;
 export type ScheduledPublishing = typeof scheduledPublishing.$inferSelect;
 export type NewScheduledPublishing = typeof scheduledPublishing.$inferInsert;
+export type GPUAllocation = typeof gpuAllocations.$inferSelect;
+export type NewGPUAllocation = typeof gpuAllocations.$inferInsert;
+export type GPUJobPriority = typeof gpuJobPriorities.$inferSelect;
+export type NewGPUJobPriority = typeof gpuJobPriorities.$inferInsert;
+export type GPUMetric = typeof gpuMetrics.$inferSelect;
+export type NewGPUMetric = typeof gpuMetrics.$inferInsert;
 
 // ============================================
 // Relay/Federation Tables
@@ -4863,6 +4938,74 @@ export const domainActivityLog = pgTable(
   })
 );
 
+// Domain Transfers - track domain ownership transfers
+export const domainTransfers = pgTable(
+  'domain_transfers',
+  {
+    id: text('id').primaryKey(),
+    domainId: text('domain_id')
+      .notNull()
+      .references(() => domains.id, { onDelete: 'cascade' }),
+
+    // Source owner (null if making domain independent)
+    sourceOrganizationId: text('source_organization_id')
+      .references(() => organizations.id, { onDelete: 'set null' }),
+    sourceUserDid: text('source_user_did')
+      .references(() => users.did, { onDelete: 'set null' }),
+
+    // Target owner (null if making domain independent)
+    targetOrganizationId: text('target_organization_id')
+      .references(() => organizations.id, { onDelete: 'set null' }),
+    targetUserDid: text('target_user_did')
+      .references(() => users.did, { onDelete: 'set null' }),
+
+    // Transfer details
+    status: text('status').default('pending').notNull(), // 'pending' | 'approved' | 'rejected' | 'cancelled' | 'completed' | 'expired'
+    initiatedBy: text('initiated_by')
+      .notNull()
+      .references(() => users.did, { onDelete: 'set null' }),
+    approvedBy: text('approved_by')
+      .references(() => users.did, { onDelete: 'set null' }),
+    rejectedBy: text('rejected_by')
+      .references(() => users.did, { onDelete: 'set null' }),
+    cancelledBy: text('cancelled_by')
+      .references(() => users.did, { onDelete: 'set null' }),
+
+    // Transfer reason and notes
+    reason: text('reason'),
+    notes: text('notes'),
+    adminNotes: text('admin_notes'),
+
+    // Approval settings
+    requiresApproval: boolean('requires_approval').default(true).notNull(),
+    autoApproveAfter: timestamp('auto_approve_after'), // Auto-approve if not rejected by this time
+
+    // Notification settings
+    notificationsSent: boolean('notifications_sent').default(false).notNull(),
+    remindersSent: integer('reminders_sent').default(0).notNull(),
+
+    // Timestamps
+    initiatedAt: timestamp('initiated_at').defaultNow().notNull(),
+    approvedAt: timestamp('approved_at'),
+    rejectedAt: timestamp('rejected_at'),
+    cancelledAt: timestamp('cancelled_at'),
+    completedAt: timestamp('completed_at'),
+    expiresAt: timestamp('expires_at'),
+
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    domainIdx: index('domain_transfers_domain_idx').on(table.domainId),
+    statusIdx: index('domain_transfers_status_idx').on(table.status),
+    sourceOrgIdx: index('domain_transfers_source_org_idx').on(table.sourceOrganizationId),
+    targetOrgIdx: index('domain_transfers_target_org_idx').on(table.targetOrganizationId),
+    initiatedByIdx: index('domain_transfers_initiated_by_idx').on(table.initiatedBy),
+    statusDomainIdx: index('domain_transfers_status_domain_idx').on(table.status, table.domainId),
+    expiresIdx: index('domain_transfers_expires_idx').on(table.expiresAt),
+  })
+);
+
 // Domain Clusters - assign render clusters to domains
 export const domainClusters = pgTable(
   'domain_clusters',
@@ -5634,6 +5777,159 @@ export type SSOAuditLogEntry = typeof ssoAuditLog.$inferSelect;
 export type NewSSOAuditLogEntry = typeof ssoAuditLog.$inferInsert;
 
 // ==========================================
+// Domain OAuth Providers & MFA Settings
+// ==========================================
+
+// Domain OAuth Providers - Domain-specific OAuth/OIDC provider configurations
+export const domainOAuthProviders = pgTable(
+  'domain_oauth_providers',
+  {
+    id: text('id').primaryKey(),
+    domainId: text('domain_id')
+      .notNull()
+      .references(() => domains.id, { onDelete: 'cascade' }),
+
+    // Provider information
+    providerKey: text('provider_key').notNull(), // 'google' | 'microsoft' | 'github' | 'gitlab' | 'custom'
+    displayName: text('display_name').notNull(),
+    description: text('description'),
+
+    // OAuth/OIDC Configuration
+    type: text('type').notNull(), // 'oauth2' | 'oidc'
+    clientId: text('client_id').notNull(),
+    clientSecret: text('client_secret').notNull(), // Encrypted
+
+    authorizationEndpoint: text('authorization_endpoint').notNull(),
+    tokenEndpoint: text('token_endpoint').notNull(),
+    userinfoEndpoint: text('userinfo_endpoint'),
+    jwksUri: text('jwks_uri'),
+    issuer: text('issuer'),
+
+    // Scopes and claims
+    scopes: jsonb('scopes').$type<string[]>().default(['openid', 'profile', 'email']),
+    claimMapping: jsonb('claim_mapping').$type<Record<string, string>>().default({
+      sub: 'external_id',
+      email: 'email',
+      name: 'display_name',
+      picture: 'avatar',
+    }),
+
+    // UI customization
+    iconUrl: text('icon_url'),
+    buttonColor: text('button_color'),
+    buttonText: text('button_text'),
+
+    // Provider settings
+    enabled: boolean('enabled').default(true).notNull(),
+    priority: integer('priority').default(0).notNull(), // Display order
+
+    // Auto-provisioning
+    autoProvisionUsers: boolean('auto_provision_users').default(true).notNull(),
+    defaultRole: text('default_role').default('member'),
+
+    // Email domain restrictions
+    requiredEmailDomain: text('required_email_domain'),
+    allowedEmailDomains: jsonb('allowed_email_domains').$type<string[]>(),
+
+    // PKCE
+    requirePkce: boolean('require_pkce').default(true).notNull(),
+
+    // Stats
+    totalLogins: integer('total_logins').default(0).notNull(),
+    lastUsedAt: timestamp('last_used_at'),
+
+    // Audit
+    createdBy: text('created_by').references(() => users.did, { onDelete: 'set null' }),
+    updatedBy: text('updated_by').references(() => users.did, { onDelete: 'set null' }),
+
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    domainIdx: index('domain_oauth_providers_domain_idx').on(table.domainId),
+    providerKeyIdx: index('domain_oauth_providers_key_idx').on(table.providerKey),
+    enabledIdx: index('domain_oauth_providers_enabled_idx').on(table.enabled),
+    uniqueProvider: uniqueIndex('domain_oauth_providers_unique_idx').on(table.domainId, table.providerKey),
+  })
+);
+
+// Domain MFA Settings - Multi-factor authentication configuration per domain
+export const domainMfaSettings = pgTable(
+  'domain_mfa_settings',
+  {
+    id: text('id').primaryKey(),
+    domainId: text('domain_id')
+      .notNull()
+      .unique()
+      .references(() => domains.id, { onDelete: 'cascade' }),
+
+    // MFA Enforcement
+    mfaMode: text('mfa_mode').default('optional').notNull(), // 'disabled' | 'optional' | 'required' | 'required_admins'
+
+    // Allowed MFA methods
+    allowedMethods: jsonb('allowed_mfa_methods').$type<string[]>().default(['totp', 'webauthn']),
+
+    // TOTP Settings
+    totpEnabled: boolean('totp_enabled').default(true).notNull(),
+    totpIssuer: text('totp_issuer'), // Custom issuer name for TOTP apps
+    totpDigits: integer('totp_digits').default(6).notNull(), // 6 or 8
+    totpPeriod: integer('totp_period').default(30).notNull(), // seconds
+    totpAlgorithm: text('totp_algorithm').default('SHA1').notNull(), // 'SHA1' | 'SHA256' | 'SHA512'
+
+    // WebAuthn Settings
+    webauthnEnabled: boolean('webauthn_enabled').default(true).notNull(),
+    webauthnRpName: text('webauthn_rp_name'), // Relying party name
+    webauthnRpId: text('webauthn_rp_id'), // Relying party ID (usually domain)
+    webauthnUserVerification: text('webauthn_user_verification').default('preferred'), // 'required' | 'preferred' | 'discouraged'
+    webauthnAttachment: text('webauthn_attachment').default('cross-platform'), // 'platform' | 'cross-platform'
+
+    // SMS Settings (future)
+    smsEnabled: boolean('sms_enabled').default(false).notNull(),
+    smsProvider: text('sms_provider'), // 'twilio' | 'aws_sns' | etc.
+    smsConfig: jsonb('sms_config'),
+
+    // Email OTP Settings (future)
+    emailOtpEnabled: boolean('email_otp_enabled').default(false).notNull(),
+    emailOtpExpiryMinutes: integer('email_otp_expiry_minutes').default(10),
+
+    // Backup codes
+    backupCodesEnabled: boolean('backup_codes_enabled').default(true).notNull(),
+    backupCodesCount: integer('backup_codes_count').default(10).notNull(),
+
+    // Grace period for new enrollments
+    gracePeriodDays: integer('grace_period_days').default(7).notNull(),
+
+    // Remember device settings
+    rememberDeviceEnabled: boolean('remember_device_enabled').default(true).notNull(),
+    rememberDeviceDays: integer('remember_device_days').default(30).notNull(),
+
+    // Recovery settings
+    recoveryEmailRequired: boolean('recovery_email_required').default(false).notNull(),
+
+    // Stats
+    totalUsersEnrolled: integer('total_users_enrolled').default(0).notNull(),
+    totpEnrolledCount: integer('totp_enrolled_count').default(0).notNull(),
+    webauthnEnrolledCount: integer('webauthn_enrolled_count').default(0).notNull(),
+
+    // Audit
+    updatedBy: text('updated_by').references(() => users.did, { onDelete: 'set null' }),
+
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    domainIdx: index('domain_mfa_settings_domain_idx').on(table.domainId),
+    mfaModeIdx: index('domain_mfa_settings_mode_idx').on(table.mfaMode),
+  })
+);
+
+// Type exports for domain OAuth and MFA
+export type DomainOAuthProvider = typeof domainOAuthProviders.$inferSelect;
+export type NewDomainOAuthProvider = typeof domainOAuthProviders.$inferInsert;
+export type DomainMfaSettings = typeof domainMfaSettings.$inferSelect;
+export type NewDomainMfaSettings = typeof domainMfaSettings.$inferInsert;
+
+// ==========================================
 // Video Moderation & Deletion System
 // ==========================================
 
@@ -6054,6 +6350,101 @@ export type CertificatePin = typeof certificatePins.$inferSelect;
 export type NewCertificatePin = typeof certificatePins.$inferInsert;
 export type PinViolationReport = typeof pinViolationReports.$inferSelect;
 export type NewPinViolationReport = typeof pinViolationReports.$inferInsert;
+
+// ============================================
+// Domain Health & DNS Monitoring
+// ============================================
+
+// Domain DNS records - tracks DNS configuration and validation status
+export const domainDnsRecords = pgTable(
+  'domain_dns_records',
+  {
+    id: text('id').primaryKey(),
+    domainId: text('domain_id')
+      .notNull()
+      .references(() => domains.id, { onDelete: 'cascade' }),
+    recordType: text('record_type').notNull(), // 'A' | 'AAAA' | 'CNAME' | 'TXT' | 'MX' | 'NS'
+    name: text('name').notNull(), // Hostname or subdomain
+    expectedValue: text('expected_value'), // Expected DNS value
+    actualValue: text('actual_value'), // Current DNS value from lookup
+    status: text('status').default('unknown').notNull(), // 'valid' | 'invalid' | 'missing' | 'unknown' | 'error'
+    errorMessage: text('error_message'),
+    lastChecked: timestamp('last_checked'),
+    validatedAt: timestamp('validated_at'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    domainIdx: index('domain_dns_records_domain_idx').on(table.domainId),
+    statusIdx: index('domain_dns_records_status_idx').on(table.status),
+    typeIdx: index('domain_dns_records_type_idx').on(table.recordType),
+  })
+);
+
+// Domain health checks - periodic health monitoring
+export const domainHealthChecks = pgTable(
+  'domain_health_checks',
+  {
+    id: text('id').primaryKey(),
+    domainId: text('domain_id')
+      .notNull()
+      .references(() => domains.id, { onDelete: 'cascade' }),
+    checkType: text('check_type').notNull(), // 'pds' | 'api' | 'certificate' | 'federation'
+    status: text('status').notNull(), // 'healthy' | 'degraded' | 'down' | 'error'
+    responseTime: integer('response_time'), // in milliseconds
+    statusCode: integer('status_code'),
+    errorMessage: text('error_message'),
+    details: jsonb('details').$type<{
+      endpoint?: string;
+      sslValid?: boolean;
+      sslExpiry?: string;
+      federationReachable?: boolean;
+      latency?: number;
+      [key: string]: unknown;
+    }>(),
+    checkedAt: timestamp('checked_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    domainIdx: index('domain_health_checks_domain_idx').on(table.domainId),
+    statusIdx: index('domain_health_checks_status_idx').on(table.status),
+    typeIdx: index('domain_health_checks_type_idx').on(table.checkType),
+    checkedAtIdx: index('domain_health_checks_checked_idx').on(table.checkedAt),
+  })
+);
+
+// Domain health summaries - current health status per domain
+export const domainHealthSummaries = pgTable(
+  'domain_health_summaries',
+  {
+    domainId: text('domain_id')
+      .primaryKey()
+      .references(() => domains.id, { onDelete: 'cascade' }),
+    overallStatus: text('overall_status').default('unknown').notNull(), // 'healthy' | 'degraded' | 'down' | 'unknown'
+    dnsStatus: text('dns_status').default('unknown').notNull(), // 'valid' | 'invalid' | 'partial' | 'unknown'
+    pdsStatus: text('pds_status').default('unknown').notNull(),
+    apiStatus: text('api_status').default('unknown').notNull(),
+    certificateStatus: text('certificate_status').default('unknown').notNull(),
+    federationStatus: text('federation_status').default('unknown').notNull(),
+    lastHealthCheck: timestamp('last_health_check'),
+    lastDnsCheck: timestamp('last_dns_check'),
+    uptimePercentage: real('uptime_percentage').default(100),
+    incidentCount24h: integer('incident_count_24h').default(0).notNull(),
+    avgResponseTime: integer('avg_response_time'), // in milliseconds
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    overallStatusIdx: index('domain_health_summaries_overall_idx').on(table.overallStatus),
+    updatedIdx: index('domain_health_summaries_updated_idx').on(table.updatedAt),
+  })
+);
+
+// Type exports for domain health tables
+export type DomainDnsRecord = typeof domainDnsRecords.$inferSelect;
+export type NewDomainDnsRecord = typeof domainDnsRecords.$inferInsert;
+export type DomainHealthCheck = typeof domainHealthChecks.$inferSelect;
+export type NewDomainHealthCheck = typeof domainHealthChecks.$inferInsert;
+export type DomainHealthSummary = typeof domainHealthSummaries.$inferSelect;
+export type NewDomainHealthSummary = typeof domainHealthSummaries.$inferInsert;
 
 // ============================================
 // AT Protocol Repository System

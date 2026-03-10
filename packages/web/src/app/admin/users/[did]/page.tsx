@@ -6,6 +6,8 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import { formatCount } from '@/lib/utils';
+import { SuspendUserModal } from '@/components/admin/modals/SuspendUserModal';
+import { BanUserModal } from '@/components/admin/modals/BanUserModal';
 import toast from 'react-hot-toast';
 
 export default function AdminUserDetailPage() {
@@ -20,7 +22,8 @@ export default function AdminUserDetailPage() {
   const [showAddOrgModal, setShowAddOrgModal] = useState(false);
   const [showAddRoleModal, setShowAddRoleModal] = useState<string | null>(null); // domainId
   const [showAddGroupModal, setShowAddGroupModal] = useState<string | null>(null); // domainId
-  const [activeTab, setActiveTab] = useState<'overview' | 'domains' | 'organizations' | 'roles'>('overview');
+  const [activeModal, setActiveModal] = useState<'suspend' | 'ban' | null>(null);
+  const [activeTab, setActiveTab] = useState<'overview' | 'moderation' | 'domains' | 'organizations' | 'roles'>('overview');
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['admin', 'user', did],
@@ -35,6 +38,11 @@ export default function AdminUserDetailPage() {
   const { data: memberships, refetch: refetchMemberships } = useQuery({
     queryKey: ['admin', 'user', 'memberships', did],
     queryFn: () => api.getUserMemberships(did),
+  });
+
+  const { data: moderationHistory } = useQuery({
+    queryKey: ['admin', 'user', 'moderation-history', did],
+    queryFn: () => api.adminUsersModerationHistory({ userDid: did, limit: 50 }),
   });
 
   const setPasswordMutation = useMutation({
@@ -82,10 +90,31 @@ export default function AdminUserDetailPage() {
     }) => api.sanctionUser({ userDid: did, ...data }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['admin', 'user', did] });
+      queryClient.invalidateQueries({ queryKey: ['admin', 'user', 'moderation-history', did] });
       setShowSanctionModal(false);
       toast.success('Sanction applied');
     },
     onError: () => toast.error('Failed to apply sanction'),
+  });
+
+  const unsuspendMutation = useMutation({
+    mutationFn: () => api.adminUsersUnsuspend({ userDid: did }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'user', did] });
+      queryClient.invalidateQueries({ queryKey: ['admin', 'user', 'moderation-history', did] });
+      toast.success('User unsuspended');
+    },
+    onError: () => toast.error('Failed to unsuspend user'),
+  });
+
+  const unbanMutation = useMutation({
+    mutationFn: () => api.adminUsersUnban({ userDid: did }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'user', did] });
+      queryClient.invalidateQueries({ queryKey: ['admin', 'user', 'moderation-history', did] });
+      toast.success('User unbanned');
+    },
+    onError: () => toast.error('Failed to unban user'),
   });
 
   // Domain mutations
@@ -266,12 +295,38 @@ export default function AdminUserDetailPage() {
             >
               Manage Password
             </button>
-            <button
-              onClick={() => setShowSanctionModal(true)}
-              className="px-4 py-2 bg-red-500/10 hover:bg-red-500/20 text-red-500 rounded-lg transition-colors text-sm"
-            >
-              Issue Sanction
-            </button>
+            {activeSanction?.sanctionType === 'suspend' ? (
+              <button
+                onClick={() => unsuspendMutation.mutate()}
+                disabled={unsuspendMutation.isPending}
+                className="px-4 py-2 bg-green-500/10 hover:bg-green-500/20 text-green-500 rounded-lg transition-colors text-sm"
+              >
+                Unsuspend User
+              </button>
+            ) : (
+              <button
+                onClick={() => setActiveModal('suspend')}
+                className="px-4 py-2 bg-orange-500/10 hover:bg-orange-500/20 text-orange-500 rounded-lg transition-colors text-sm"
+              >
+                Suspend User
+              </button>
+            )}
+            {activeSanction?.sanctionType === 'ban' ? (
+              <button
+                onClick={() => unbanMutation.mutate()}
+                disabled={unbanMutation.isPending}
+                className="px-4 py-2 bg-green-500/10 hover:bg-green-500/20 text-green-500 rounded-lg transition-colors text-sm"
+              >
+                Unban User
+              </button>
+            ) : (
+              <button
+                onClick={() => setActiveModal('ban')}
+                className="px-4 py-2 bg-red-500/10 hover:bg-red-500/20 text-red-500 rounded-lg transition-colors text-sm"
+              >
+                Ban User
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -281,6 +336,7 @@ export default function AdminUserDetailPage() {
         <nav className="flex gap-6">
           {[
             { id: 'overview', label: 'Overview' },
+            { id: 'moderation', label: 'Moderation History' },
             { id: 'domains', label: 'Domains' },
             { id: 'organizations', label: 'Organizations' },
             { id: 'roles', label: 'Roles & Groups' },
@@ -388,6 +444,121 @@ export default function AdminUserDetailPage() {
                     )}
                     <div className="absolute bottom-0 left-0 right-0 p-2 bg-gradient-to-t from-black/80 to-transparent">
                       <p className="text-xs text-white">{formatCount(video.viewCount)} views</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'moderation' && (
+        <div className="space-y-6">
+          {/* Active Sanctions */}
+          {moderationHistory?.sanctions?.filter((s: any) => s.active).length > 0 && (
+            <div className="bg-surface border border-border rounded-xl p-6">
+              <h3 className="text-lg font-semibold text-text-primary mb-4">Active Sanctions</h3>
+              <div className="space-y-3">
+                {moderationHistory?.sanctions
+                  ?.filter((s: any) => s.active)
+                  .map((sanction: any) => (
+                    <div
+                      key={sanction.id}
+                      className="flex items-start justify-between p-4 bg-red-500/5 border border-red-500/20 rounded-lg"
+                    >
+                      <div className="flex-1">
+                        <div className="flex items-center gap-2 mb-2">
+                          <span className={`px-3 py-1 text-sm font-medium rounded-full ${getSanctionColor(sanction.sanctionType)}`}>
+                            {sanction.sanctionType.toUpperCase()}
+                          </span>
+                          {sanction.expiresAt && (
+                            <span className="text-xs text-text-muted">
+                              Expires {new Date(sanction.expiresAt).toLocaleDateString()}
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-sm text-text-secondary mb-1">{sanction.reason}</p>
+                        <p className="text-xs text-text-muted">
+                          Applied {new Date(sanction.createdAt).toLocaleDateString()} by {sanction.createdBy}
+                        </p>
+                      </div>
+                      <div className="flex gap-2">
+                        {sanction.sanctionType === 'suspend' && (
+                          <button
+                            onClick={() => unsuspendMutation.mutate()}
+                            disabled={unsuspendMutation.isPending}
+                            className="px-3 py-1.5 text-sm bg-green-500/10 hover:bg-green-500/20 text-green-500 rounded-lg transition-colors"
+                          >
+                            Unsuspend
+                          </button>
+                        )}
+                        {sanction.sanctionType === 'ban' && (
+                          <button
+                            onClick={() => unbanMutation.mutate()}
+                            disabled={unbanMutation.isPending}
+                            className="px-3 py-1.5 text-sm bg-green-500/10 hover:bg-green-500/20 text-green-500 rounded-lg transition-colors"
+                          >
+                            Unban
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+              </div>
+            </div>
+          )}
+
+          {/* Full Moderation History */}
+          <div className="bg-surface border border-border rounded-xl p-6">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold text-text-primary">
+                All Sanctions ({moderationHistory?.total || 0})
+              </h3>
+              <button
+                onClick={() => setShowSanctionModal(true)}
+                className="px-4 py-2 bg-red-500/10 hover:bg-red-500/20 text-red-500 rounded-lg transition-colors text-sm"
+              >
+                Issue New Sanction
+              </button>
+            </div>
+
+            {!moderationHistory?.sanctions || moderationHistory.sanctions.length === 0 ? (
+              <div className="text-center py-12">
+                <ShieldIcon className="w-12 h-12 text-text-muted mx-auto mb-3" />
+                <p className="text-text-muted">No moderation history</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {moderationHistory.sanctions.map((sanction: any) => (
+                  <div
+                    key={sanction.id}
+                    className={`flex items-start justify-between p-4 rounded-lg border ${
+                      sanction.active
+                        ? 'bg-surface-hover border-border'
+                        : 'bg-surface border-border/50 opacity-60'
+                    }`}
+                  >
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2 mb-2">
+                        <span className={`px-2.5 py-0.5 text-xs font-medium rounded-full ${getSanctionColor(sanction.sanctionType)}`}>
+                          {sanction.sanctionType}
+                        </span>
+                        {!sanction.active && (
+                          <span className="px-2 py-0.5 text-xs bg-gray-500/10 text-gray-500 rounded-full">
+                            Expired/Removed
+                          </span>
+                        )}
+                        {sanction.expiresAt && sanction.active && (
+                          <span className="text-xs text-text-muted">
+                            Expires {new Date(sanction.expiresAt).toLocaleDateString()}
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-sm text-text-secondary mb-1">{sanction.reason}</p>
+                      <p className="text-xs text-text-muted">
+                        {new Date(sanction.createdAt).toLocaleDateString()} by {sanction.createdBy}
+                      </p>
                     </div>
                   </div>
                 ))}
@@ -616,6 +787,26 @@ export default function AdminUserDetailPage() {
       )}
 
       {/* Modals */}
+      <SuspendUserModal
+        isOpen={activeModal === 'suspend'}
+        onClose={() => setActiveModal(null)}
+        user={{
+          did: user.did,
+          handle: user.handle,
+          displayName: user.displayName,
+        }}
+      />
+
+      <BanUserModal
+        isOpen={activeModal === 'ban'}
+        onClose={() => setActiveModal(null)}
+        user={{
+          did: user.did,
+          handle: user.handle,
+          displayName: user.displayName,
+        }}
+      />
+
       {showSanctionModal && (
         <SanctionModal
           onClose={() => setShowSanctionModal(false)}
@@ -1370,6 +1561,14 @@ function XIcon({ className }: { className?: string }) {
   return (
     <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
       <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+    </svg>
+  );
+}
+
+function ShieldIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" />
     </svg>
   );
 }

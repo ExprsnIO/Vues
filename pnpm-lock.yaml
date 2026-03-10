@@ -62,6 +62,9 @@ importers:
       '@hono/node-server':
         specifier: ^1.19.11
         version: 1.19.11(hono@4.12.5)
+      '@hono/zod-validator':
+        specifier: ^0.7.6
+        version: 0.7.6(hono@4.12.5)(zod@3.25.76)
       '@opensearch-project/opensearch':
         specifier: ^2.12.0
         version: 2.13.0
@@ -519,6 +522,9 @@ importers:
       ioredis:
         specifier: ^5.10.0
         version: 5.10.0
+      postgres:
+        specifier: ^3.4.5
+        version: 3.4.8
     devDependencies:
       '@types/fluent-ffmpeg':
         specifier: ^2.1.26
@@ -4468,6 +4474,16 @@ packages:
       hono: ^4
     dependencies:
       hono: 4.12.5
+    dev: false
+
+  /@hono/zod-validator@0.7.6(hono@4.12.5)(zod@3.25.76):
+    resolution: {integrity: sha512-Io1B6d011Gj1KknV4rXYz4le5+5EubcWEU/speUjuw9XMMIaP3n78yXLhjd2A3PXaXaUwEAluOiAyLqhBEJgsw==}
+    peerDependencies:
+      hono: '>=3.9.0'
+      zod: ^3.25.0 || ^4.0.0
+    dependencies:
+      hono: 4.12.5
+      zod: 3.25.76
     dev: false
 
   /@img/colour@1.0.0:

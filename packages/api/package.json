@@ -53,6 +53,7 @@
     "@exprsn/relay": "workspace:*",
     "@exprsn/shared": "workspace:*",
     "@hono/node-server": "^1.19.11",
+    "@hono/zod-validator": "^0.7.6",
     "@opensearch-project/opensearch": "^2.12.0",
     "@paypal/checkout-server-sdk": "^1.0.3",
     "@types/node-forge": "^1.3.14",

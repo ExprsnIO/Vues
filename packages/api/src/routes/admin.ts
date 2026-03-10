@@ -25,6 +25,9 @@ import {
   domainUserRoles,
   domainGroups,
   domainGroupMembers,
+  domainDnsRecords,
+  domainHealthChecks,
+  domainHealthSummaries,
   type AdminUser,
 } from '../db/schema.js';
 import {
@@ -53,6 +56,10 @@ import {
   listInheritedGlobalAdmins,
 } from '../services/domain-access.js';
 import { broadcastAdminActivity, notifyAdmins } from '../websocket/admin.js';
+import {
+  dnsValidationService,
+  domainHealthService,
+} from '../services/domain-health.js';
 
 export const adminRouter = new Hono();
 
@@ -415,6 +422,507 @@ adminRouter.get(
       .limit(limit);
 
     return c.json({ sanctions });
+  }
+);
+
+// ============================================
+// User Suspension and Ban Management
+// ============================================
+
+// Suspend user
+adminRouter.post(
+  '/io.exprsn.admin.users.suspend',
+  requirePermission(ADMIN_PERMISSIONS.USERS_SANCTION),
+  async (c) => {
+    const body = await c.req.json<{
+      userDid: string;
+      reason: string;
+      duration?: number; // Duration in hours (optional, if not provided = indefinite)
+      note?: string;
+    }>();
+    const adminUser = c.get('adminUser');
+
+    if (!body.userDid || !body.reason) {
+      return c.json(
+        { error: 'InvalidRequest', message: 'userDid and reason are required' },
+        400
+      );
+    }
+
+    // Check if user exists
+    const [user] = await db
+      .select()
+      .from(users)
+      .where(eq(users.did, body.userDid))
+      .limit(1);
+
+    if (!user) {
+      return c.json({ error: 'NotFound', message: 'User not found' }, 404);
+    }
+
+    // Calculate expiry date if duration provided
+    const expiresAt = body.duration
+      ? new Date(Date.now() + body.duration * 60 * 60 * 1000)
+      : null;
+
+    // Create suspension sanction
+    const sanctionId = nanoid();
+    await db.insert(userSanctions).values({
+      id: sanctionId,
+      userDid: body.userDid,
+      adminId: adminUser.id,
+      sanctionType: 'suspend',
+      reason: body.reason,
+      expiresAt,
+      createdAt: new Date(),
+    });
+
+    // Audit log
+    await db.insert(adminAuditLog).values({
+      id: nanoid(),
+      adminId: adminUser.id,
+      action: 'user.suspend',
+      targetType: 'user',
+      targetId: body.userDid,
+      details: {
+        sanctionId,
+        reason: body.reason,
+        duration: body.duration,
+        expiresAt: expiresAt?.toISOString(),
+        note: body.note,
+      },
+      createdAt: new Date(),
+    });
+
+    // Broadcast to admins
+    const adminUserData = await db.query.users.findFirst({
+      where: eq(users.did, adminUser.userDid),
+      columns: { handle: true },
+    });
+
+    broadcastAdminActivity({
+      adminDid: adminUser.userDid,
+      adminHandle: adminUserData?.handle || 'unknown',
+      action: 'user_suspend',
+      targetType: 'user',
+      targetId: user.handle,
+    });
+
+    notifyAdmins({
+      type: 'sanction',
+      title: 'User Suspended',
+      message: `${adminUserData?.handle || 'Admin'} suspended ${user.handle}${body.duration ? ` for ${body.duration} hours` : ' indefinitely'}`,
+      severity: 'warning',
+      data: { userDid: body.userDid, duration: body.duration },
+    });
+
+    return c.json({
+      success: true,
+      sanctionId,
+      expiresAt: expiresAt?.toISOString(),
+    });
+  }
+);
+
+// Unsuspend user
+adminRouter.post(
+  '/io.exprsn.admin.users.unsuspend',
+  requirePermission(ADMIN_PERMISSIONS.USERS_SANCTION),
+  async (c) => {
+    const body = await c.req.json<{
+      userDid: string;
+      reason?: string;
+    }>();
+    const adminUser = c.get('adminUser');
+
+    if (!body.userDid) {
+      return c.json({ error: 'InvalidRequest', message: 'userDid is required' }, 400);
+    }
+
+    // Find active suspension
+    const [suspension] = await db
+      .select()
+      .from(userSanctions)
+      .where(
+        and(
+          eq(userSanctions.userDid, body.userDid),
+          eq(userSanctions.sanctionType, 'suspend'),
+          or(
+            isNull(userSanctions.expiresAt),
+            gte(userSanctions.expiresAt, new Date())
+          )
+        )
+      )
+      .orderBy(desc(userSanctions.createdAt))
+      .limit(1);
+
+    if (!suspension) {
+      return c.json(
+        { error: 'NotFound', message: 'No active suspension found for this user' },
+        404
+      );
+    }
+
+    // Expire the suspension immediately
+    await db
+      .update(userSanctions)
+      .set({ expiresAt: new Date() })
+      .where(eq(userSanctions.id, suspension.id));
+
+    // Audit log
+    await db.insert(adminAuditLog).values({
+      id: nanoid(),
+      adminId: adminUser.id,
+      action: 'user.unsuspend',
+      targetType: 'user',
+      targetId: body.userDid,
+      details: {
+        originalSanctionId: suspension.id,
+        reason: body.reason || 'Suspension lifted',
+      },
+      createdAt: new Date(),
+    });
+
+    // Get user for notification
+    const [user] = await db
+      .select()
+      .from(users)
+      .where(eq(users.did, body.userDid))
+      .limit(1);
+
+    // Broadcast to admins
+    const adminUserData = await db.query.users.findFirst({
+      where: eq(users.did, adminUser.userDid),
+      columns: { handle: true },
+    });
+
+    broadcastAdminActivity({
+      adminDid: adminUser.userDid,
+      adminHandle: adminUserData?.handle || 'unknown',
+      action: 'user_unsuspend',
+      targetType: 'user',
+      targetId: user?.handle || body.userDid,
+    });
+
+    notifyAdmins({
+      type: 'sanction',
+      title: 'User Unsuspended',
+      message: `${adminUserData?.handle || 'Admin'} removed suspension for ${user?.handle || body.userDid}`,
+      severity: 'info',
+      data: { userDid: body.userDid },
+    });
+
+    return c.json({ success: true });
+  }
+);
+
+// Ban user permanently
+adminRouter.post(
+  '/io.exprsn.admin.users.ban',
+  requirePermission(ADMIN_PERMISSIONS.USERS_BAN),
+  async (c) => {
+    const body = await c.req.json<{
+      userDid: string;
+      reason: string;
+      note?: string;
+    }>();
+    const adminUser = c.get('adminUser');
+
+    if (!body.userDid || !body.reason) {
+      return c.json(
+        { error: 'InvalidRequest', message: 'userDid and reason are required' },
+        400
+      );
+    }
+
+    // Check if user exists
+    const [user] = await db
+      .select()
+      .from(users)
+      .where(eq(users.did, body.userDid))
+      .limit(1);
+
+    if (!user) {
+      return c.json({ error: 'NotFound', message: 'User not found' }, 404);
+    }
+
+    // Create permanent ban sanction (no expiry)
+    const sanctionId = nanoid();
+    await db.insert(userSanctions).values({
+      id: sanctionId,
+      userDid: body.userDid,
+      adminId: adminUser.id,
+      sanctionType: 'ban',
+      reason: body.reason,
+      expiresAt: null, // Permanent ban
+      createdAt: new Date(),
+    });
+
+    // Audit log
+    await db.insert(adminAuditLog).values({
+      id: nanoid(),
+      adminId: adminUser.id,
+      action: 'user.ban',
+      targetType: 'user',
+      targetId: body.userDid,
+      details: {
+        sanctionId,
+        reason: body.reason,
+        note: body.note,
+        permanent: true,
+      },
+      createdAt: new Date(),
+    });
+
+    // Broadcast to admins
+    const adminUserData = await db.query.users.findFirst({
+      where: eq(users.did, adminUser.userDid),
+      columns: { handle: true },
+    });
+
+    broadcastAdminActivity({
+      adminDid: adminUser.userDid,
+      adminHandle: adminUserData?.handle || 'unknown',
+      action: 'user_ban',
+      targetType: 'user',
+      targetId: user.handle,
+    });
+
+    notifyAdmins({
+      type: 'sanction',
+      title: 'User Banned',
+      message: `${adminUserData?.handle || 'Admin'} permanently banned ${user.handle}`,
+      severity: 'error',
+      data: { userDid: body.userDid },
+    });
+
+    return c.json({
+      success: true,
+      sanctionId,
+    });
+  }
+);
+
+// Unban user
+adminRouter.post(
+  '/io.exprsn.admin.users.unban',
+  requirePermission(ADMIN_PERMISSIONS.USERS_BAN),
+  async (c) => {
+    const body = await c.req.json<{
+      userDid: string;
+      reason?: string;
+    }>();
+    const adminUser = c.get('adminUser');
+
+    if (!body.userDid) {
+      return c.json({ error: 'InvalidRequest', message: 'userDid is required' }, 400);
+    }
+
+    // Find active ban
+    const [ban] = await db
+      .select()
+      .from(userSanctions)
+      .where(
+        and(
+          eq(userSanctions.userDid, body.userDid),
+          eq(userSanctions.sanctionType, 'ban'),
+          or(
+            isNull(userSanctions.expiresAt),
+            gte(userSanctions.expiresAt, new Date())
+          )
+        )
+      )
+      .orderBy(desc(userSanctions.createdAt))
+      .limit(1);
+
+    if (!ban) {
+      return c.json(
+        { error: 'NotFound', message: 'No active ban found for this user' },
+        404
+      );
+    }
+
+    // Expire the ban immediately
+    await db
+      .update(userSanctions)
+      .set({ expiresAt: new Date() })
+      .where(eq(userSanctions.id, ban.id));
+
+    // Audit log
+    await db.insert(adminAuditLog).values({
+      id: nanoid(),
+      adminId: adminUser.id,
+      action: 'user.unban',
+      targetType: 'user',
+      targetId: body.userDid,
+      details: {
+        originalSanctionId: ban.id,
+        reason: body.reason || 'Ban lifted',
+      },
+      createdAt: new Date(),
+    });
+
+    // Get user for notification
+    const [user] = await db
+      .select()
+      .from(users)
+      .where(eq(users.did, body.userDid))
+      .limit(1);
+
+    // Broadcast to admins
+    const adminUserData = await db.query.users.findFirst({
+      where: eq(users.did, adminUser.userDid),
+      columns: { handle: true },
+    });
+
+    broadcastAdminActivity({
+      adminDid: adminUser.userDid,
+      adminHandle: adminUserData?.handle || 'unknown',
+      action: 'user_unban',
+      targetType: 'user',
+      targetId: user?.handle || body.userDid,
+    });
+
+    notifyAdmins({
+      type: 'sanction',
+      title: 'User Unbanned',
+      message: `${adminUserData?.handle || 'Admin'} removed ban for ${user?.handle || body.userDid}`,
+      severity: 'info',
+      data: { userDid: body.userDid },
+    });
+
+    return c.json({ success: true });
+  }
+);
+
+// Get moderation history for a user
+adminRouter.get(
+  '/io.exprsn.admin.users.moderationHistory',
+  requirePermission(ADMIN_PERMISSIONS.USERS_VIEW),
+  async (c) => {
+    const userDid = c.req.query('userDid');
+    const limit = Math.min(parseInt(c.req.query('limit') || '50'), 100);
+    const offset = parseInt(c.req.query('offset') || '0');
+
+    if (!userDid) {
+      return c.json({ error: 'InvalidRequest', message: 'userDid is required' }, 400);
+    }
+
+    // Get all sanctions
+    const sanctions = await db
+      .select({
+        id: userSanctions.id,
+        sanctionType: userSanctions.sanctionType,
+        reason: userSanctions.reason,
+        expiresAt: userSanctions.expiresAt,
+        appealStatus: userSanctions.appealStatus,
+        appealNote: userSanctions.appealNote,
+        createdAt: userSanctions.createdAt,
+        adminId: userSanctions.adminId,
+        adminHandle: users.handle,
+      })
+      .from(userSanctions)
+      .leftJoin(adminUsers, eq(userSanctions.adminId, adminUsers.id))
+      .leftJoin(users, eq(adminUsers.userDid, users.did))
+      .where(eq(userSanctions.userDid, userDid))
+      .orderBy(desc(userSanctions.createdAt))
+      .limit(limit)
+      .offset(offset);
+
+    // Get moderation actions related to this user
+    const actions = await db
+      .select({
+        id: moderationActions.id,
+        actionType: moderationActions.actionType,
+        contentType: moderationActions.contentType,
+        contentUri: moderationActions.contentUri,
+        reason: moderationActions.reason,
+        createdAt: moderationActions.createdAt,
+        adminId: moderationActions.adminId,
+        adminHandle: users.handle,
+      })
+      .from(moderationActions)
+      .leftJoin(adminUsers, eq(moderationActions.adminId, adminUsers.id))
+      .leftJoin(users, eq(adminUsers.userDid, users.did))
+      .where(eq(moderationActions.contentUri, userDid))
+      .orderBy(desc(moderationActions.createdAt))
+      .limit(limit)
+      .offset(offset);
+
+    // Get audit log entries
+    const auditLogs = await db
+      .select({
+        id: adminAuditLog.id,
+        action: adminAuditLog.action,
+        details: adminAuditLog.details,
+        createdAt: adminAuditLog.createdAt,
+        adminId: adminAuditLog.adminId,
+        adminHandle: users.handle,
+      })
+      .from(adminAuditLog)
+      .leftJoin(adminUsers, eq(adminAuditLog.adminId, adminUsers.id))
+      .leftJoin(users, eq(adminUsers.userDid, users.did))
+      .where(
+        and(
+          eq(adminAuditLog.targetType, 'user'),
+          eq(adminAuditLog.targetId, userDid)
+        )
+      )
+      .orderBy(desc(adminAuditLog.createdAt))
+      .limit(limit)
+      .offset(offset);
+
+    // Get total counts
+    const [sanctionCount] = await db
+      .select({ count: count() })
+      .from(userSanctions)
+      .where(eq(userSanctions.userDid, userDid));
+
+    const [actionCount] = await db
+      .select({ count: count() })
+      .from(moderationActions)
+      .where(eq(moderationActions.contentUri, userDid));
+
+    const [auditCount] = await db
+      .select({ count: count() })
+      .from(adminAuditLog)
+      .where(
+        and(
+          eq(adminAuditLog.targetType, 'user'),
+          eq(adminAuditLog.targetId, userDid)
+        )
+      );
+
+    // Get current active sanctions
+    const activeSanctions = await db
+      .select()
+      .from(userSanctions)
+      .where(
+        and(
+          eq(userSanctions.userDid, userDid),
+          or(
+            isNull(userSanctions.expiresAt),
+            gte(userSanctions.expiresAt, new Date())
+          )
+        )
+      )
+      .orderBy(desc(userSanctions.createdAt));
+
+    return c.json({
+      sanctions,
+      moderationActions: actions,
+      auditLog: auditLogs,
+      activeSanctions,
+      counts: {
+        totalSanctions: sanctionCount?.count || 0,
+        totalActions: actionCount?.count || 0,
+        totalAuditEntries: auditCount?.count || 0,
+      },
+      pagination: {
+        limit,
+        offset,
+      },
+    });
   }
 );
 
@@ -1741,6 +2249,157 @@ adminRouter.get(
         createdAt: org.createdAt.toISOString(),
       })),
       cursor: hasMore ? results[results.length - 1]?.org.createdAt.toISOString() : undefined,
+    });
+  }
+);
+
+// Create organization (admin)
+adminRouter.post(
+  '/io.exprsn.admin.orgs.create',
+  requirePermission(ADMIN_PERMISSIONS.USERS_EDIT),
+  async (c) => {
+    const body = await c.req.json<{
+      name: string;
+      handle?: string;
+      type: 'team' | 'enterprise' | 'nonprofit' | 'business' | 'company' | 'network' | 'label' | 'brand' | 'channel';
+      description?: string;
+      website?: string;
+      ownerDid: string;
+      visibility?: 'public' | 'private' | 'unlisted';
+      domainId?: string | null;
+      parentOrganizationId?: string | null;
+      contactEmail?: string;
+    }>();
+    const adminUser = c.get('adminUser');
+
+    // Validate required fields
+    if (!body.name || body.name.length < 2 || body.name.length > 100) {
+      return c.json({ error: 'InvalidRequest', message: 'Organization name must be 2-100 characters' }, 400);
+    }
+
+    if (!body.ownerDid) {
+      return c.json({ error: 'InvalidRequest', message: 'Owner DID is required' }, 400);
+    }
+
+    const validTypes = ['team', 'enterprise', 'nonprofit', 'business', 'company', 'network', 'label', 'brand', 'channel'];
+    if (!validTypes.includes(body.type)) {
+      return c.json({ error: 'InvalidRequest', message: 'Invalid organization type' }, 400);
+    }
+
+    // Verify owner exists
+    const owner = await db
+      .select()
+      .from(users)
+      .where(eq(users.did, body.ownerDid))
+      .limit(1);
+
+    if (!owner[0]) {
+      return c.json({ error: 'InvalidRequest', message: 'Owner user not found' }, 400);
+    }
+
+    // Validate handle if provided
+    if (body.handle) {
+      const handleRegex = /^[a-z0-9-_]+$/;
+      if (!handleRegex.test(body.handle)) {
+        return c.json({ error: 'InvalidRequest', message: 'Handle must contain only lowercase letters, numbers, hyphens, and underscores' }, 400);
+      }
+
+      // Check if handle is already taken
+      const existingHandle = await db
+        .select()
+        .from(organizations)
+        .where(eq(organizations.handle, body.handle))
+        .limit(1);
+
+      if (existingHandle[0]) {
+        return c.json({ error: 'InvalidRequest', message: 'Handle already taken' }, 400);
+      }
+    }
+
+    // Validate domain if provided
+    if (body.domainId) {
+      const domain = await db
+        .select()
+        .from(domains)
+        .where(eq(domains.id, body.domainId))
+        .limit(1);
+
+      if (!domain[0]) {
+        return c.json({ error: 'InvalidRequest', message: 'Domain not found' }, 400);
+      }
+    }
+
+    // Validate parent organization if provided
+    if (body.parentOrganizationId) {
+      const parentOrg = await db
+        .select()
+        .from(organizations)
+        .where(eq(organizations.id, body.parentOrganizationId))
+        .limit(1);
+
+      if (!parentOrg[0]) {
+        return c.json({ error: 'InvalidRequest', message: 'Parent organization not found' }, 400);
+      }
+    }
+
+    const orgId = nanoid();
+    const now = new Date();
+
+    // Determine visibility
+    const isPublic = body.visibility === 'private' ? false : true;
+
+    // Create organization
+    await db.insert(organizations).values({
+      id: orgId,
+      ownerDid: body.ownerDid,
+      name: body.name,
+      handle: body.handle,
+      type: body.type,
+      description: body.description,
+      website: body.website,
+      isPublic,
+      memberCount: 1,
+      domainId: body.domainId,
+      parentOrganizationId: body.parentOrganizationId,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    // Add owner as member
+    await db.insert(organizationMembers).values({
+      id: nanoid(),
+      organizationId: orgId,
+      userDid: body.ownerDid,
+      role: 'owner',
+      permissions: ['*'], // Owner has all permissions
+      joinedAt: now,
+    });
+
+    // Audit log
+    await db.insert(adminAuditLog).values({
+      id: nanoid(),
+      adminId: adminUser.id,
+      action: 'organization.create',
+      targetType: 'organization',
+      targetId: orgId,
+      details: {
+        name: body.name,
+        type: body.type,
+        ownerDid: body.ownerDid,
+        domainId: body.domainId,
+        parentOrganizationId: body.parentOrganizationId,
+      },
+      createdAt: now,
+    });
+
+    return c.json({
+      success: true,
+      organization: {
+        id: orgId,
+        name: body.name,
+        handle: body.handle,
+        type: body.type,
+      },
     });
   }
 );
@@ -5316,6 +5975,17 @@ adminRouter.get(
     const hasMore = domainList.length > limit;
     const items = hasMore ? domainList.slice(0, -1) : domainList;
 
+    // Get health summaries for all domains
+    const domainIds = items.map((d) => d.id);
+    const healthSummaries = domainIds.length > 0
+      ? await db
+          .select()
+          .from(domainHealthSummaries)
+          .where(sql`${domainHealthSummaries.domainId} IN (${sql.join(domainIds.map((id) => sql`${id}`), sql`, `)})`)
+      : [];
+
+    const healthMap = new Map(healthSummaries.map((h) => [h.domainId, h]));
+
     // Get stats
     const [stats] = await db
       .select({
@@ -5328,18 +5998,30 @@ adminRouter.get(
       .from(domains);
 
     return c.json({
-      domains: items.map((d) => ({
-        id: d.id,
-        name: d.name,
-        domain: d.domain,
-        type: d.type,
-        status: d.status,
-        userCount: d.userCount,
-        groupCount: d.groupCount,
-        certificateCount: d.certificateCount,
-        verifiedAt: d.verifiedAt?.toISOString(),
-        createdAt: d.createdAt.toISOString(),
-      })),
+      domains: items.map((d) => {
+        const health = healthMap.get(d.id);
+        return {
+          id: d.id,
+          name: d.name,
+          domain: d.domain,
+          type: d.type,
+          status: d.status,
+          userCount: d.userCount,
+          groupCount: d.groupCount,
+          certificateCount: d.certificateCount,
+          verifiedAt: d.verifiedAt?.toISOString(),
+          createdAt: d.createdAt.toISOString(),
+          health: health
+            ? {
+                overallStatus: health.overallStatus,
+                dnsStatus: health.dnsStatus,
+                lastHealthCheck: health.lastHealthCheck?.toISOString(),
+                lastDnsCheck: health.lastDnsCheck?.toISOString(),
+                uptimePercentage: health.uptimePercentage,
+              }
+            : undefined,
+        };
+      }),
       stats: {
         total: stats?.total || 0,
         active: stats?.active || 0,
@@ -5779,6 +6461,241 @@ adminRouter.post(
     });
 
     return c.json({ success: true, verified: true });
+  }
+);
+
+// DNS Status - Check DNS configuration for a domain
+adminRouter.get(
+  '/io.exprsn.admin.domains.dnsStatus',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_VIEW),
+  async (c) => {
+    const id = c.req.query('id');
+
+    if (!id) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing id' }, 400);
+    }
+
+    const [domain] = await db
+      .select()
+      .from(domains)
+      .where(eq(domains.id, id))
+      .limit(1);
+
+    if (!domain) {
+      return c.json({ error: 'NotFound', message: 'Domain not found' }, 404);
+    }
+
+    try {
+      // Run DNS validation
+      const dnsResults = await dnsValidationService.verifyDomainDns(id);
+
+      // Get saved DNS records from database
+      const savedRecords = await db
+        .select()
+        .from(domainDnsRecords)
+        .where(eq(domainDnsRecords.domainId, id))
+        .orderBy(domainDnsRecords.recordType, domainDnsRecords.name);
+
+      // Get DNS status summary
+      const [summary] = await db
+        .select()
+        .from(domainHealthSummaries)
+        .where(eq(domainHealthSummaries.domainId, id))
+        .limit(1);
+
+      return c.json({
+        domain: {
+          id: domain.id,
+          name: domain.name,
+          domain: domain.domain,
+        },
+        dnsStatus: summary?.dnsStatus ?? 'unknown',
+        lastChecked: summary?.lastDnsCheck,
+        records: savedRecords.map((record) => ({
+          recordType: record.recordType,
+          name: record.name,
+          expectedValue: record.expectedValue,
+          actualValue: record.actualValue,
+          status: record.status,
+          errorMessage: record.errorMessage,
+          lastChecked: record.lastChecked,
+          validatedAt: record.validatedAt,
+        })),
+        summary: {
+          total: savedRecords.length,
+          valid: savedRecords.filter((r) => r.status === 'valid').length,
+          invalid: savedRecords.filter((r) => r.status === 'invalid').length,
+          missing: savedRecords.filter((r) => r.status === 'missing').length,
+          error: savedRecords.filter((r) => r.status === 'error').length,
+        },
+      });
+    } catch (error) {
+      console.error('DNS status check failed:', error);
+      return c.json(
+        {
+          error: 'InternalError',
+          message: error instanceof Error ? error.message : 'DNS check failed',
+        },
+        500
+      );
+    }
+  }
+);
+
+// Health Check - Run health check on domain services
+adminRouter.post(
+  '/io.exprsn.admin.domains.healthCheck',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_VIEW),
+  async (c) => {
+    const body = await c.req.json<{ id: string }>();
+
+    if (!body.id) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing id' }, 400);
+    }
+
+    const [domain] = await db
+      .select()
+      .from(domains)
+      .where(eq(domains.id, body.id))
+      .limit(1);
+
+    if (!domain) {
+      return c.json({ error: 'NotFound', message: 'Domain not found' }, 404);
+    }
+
+    try {
+      // Run health checks
+      const healthResults = await domainHealthService.checkDomainHealth(body.id);
+
+      // Get updated health summary
+      const [summary] = await db
+        .select()
+        .from(domainHealthSummaries)
+        .where(eq(domainHealthSummaries.domainId, body.id))
+        .limit(1);
+
+      return c.json({
+        domain: {
+          id: domain.id,
+          name: domain.name,
+          domain: domain.domain,
+        },
+        overallStatus: summary?.overallStatus ?? 'unknown',
+        lastChecked: summary?.lastHealthCheck,
+        checks: healthResults.map((result) => ({
+          checkType: result.checkType,
+          status: result.status,
+          responseTime: result.responseTime,
+          statusCode: result.statusCode,
+          errorMessage: result.errorMessage,
+          details: result.details,
+        })),
+        summary: {
+          pdsStatus: summary?.pdsStatus ?? 'unknown',
+          apiStatus: summary?.apiStatus ?? 'unknown',
+          certificateStatus: summary?.certificateStatus ?? 'unknown',
+          federationStatus: summary?.federationStatus ?? 'unknown',
+          uptimePercentage: summary?.uptimePercentage ?? 100,
+          incidentCount24h: summary?.incidentCount24h ?? 0,
+          avgResponseTime: summary?.avgResponseTime,
+        },
+      });
+    } catch (error) {
+      console.error('Health check failed:', error);
+      return c.json(
+        {
+          error: 'InternalError',
+          message: error instanceof Error ? error.message : 'Health check failed',
+        },
+        500
+      );
+    }
+  }
+);
+
+// Health History - Get health check history
+adminRouter.get(
+  '/io.exprsn.admin.domains.healthHistory',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_VIEW),
+  async (c) => {
+    const id = c.req.query('id');
+    const checkType = c.req.query('checkType') as 'pds' | 'api' | 'certificate' | 'federation' | undefined;
+    const startDate = c.req.query('startDate');
+    const endDate = c.req.query('endDate');
+    const limit = parseInt(c.req.query('limit') ?? '100', 10);
+
+    if (!id) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing id' }, 400);
+    }
+
+    const [domain] = await db
+      .select()
+      .from(domains)
+      .where(eq(domains.id, id))
+      .limit(1);
+
+    if (!domain) {
+      return c.json({ error: 'NotFound', message: 'Domain not found' }, 404);
+    }
+
+    try {
+      const history = await domainHealthService.getHealthHistory(id, {
+        checkType,
+        startDate: startDate ? new Date(startDate) : undefined,
+        endDate: endDate ? new Date(endDate) : undefined,
+        limit,
+      });
+
+      // Group by check type for easier visualization
+      const groupedByType: Record<string, typeof history> = {};
+      for (const check of history) {
+        if (!groupedByType[check.checkType]) {
+          groupedByType[check.checkType] = [];
+        }
+        groupedByType[check.checkType].push(check);
+      }
+
+      // Calculate uptime stats per type
+      const stats: Record<string, { total: number; healthy: number; uptime: number }> = {};
+      for (const [type, checks] of Object.entries(groupedByType)) {
+        const total = checks.length;
+        const healthy = checks.filter((c) => c.status === 'healthy').length;
+        stats[type] = {
+          total,
+          healthy,
+          uptime: total > 0 ? Math.round((healthy / total) * 100) : 100,
+        };
+      }
+
+      return c.json({
+        domain: {
+          id: domain.id,
+          name: domain.name,
+          domain: domain.domain,
+        },
+        history: history.map((check) => ({
+          id: check.id,
+          checkType: check.checkType,
+          status: check.status,
+          responseTime: check.responseTime,
+          statusCode: check.statusCode,
+          errorMessage: check.errorMessage,
+          details: check.details,
+          checkedAt: check.checkedAt,
+        })),
+        stats,
+        total: history.length,
+      });
+    } catch (error) {
+      console.error('Failed to get health history:', error);
+      return c.json(
+        {
+          error: 'InternalError',
+          message: error instanceof Error ? error.message : 'Failed to get health history',
+        },
+        500
+      );
+    }
   }
 );
 
@@ -7126,6 +8043,426 @@ adminRouter.get(
         fromGroups,
       },
     });
+  }
+);
+
+// ============================================
+// Domain User Moderation
+// ============================================
+
+// Suspend user in a domain
+adminRouter.post(
+  '/io.exprsn.admin.domain.users.suspend',
+  requirePermission(ADMIN_PERMISSIONS.USERS_SANCTION),
+  async (c) => {
+    const body = await c.req.json<{
+      domainId: string;
+      userDid: string;
+      reason: string;
+      duration?: number; // Duration in hours (optional, if not provided = indefinite)
+      note?: string;
+    }>();
+    const adminUser = c.get('adminUser');
+
+    if (!body.domainId || !body.userDid || !body.reason) {
+      return c.json(
+        { error: 'InvalidRequest', message: 'domainId, userDid and reason are required' },
+        400
+      );
+    }
+
+    // Check if user exists
+    const [user] = await db
+      .select()
+      .from(users)
+      .where(eq(users.did, body.userDid))
+      .limit(1);
+
+    if (!user) {
+      return c.json({ error: 'NotFound', message: 'User not found' }, 404);
+    }
+
+    // Verify domain exists and admin has access
+    const [domain] = await db
+      .select()
+      .from(domains)
+      .where(eq(domains.id, body.domainId))
+      .limit(1);
+
+    if (!domain) {
+      return c.json({ error: 'NotFound', message: 'Domain not found' }, 404);
+    }
+
+    // Check if user has admin access to this domain
+    const access = await getEffectiveDomainAccess(body.domainId, adminUser.userDid);
+    if (!access) {
+      return c.json({ error: 'Forbidden', message: 'No access to this domain' }, 403);
+    }
+
+    // Calculate expiry date if duration provided
+    const expiresAt = body.duration
+      ? new Date(Date.now() + body.duration * 60 * 60 * 1000)
+      : null;
+
+    // Create suspension sanction
+    const sanctionId = nanoid();
+    await db.insert(userSanctions).values({
+      id: sanctionId,
+      userDid: body.userDid,
+      adminId: adminUser.id,
+      sanctionType: 'suspend',
+      reason: body.reason,
+      expiresAt,
+      createdAt: new Date(),
+    });
+
+    // Audit log
+    await db.insert(adminAuditLog).values({
+      id: nanoid(),
+      adminId: adminUser.id,
+      action: 'domain.user.suspend',
+      targetType: 'user',
+      targetId: body.userDid,
+      details: {
+        domainId: body.domainId,
+        sanctionId,
+        reason: body.reason,
+        duration: body.duration,
+        expiresAt: expiresAt?.toISOString(),
+        note: body.note,
+      },
+      createdAt: new Date(),
+    });
+
+    // Broadcast to admins
+    const adminUserData = await db.query.users.findFirst({
+      where: eq(users.did, adminUser.userDid),
+      columns: { handle: true },
+    });
+
+    broadcastAdminActivity({
+      adminDid: adminUser.userDid,
+      adminHandle: adminUserData?.handle || 'unknown',
+      action: 'domain_user_suspend',
+      targetType: 'user',
+      targetId: user.handle,
+    });
+
+    return c.json({
+      success: true,
+      sanctionId,
+      expiresAt: expiresAt?.toISOString(),
+    });
+  }
+);
+
+// Unsuspend user in a domain
+adminRouter.post(
+  '/io.exprsn.admin.domain.users.unsuspend',
+  requirePermission(ADMIN_PERMISSIONS.USERS_SANCTION),
+  async (c) => {
+    const body = await c.req.json<{
+      domainId: string;
+      userDid: string;
+      reason?: string;
+    }>();
+    const adminUser = c.get('adminUser');
+
+    if (!body.domainId || !body.userDid) {
+      return c.json(
+        { error: 'InvalidRequest', message: 'domainId and userDid are required' },
+        400
+      );
+    }
+
+    // Verify domain exists and admin has access
+    const [domain] = await db
+      .select()
+      .from(domains)
+      .where(eq(domains.id, body.domainId))
+      .limit(1);
+
+    if (!domain) {
+      return c.json({ error: 'NotFound', message: 'Domain not found' }, 404);
+    }
+
+    // Check if user has admin access to this domain
+    const access = await getEffectiveDomainAccess(body.domainId, adminUser.userDid);
+    if (!access) {
+      return c.json({ error: 'Forbidden', message: 'No access to this domain' }, 403);
+    }
+
+    // Find active suspension
+    const [suspension] = await db
+      .select()
+      .from(userSanctions)
+      .where(
+        and(
+          eq(userSanctions.userDid, body.userDid),
+          eq(userSanctions.sanctionType, 'suspend'),
+          or(
+            isNull(userSanctions.expiresAt),
+            gte(userSanctions.expiresAt, new Date())
+          )
+        )
+      )
+      .orderBy(desc(userSanctions.createdAt))
+      .limit(1);
+
+    if (!suspension) {
+      return c.json(
+        { error: 'NotFound', message: 'No active suspension found for this user' },
+        404
+      );
+    }
+
+    // Expire the suspension immediately
+    await db
+      .update(userSanctions)
+      .set({ expiresAt: new Date() })
+      .where(eq(userSanctions.id, suspension.id));
+
+    // Audit log
+    await db.insert(adminAuditLog).values({
+      id: nanoid(),
+      adminId: adminUser.id,
+      action: 'domain.user.unsuspend',
+      targetType: 'user',
+      targetId: body.userDid,
+      details: {
+        domainId: body.domainId,
+        originalSanctionId: suspension.id,
+        reason: body.reason || 'Suspension lifted',
+      },
+      createdAt: new Date(),
+    });
+
+    // Get user for notification
+    const [user] = await db
+      .select()
+      .from(users)
+      .where(eq(users.did, body.userDid))
+      .limit(1);
+
+    // Broadcast to admins
+    const adminUserData = await db.query.users.findFirst({
+      where: eq(users.did, adminUser.userDid),
+      columns: { handle: true },
+    });
+
+    broadcastAdminActivity({
+      adminDid: adminUser.userDid,
+      adminHandle: adminUserData?.handle || 'unknown',
+      action: 'domain_user_unsuspend',
+      targetType: 'user',
+      targetId: user?.handle || body.userDid,
+    });
+
+    return c.json({ success: true });
+  }
+);
+
+// Ban user in a domain
+adminRouter.post(
+  '/io.exprsn.admin.domain.users.ban',
+  requirePermission(ADMIN_PERMISSIONS.USERS_BAN),
+  async (c) => {
+    const body = await c.req.json<{
+      domainId: string;
+      userDid: string;
+      reason: string;
+      note?: string;
+    }>();
+    const adminUser = c.get('adminUser');
+
+    if (!body.domainId || !body.userDid || !body.reason) {
+      return c.json(
+        { error: 'InvalidRequest', message: 'domainId, userDid and reason are required' },
+        400
+      );
+    }
+
+    // Check if user exists
+    const [user] = await db
+      .select()
+      .from(users)
+      .where(eq(users.did, body.userDid))
+      .limit(1);
+
+    if (!user) {
+      return c.json({ error: 'NotFound', message: 'User not found' }, 404);
+    }
+
+    // Verify domain exists and admin has access
+    const [domain] = await db
+      .select()
+      .from(domains)
+      .where(eq(domains.id, body.domainId))
+      .limit(1);
+
+    if (!domain) {
+      return c.json({ error: 'NotFound', message: 'Domain not found' }, 404);
+    }
+
+    // Check if user has admin access to this domain
+    const access = await getEffectiveDomainAccess(body.domainId, adminUser.userDid);
+    if (!access) {
+      return c.json({ error: 'Forbidden', message: 'No access to this domain' }, 403);
+    }
+
+    // Create permanent ban sanction (no expiry)
+    const sanctionId = nanoid();
+    await db.insert(userSanctions).values({
+      id: sanctionId,
+      userDid: body.userDid,
+      adminId: adminUser.id,
+      sanctionType: 'ban',
+      reason: body.reason,
+      expiresAt: null, // Permanent ban
+      createdAt: new Date(),
+    });
+
+    // Audit log
+    await db.insert(adminAuditLog).values({
+      id: nanoid(),
+      adminId: adminUser.id,
+      action: 'domain.user.ban',
+      targetType: 'user',
+      targetId: body.userDid,
+      details: {
+        domainId: body.domainId,
+        sanctionId,
+        reason: body.reason,
+        note: body.note,
+        permanent: true,
+      },
+      createdAt: new Date(),
+    });
+
+    // Broadcast to admins
+    const adminUserData = await db.query.users.findFirst({
+      where: eq(users.did, adminUser.userDid),
+      columns: { handle: true },
+    });
+
+    broadcastAdminActivity({
+      adminDid: adminUser.userDid,
+      adminHandle: adminUserData?.handle || 'unknown',
+      action: 'domain_user_ban',
+      targetType: 'user',
+      targetId: user.handle,
+    });
+
+    return c.json({
+      success: true,
+      sanctionId,
+    });
+  }
+);
+
+// Unban user in a domain
+adminRouter.post(
+  '/io.exprsn.admin.domain.users.unban',
+  requirePermission(ADMIN_PERMISSIONS.USERS_BAN),
+  async (c) => {
+    const body = await c.req.json<{
+      domainId: string;
+      userDid: string;
+      reason?: string;
+    }>();
+    const adminUser = c.get('adminUser');
+
+    if (!body.domainId || !body.userDid) {
+      return c.json(
+        { error: 'InvalidRequest', message: 'domainId and userDid are required' },
+        400
+      );
+    }
+
+    // Verify domain exists and admin has access
+    const [domain] = await db
+      .select()
+      .from(domains)
+      .where(eq(domains.id, body.domainId))
+      .limit(1);
+
+    if (!domain) {
+      return c.json({ error: 'NotFound', message: 'Domain not found' }, 404);
+    }
+
+    // Check if user has admin access to this domain
+    const access = await getEffectiveDomainAccess(body.domainId, adminUser.userDid);
+    if (!access) {
+      return c.json({ error: 'Forbidden', message: 'No access to this domain' }, 403);
+    }
+
+    // Find active ban
+    const [ban] = await db
+      .select()
+      .from(userSanctions)
+      .where(
+        and(
+          eq(userSanctions.userDid, body.userDid),
+          eq(userSanctions.sanctionType, 'ban'),
+          or(
+            isNull(userSanctions.expiresAt),
+            gte(userSanctions.expiresAt, new Date())
+          )
+        )
+      )
+      .orderBy(desc(userSanctions.createdAt))
+      .limit(1);
+
+    if (!ban) {
+      return c.json(
+        { error: 'NotFound', message: 'No active ban found for this user' },
+        404
+      );
+    }
+
+    // Expire the ban immediately
+    await db
+      .update(userSanctions)
+      .set({ expiresAt: new Date() })
+      .where(eq(userSanctions.id, ban.id));
+
+    // Audit log
+    await db.insert(adminAuditLog).values({
+      id: nanoid(),
+      adminId: adminUser.id,
+      action: 'domain.user.unban',
+      targetType: 'user',
+      targetId: body.userDid,
+      details: {
+        domainId: body.domainId,
+        originalSanctionId: ban.id,
+        reason: body.reason || 'Ban lifted',
+      },
+      createdAt: new Date(),
+    });
+
+    // Get user for notification
+    const [user] = await db
+      .select()
+      .from(users)
+      .where(eq(users.did, body.userDid))
+      .limit(1);
+
+    // Broadcast to admins
+    const adminUserData = await db.query.users.findFirst({
+      where: eq(users.did, adminUser.userDid),
+      columns: { handle: true },
+    });
+
+    broadcastAdminActivity({
+      adminDid: adminUser.userDid,
+      adminHandle: adminUserData?.handle || 'unknown',
+      action: 'domain_user_unban',
+      targetType: 'user',
+      targetId: user?.handle || body.userDid,
+    });
+
+    return c.json({ success: true });
   }
 );
 

@@ -1,17 +1,21 @@
 'use client';
 
-import { useEffect } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useEffect, useState } from 'react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import { useAdminDomain } from '@/lib/admin-domain-context';
 import { formatCount } from '@/lib/utils';
+import toast from 'react-hot-toast';
 
 export default function DomainDashboardPage() {
   const params = useParams();
   const domainId = params.domainId as string;
   const { setSelectedDomain } = useAdminDomain();
+  const queryClient = useQueryClient();
+  const [showDnsDetails, setShowDnsDetails] = useState(false);
+  const [showHealthDetails, setShowHealthDetails] = useState(false);
 
   // Sync URL param with context
   useEffect(() => {
@@ -24,6 +28,30 @@ export default function DomainDashboardPage() {
     queryKey: ['admin', 'domain', domainId],
     queryFn: () => api.adminDomainsGet(domainId),
     enabled: !!domainId,
+  });
+
+  const { data: dnsData, isLoading: isDnsLoading } = useQuery({
+    queryKey: ['admin', 'domain', domainId, 'dns'],
+    queryFn: () => api.adminDomainsDnsStatus(domainId),
+    enabled: !!domainId,
+  });
+
+  const { data: healthHistoryData } = useQuery({
+    queryKey: ['admin', 'domain', domainId, 'health-history'],
+    queryFn: () => api.adminDomainsHealthHistory(domainId, { limit: 50 }),
+    enabled: !!domainId,
+    refetchInterval: 60000, // Refetch every minute
+  });
+
+  const runHealthCheckMutation = useMutation({
+    mutationFn: () => api.adminDomainsHealthCheck(domainId),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'domain', domainId, 'health-history'] });
+      toast.success('Health check completed');
+    },
+    onError: () => {
+      toast.error('Health check failed');
+    },
   });
 
   if (isLoading) {
@@ -121,6 +149,189 @@ export default function DomainDashboardPage() {
           icon={ReportsIcon}
           href={`/admin/d/${domainId}/reports`}
         />
+      </div>
+
+      {/* Health & DNS Status */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* DNS Status Card */}
+        <div className="bg-surface border border-border rounded-xl p-6">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-lg font-semibold text-text-primary">DNS Configuration</h2>
+            <button
+              onClick={() => setShowDnsDetails(!showDnsDetails)}
+              className="text-sm text-accent hover:underline"
+            >
+              {showDnsDetails ? 'Hide' : 'Show'} Details
+            </button>
+          </div>
+
+          {isDnsLoading ? (
+            <div className="flex items-center justify-center py-8">
+              <div className="w-6 h-6 border-2 border-accent border-t-transparent rounded-full animate-spin" />
+            </div>
+          ) : dnsData ? (
+            <div className="space-y-4">
+              <div className="flex items-center gap-3">
+                <div className={`w-3 h-3 rounded-full ${
+                  dnsData.dnsStatus === 'valid' ? 'bg-green-500' :
+                  dnsData.dnsStatus === 'partial' ? 'bg-yellow-500' :
+                  dnsData.dnsStatus === 'invalid' ? 'bg-red-500' :
+                  'bg-gray-500'
+                }`} />
+                <span className="text-text-primary font-medium">
+                  {dnsData.dnsStatus === 'valid' ? 'All DNS records valid' :
+                   dnsData.dnsStatus === 'partial' ? 'Some DNS records missing' :
+                   dnsData.dnsStatus === 'invalid' ? 'DNS configuration invalid' :
+                   'DNS status unknown'}
+                </span>
+              </div>
+
+              {dnsData.lastChecked && (
+                <p className="text-sm text-text-muted">
+                  Last checked: {new Date(dnsData.lastChecked).toLocaleString()}
+                </p>
+              )}
+
+              <div className="grid grid-cols-4 gap-2 text-center">
+                <div>
+                  <p className="text-2xl font-bold text-green-400">{dnsData.summary.valid}</p>
+                  <p className="text-xs text-text-muted">Valid</p>
+                </div>
+                <div>
+                  <p className="text-2xl font-bold text-yellow-400">{dnsData.summary.missing}</p>
+                  <p className="text-xs text-text-muted">Missing</p>
+                </div>
+                <div>
+                  <p className="text-2xl font-bold text-red-400">{dnsData.summary.invalid}</p>
+                  <p className="text-xs text-text-muted">Invalid</p>
+                </div>
+                <div>
+                  <p className="text-2xl font-bold text-gray-400">{dnsData.summary.error}</p>
+                  <p className="text-xs text-text-muted">Error</p>
+                </div>
+              </div>
+
+              {showDnsDetails && dnsData.records.length > 0 && (
+                <div className="mt-4 space-y-2 max-h-64 overflow-y-auto">
+                  {dnsData.records.map((record, idx) => (
+                    <div key={idx} className="p-3 bg-surface-hover rounded-lg text-sm">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="font-medium text-text-primary">{record.recordType}</span>
+                        <span className={`text-xs px-2 py-0.5 rounded ${
+                          record.status === 'valid' ? 'bg-green-500/10 text-green-400' :
+                          record.status === 'missing' ? 'bg-yellow-500/10 text-yellow-400' :
+                          record.status === 'invalid' ? 'bg-red-500/10 text-red-400' :
+                          'bg-gray-500/10 text-gray-400'
+                        }`}>
+                          {record.status}
+                        </span>
+                      </div>
+                      <p className="text-text-muted text-xs">{record.name}</p>
+                      {record.actualValue && (
+                        <p className="text-text-secondary text-xs mt-1 font-mono">{record.actualValue}</p>
+                      )}
+                      {record.errorMessage && (
+                        <p className="text-red-400 text-xs mt-1">{record.errorMessage}</p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : (
+            <p className="text-text-muted text-sm">No DNS data available</p>
+          )}
+        </div>
+
+        {/* Health Status Card */}
+        <div className="bg-surface border border-border rounded-xl p-6">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-lg font-semibold text-text-primary">Service Health</h2>
+            <button
+              onClick={() => runHealthCheckMutation.mutate()}
+              disabled={runHealthCheckMutation.isPending}
+              className="text-sm px-3 py-1 bg-accent hover:bg-accent-hover text-text-inverse rounded transition-colors disabled:opacity-50"
+            >
+              {runHealthCheckMutation.isPending ? 'Checking...' : 'Run Check'}
+            </button>
+          </div>
+
+          {healthHistoryData ? (
+            <div className="space-y-4">
+              {healthHistoryData.stats && Object.keys(healthHistoryData.stats).length > 0 ? (
+                <>
+                  <div className="grid grid-cols-2 gap-4">
+                    {Object.entries(healthHistoryData.stats).map(([type, stat]: [string, any]) => (
+                      <div key={type} className="p-3 bg-surface-hover rounded-lg">
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-xs text-text-muted uppercase">{type}</span>
+                          <span className={`text-xs px-2 py-0.5 rounded ${
+                            stat.uptime >= 99 ? 'bg-green-500/10 text-green-400' :
+                            stat.uptime >= 95 ? 'bg-yellow-500/10 text-yellow-400' :
+                            'bg-red-500/10 text-red-400'
+                          }`}>
+                            {stat.uptime}% uptime
+                          </span>
+                        </div>
+                        <p className="text-sm text-text-muted">
+                          {stat.healthy}/{stat.total} checks healthy
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+
+                  {showHealthDetails && healthHistoryData.history.length > 0 && (
+                    <div className="mt-4 space-y-2 max-h-64 overflow-y-auto">
+                      {healthHistoryData.history.slice(0, 10).map((check) => (
+                        <div key={check.id} className="p-3 bg-surface-hover rounded-lg text-sm">
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="font-medium text-text-primary uppercase text-xs">{check.checkType}</span>
+                            <span className={`text-xs px-2 py-0.5 rounded ${
+                              check.status === 'healthy' ? 'bg-green-500/10 text-green-400' :
+                              check.status === 'degraded' ? 'bg-yellow-500/10 text-yellow-400' :
+                              'bg-red-500/10 text-red-400'
+                            }`}>
+                              {check.status}
+                            </span>
+                          </div>
+                          <div className="flex items-center justify-between text-xs text-text-muted">
+                            <span>{new Date(check.checkedAt).toLocaleString()}</span>
+                            {check.responseTime && <span>{check.responseTime}ms</span>}
+                          </div>
+                          {check.errorMessage && (
+                            <p className="text-red-400 text-xs mt-1">{check.errorMessage}</p>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  <button
+                    onClick={() => setShowHealthDetails(!showHealthDetails)}
+                    className="w-full text-sm text-accent hover:underline"
+                  >
+                    {showHealthDetails ? 'Hide' : 'Show'} History
+                  </button>
+                </>
+              ) : (
+                <div className="text-center py-4">
+                  <p className="text-text-muted text-sm mb-3">No health check data available</p>
+                  <button
+                    onClick={() => runHealthCheckMutation.mutate()}
+                    disabled={runHealthCheckMutation.isPending}
+                    className="px-4 py-2 bg-accent hover:bg-accent-hover text-text-inverse rounded-lg transition-colors disabled:opacity-50"
+                  >
+                    Run First Health Check
+                  </button>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="flex items-center justify-center py-8">
+              <div className="w-6 h-6 border-2 border-accent border-t-transparent rounded-full animate-spin" />
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Domain Info */}

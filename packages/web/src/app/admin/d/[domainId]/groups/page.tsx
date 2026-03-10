@@ -125,9 +125,20 @@ export default function DomainGroupsPage() {
               {group.description && (
                 <p className="text-text-muted text-sm mt-1 line-clamp-2">{group.description}</p>
               )}
-              <div className="mt-4 flex items-center gap-4 text-sm text-text-muted">
-                <span>{group.memberCount} members</span>
-                <span>{new Date(group.createdAt).toLocaleDateString()}</span>
+              <div className="mt-4 flex items-center justify-between text-sm">
+                <div className="flex items-center gap-4 text-text-muted">
+                  <span>{group.memberCount} members</span>
+                  <span>{new Date(group.createdAt).toLocaleDateString()}</span>
+                </div>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setSelectedGroup(group);
+                  }}
+                  className="px-3 py-1 text-xs bg-accent/10 hover:bg-accent/20 text-accent rounded transition-colors"
+                >
+                  Manage
+                </button>
               </div>
             </div>
           ))}
@@ -272,6 +283,7 @@ function EditGroupModal({
   users: Array<{ id: string; userDid: string; user?: { handle?: string; displayName?: string } }>;
   onClose: () => void;
 }) {
+  const [activeTab, setActiveTab] = useState<'details' | 'members'>('details');
   const [name, setName] = useState(group.name);
   const [description, setDescription] = useState(group.description || '');
   const [directPermissions, setDirectPermissions] = useState(
@@ -281,9 +293,10 @@ function EditGroupModal({
     (group.assignedRoles || []).map((role) => role.id)
   );
   const [selectedUserDids, setSelectedUserDids] = useState<string[]>([]);
+  const [searchQuery, setSearchQuery] = useState('');
   const queryClient = useQueryClient();
 
-  const { data: membersData } = useQuery({
+  const { data: membersData, isLoading: membersLoading } = useQuery({
     queryKey: ['admin', 'domain', domainId, 'group-members', group.id],
     queryFn: () => api.adminDomainsGroupMembersList(group.id),
     enabled: !!group.id,
@@ -309,94 +322,258 @@ function EditGroupModal({
     onError: () => toast.error('Failed to update group'),
   });
 
+  const removeMemberMutation = useMutation({
+    mutationFn: (userDid: string) => api.adminDomainsGroupMembersRemove(group.id, userDid),
+    onSuccess: (_, userDid) => {
+      setSelectedUserDids((current) => current.filter((did) => did !== userDid));
+      queryClient.invalidateQueries({ queryKey: ['admin', 'domain', domainId, 'group-members', group.id] });
+      queryClient.invalidateQueries({ queryKey: ['admin', 'domain', domainId, 'groups'] });
+      toast.success('Member removed');
+    },
+    onError: () => toast.error('Failed to remove member'),
+  });
+
+  const filteredUsers = users.filter((user) => {
+    if (!searchQuery) return !selectedUserDids.includes(user.userDid);
+    const search = searchQuery.toLowerCase();
+    const handle = user.user?.handle?.toLowerCase() || '';
+    const displayName = user.user?.displayName?.toLowerCase() || '';
+    const did = user.userDid.toLowerCase();
+    return (
+      !selectedUserDids.includes(user.userDid) &&
+      (handle.includes(search) || displayName.includes(search) || did.includes(search))
+    );
+  });
+
+  const currentMembers = membersData?.members || [];
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-black/50" onClick={onClose} />
-      <div className="relative bg-surface border border-border rounded-xl p-6 w-full max-w-md">
-        <h2 className="text-xl font-bold text-text-primary mb-4">Edit Group</h2>
-        <div className="space-y-4">
+      <div className="relative bg-surface border border-border rounded-xl p-6 w-full max-w-2xl max-h-[90vh] flex flex-col">
+        <div className="flex items-start justify-between mb-4">
           <div>
-            <label className="block text-sm text-text-muted mb-1">Name</label>
-            <input
-              type="text"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              className="w-full px-4 py-2 bg-surface border border-border rounded-lg text-text-primary"
-            />
+            <h2 className="text-xl font-bold text-text-primary">Edit Group</h2>
+            <p className="text-sm text-text-muted mt-1">{group.name}</p>
           </div>
-          <div>
-            <label className="block text-sm text-text-muted mb-1">Description</label>
-            <textarea
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              rows={3}
-              className="w-full px-4 py-2 bg-surface border border-border rounded-lg text-text-primary resize-none"
-            />
-          </div>
-          <div>
-            <label className="block text-sm text-text-muted mb-1">Role Bundles</label>
-            <div className="grid grid-cols-2 gap-2 max-h-32 overflow-y-auto rounded-lg border border-border p-3">
-              {roles.map((role) => (
-                <label key={role.id} className="flex items-center gap-2 text-sm text-text-primary">
-                  <input
-                    type="checkbox"
-                    checked={selectedRoleIds.includes(role.id)}
-                    onChange={(e) => setSelectedRoleIds((current) =>
-                      e.target.checked ? [...current, role.id] : current.filter((id) => id !== role.id)
-                    )}
-                  />
-                  <span>{role.displayName || role.name}</span>
-                </label>
-              ))}
-            </div>
-          </div>
-          <div>
-            <label className="block text-sm text-text-muted mb-1">Members</label>
-            <div className="grid grid-cols-2 gap-2 max-h-40 overflow-y-auto rounded-lg border border-border p-3">
-              {users.map((user) => (
-                <label key={user.userDid} className="flex items-center gap-2 text-sm text-text-primary">
-                  <input
-                    type="checkbox"
-                    checked={selectedUserDids.includes(user.userDid)}
-                    onChange={(e) => setSelectedUserDids((current) =>
-                      e.target.checked ? [...current, user.userDid] : current.filter((did) => did !== user.userDid)
-                    )}
-                  />
-                  <span>{user.user?.displayName || user.user?.handle || user.userDid}</span>
-                </label>
-              ))}
-            </div>
-          </div>
-          <div>
-            <label className="block text-sm text-text-muted mb-1">Direct Permissions</label>
-            <textarea
-              value={directPermissions}
-              onChange={(e) => setDirectPermissions(e.target.value)}
-              rows={4}
-              className="w-full px-4 py-2 bg-surface border border-border rounded-lg text-text-primary resize-none"
-            />
-          </div>
+          <button
+            onClick={onClose}
+            className="p-2 text-text-muted hover:text-text-primary rounded"
+          >
+            <CloseIcon className="w-5 h-5" />
+          </button>
         </div>
-        <div className="flex gap-3 mt-6">
-          <button onClick={onClose} className="flex-1 px-4 py-2 bg-surface-hover hover:bg-border text-text-primary rounded-lg">
+
+        {/* Tabs */}
+        <div className="flex gap-1 border-b border-border mb-4">
+          <button
+            onClick={() => setActiveTab('details')}
+            className={`px-4 py-2 text-sm font-medium transition-colors ${
+              activeTab === 'details'
+                ? 'text-accent border-b-2 border-accent -mb-px'
+                : 'text-text-muted hover:text-text-primary'
+            }`}
+          >
+            Details
+          </button>
+          <button
+            onClick={() => setActiveTab('members')}
+            className={`px-4 py-2 text-sm font-medium transition-colors ${
+              activeTab === 'members'
+                ? 'text-accent border-b-2 border-accent -mb-px'
+                : 'text-text-muted hover:text-text-primary'
+            }`}
+          >
+            Members ({currentMembers.length})
+          </button>
+        </div>
+
+        {/* Tab Content */}
+        <div className="flex-1 overflow-y-auto">
+          {activeTab === 'details' ? (
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm text-text-muted mb-1">Name</label>
+                <input
+                  type="text"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  className="w-full px-4 py-2 bg-surface border border-border rounded-lg text-text-primary"
+                />
+              </div>
+              <div>
+                <label className="block text-sm text-text-muted mb-1">Description</label>
+                <textarea
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  rows={3}
+                  className="w-full px-4 py-2 bg-surface border border-border rounded-lg text-text-primary resize-none"
+                />
+              </div>
+              <div>
+                <label className="block text-sm text-text-muted mb-1">Role Bundles</label>
+                <div className="grid grid-cols-2 gap-2 max-h-48 overflow-y-auto rounded-lg border border-border p-3">
+                  {roles.length > 0 ? (
+                    roles.map((role) => (
+                      <label key={role.id} className="flex items-center gap-2 text-sm text-text-primary">
+                        <input
+                          type="checkbox"
+                          checked={selectedRoleIds.includes(role.id)}
+                          onChange={(e) =>
+                            setSelectedRoleIds((current) =>
+                              e.target.checked ? [...current, role.id] : current.filter((id) => id !== role.id)
+                            )
+                          }
+                        />
+                        <span>{role.displayName || role.name}</span>
+                      </label>
+                    ))
+                  ) : (
+                    <p className="text-sm text-text-muted col-span-2">No roles available</p>
+                  )}
+                </div>
+              </div>
+              <div>
+                <label className="block text-sm text-text-muted mb-1">Direct Permissions</label>
+                <textarea
+                  value={directPermissions}
+                  onChange={(e) => setDirectPermissions(e.target.value)}
+                  rows={6}
+                  placeholder="domain.users.manage"
+                  className="w-full px-4 py-2 bg-surface border border-border rounded-lg text-text-primary resize-none font-mono text-sm"
+                />
+                <p className="text-xs text-text-muted mt-1">One permission per line</p>
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {/* Current Members */}
+              <div>
+                <h3 className="text-sm font-semibold text-text-primary mb-2">Current Members</h3>
+                {membersLoading ? (
+                  <div className="flex items-center justify-center py-8">
+                    <div className="w-6 h-6 border-2 border-accent border-t-transparent rounded-full animate-spin" />
+                  </div>
+                ) : currentMembers.length === 0 ? (
+                  <div className="text-center py-8 border border-border rounded-lg">
+                    <p className="text-sm text-text-muted">No members in this group</p>
+                  </div>
+                ) : (
+                  <div className="space-y-2 max-h-64 overflow-y-auto">
+                    {currentMembers.map((member) => (
+                      <div
+                        key={member.userDid}
+                        className="flex items-center justify-between p-3 bg-surface-hover rounded-lg border border-border"
+                      >
+                        <div className="flex items-center gap-3 min-w-0">
+                          {member.user?.avatar ? (
+                            <img
+                              src={member.user.avatar}
+                              alt=""
+                              className="w-8 h-8 rounded-full flex-shrink-0"
+                            />
+                          ) : (
+                            <div className="w-8 h-8 rounded-full bg-accent/10 flex items-center justify-center flex-shrink-0">
+                              <UserIcon className="w-4 h-4 text-accent" />
+                            </div>
+                          )}
+                          <div className="min-w-0">
+                            <p className="text-sm font-medium text-text-primary truncate">
+                              {member.user?.displayName || member.user?.handle || member.userDid}
+                            </p>
+                            {member.user?.handle && (
+                              <p className="text-xs text-text-muted truncate">@{member.user.handle}</p>
+                            )}
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => {
+                            if (confirm('Remove this member from the group?')) {
+                              removeMemberMutation.mutate(member.userDid);
+                            }
+                          }}
+                          disabled={removeMemberMutation.isPending}
+                          className="p-2 text-text-muted hover:text-red-400 rounded transition-colors flex-shrink-0"
+                        >
+                          <TrashIcon className="w-4 h-4" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Add Members */}
+              <div>
+                <h3 className="text-sm font-semibold text-text-primary mb-2">Add Members</h3>
+                <input
+                  type="text"
+                  placeholder="Search users by handle or DID..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="w-full px-4 py-2 bg-surface border border-border rounded-lg text-text-primary mb-2"
+                />
+                <div className="space-y-2 max-h-64 overflow-y-auto">
+                  {filteredUsers.length === 0 ? (
+                    <div className="text-center py-8 border border-border rounded-lg">
+                      <p className="text-sm text-text-muted">
+                        {searchQuery ? 'No users found' : 'All users are already members'}
+                      </p>
+                    </div>
+                  ) : (
+                    filteredUsers.slice(0, 50).map((user) => (
+                      <button
+                        key={user.userDid}
+                        onClick={() => setSelectedUserDids((current) => [...current, user.userDid])}
+                        className="w-full flex items-center gap-3 p-3 bg-surface-hover hover:bg-border rounded-lg border border-border transition-colors text-left"
+                      >
+                        <div className="w-8 h-8 rounded-full bg-accent/10 flex items-center justify-center flex-shrink-0">
+                          <UserIcon className="w-4 h-4 text-accent" />
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium text-text-primary truncate">
+                            {user.user?.displayName || user.user?.handle || user.userDid}
+                          </p>
+                          {user.user?.handle && (
+                            <p className="text-xs text-text-muted truncate">@{user.user.handle}</p>
+                          )}
+                        </div>
+                        <PlusIcon className="w-5 h-5 text-accent ml-auto flex-shrink-0" />
+                      </button>
+                    ))
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Actions */}
+        <div className="flex gap-3 mt-6 pt-4 border-t border-border">
+          <button
+            onClick={onClose}
+            className="flex-1 px-4 py-2 bg-surface-hover hover:bg-border text-text-primary rounded-lg transition-colors"
+          >
             Cancel
           </button>
           <button
-            onClick={() => updateMutation.mutate({
-              groupId: group.id,
-              domainId,
-              name,
-              description: description || undefined,
-              roleIds: selectedRoleIds,
-              directPermissions: directPermissions
-                .split(/\s|,|\n/)
-                .map((value) => value.trim())
-                .filter(Boolean),
-            })}
+            onClick={() =>
+              updateMutation.mutate({
+                groupId: group.id,
+                domainId,
+                name,
+                description: description || undefined,
+                roleIds: selectedRoleIds,
+                directPermissions: directPermissions
+                  .split(/\s|,|\n/)
+                  .map((value) => value.trim())
+                  .filter(Boolean),
+              })
+            }
             disabled={!name || updateMutation.isPending}
-            className="flex-1 px-4 py-2 bg-accent hover:bg-accent-hover text-text-inverse rounded-lg disabled:opacity-50"
+            className="flex-1 px-4 py-2 bg-accent hover:bg-accent-hover text-text-inverse rounded-lg disabled:opacity-50 transition-colors"
           >
-            {updateMutation.isPending ? 'Saving...' : 'Save'}
+            {updateMutation.isPending ? 'Saving...' : 'Save Changes'}
           </button>
         </div>
       </div>
@@ -424,6 +601,30 @@ function TrashIcon({ className }: { className?: string }) {
   return (
     <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
       <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+    </svg>
+  );
+}
+
+function UserIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+    </svg>
+  );
+}
+
+function PlusIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
+    </svg>
+  );
+}
+
+function CloseIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
     </svg>
   );
 }

@@ -131,6 +131,19 @@ export default function CertificatesAdmin() {
     },
   });
 
+  // Fetch available issuers (CAs that can issue certificates)
+  const { data: issuers } = useQuery({
+    queryKey: ['admin', 'certificates', 'issuers'],
+    queryFn: async () => {
+      try {
+        const result = await api.caGetAvailableIssuers();
+        return result.issuers;
+      } catch {
+        return [];
+      }
+    },
+  });
+
   // Fetch root and intermediate certificates
   const { data: caCerts } = useQuery({
     queryKey: ['admin', 'certificates', 'cas'],
@@ -402,12 +415,40 @@ export default function CertificatesAdmin() {
 
   const createCertMutation = useMutation({
     mutationFn: async (data: CreateCertData) => {
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-      return { id: 'new_cert', ...data };
+      const result = await api.caIssueCertificate({
+        type: data.certType,
+        issuerId: data.issuerId,
+        subject: {
+          commonName: data.commonName,
+          organization: data.organization,
+          organizationalUnit: data.organizationalUnit,
+          country: data.country,
+          state: data.state,
+          locality: data.locality,
+        },
+        subjectAltNames: data.subjectAltNames,
+        validityDays: data.validity,
+        keySize: data.keySize,
+        algorithm: data.algorithm,
+        keyUsage: data.keyUsage,
+        extKeyUsage: data.extendedKeyUsage,
+      });
+      return result;
     },
-    onSuccess: () => {
+    onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ['admin', 'certificates'] });
       setShowCreateCertModal(false);
+
+      // Download the certificate automatically
+      if (result.certificate) {
+        const blob = new Blob([result.certificate], { type: 'application/x-pem-file' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `certificate-${result.id}.pem`;
+        a.click();
+        URL.revokeObjectURL(url);
+      }
     },
   });
 
@@ -532,6 +573,7 @@ export default function CertificatesAdmin() {
           stats={stats}
           caCerts={caCerts}
           certificates={certificates}
+          issuers={issuers}
           statusFilter={statusFilter}
           setStatusFilter={setStatusFilter}
           typeFilter={typeFilter}
@@ -605,6 +647,7 @@ interface CertificatesTabProps {
   stats: any;
   caCerts?: RootCertificate[];
   certificates?: Certificate[];
+  issuers?: Array<{ id: string; subject: string; type: 'root' | 'intermediate' }>;
   statusFilter: CertStatus;
   setStatusFilter: (s: CertStatus) => void;
   typeFilter: CertType;
@@ -641,6 +684,7 @@ function CertificatesTab({
   stats,
   caCerts,
   certificates,
+  issuers,
   statusFilter,
   setStatusFilter,
   typeFilter,
@@ -921,7 +965,7 @@ function CertificatesTab({
           onClose={() => setShowCreateCertModal(false)}
           onSubmit={(data) => createCertMutation.mutate(data)}
           isPending={createCertMutation.isPending}
-          caCerts={caCerts}
+          issuers={issuers}
         />
       )}
 
@@ -1501,8 +1545,14 @@ interface CreateCertData {
   certType: 'client' | 'server' | 'code_signing';
   validity: number;
   issuerId: string;
-  subjectDid?: string;
-  serviceId?: string;
+  organization?: string;
+  organizationalUnit?: string;
+  country?: string;
+  state?: string;
+  locality?: string;
+  subjectAltNames?: string[];
+  keySize: 2048 | 4096;
+  algorithm: 'RSA' | 'ECDSA';
   keyUsage: string[];
   extendedKeyUsage: string[];
 }
@@ -1511,24 +1561,32 @@ function CreateCertificateModal({
   onClose,
   onSubmit,
   isPending,
-  caCerts,
+  issuers,
 }: {
   onClose: () => void;
   onSubmit: (data: CreateCertData) => void;
   isPending: boolean;
-  caCerts?: RootCertificate[];
+  issuers?: Array<{ id: string; subject: string; type: 'root' | 'intermediate' }>;
 }) {
   const [commonName, setCommonName] = useState('');
   const [certType, setCertType] = useState<'client' | 'server' | 'code_signing'>('client');
   const [validity, setValidity] = useState(365);
-  const [issuerId, setIssuerId] = useState(caCerts?.[0]?.id || '');
-  const [subjectDid, setSubjectDid] = useState('');
-  const [serviceId, setServiceId] = useState('');
+  const [issuerId, setIssuerId] = useState(issuers?.[0]?.id || '');
+  const [organization, setOrganization] = useState('');
+  const [organizationalUnit, setOrganizationalUnit] = useState('');
+  const [country, setCountry] = useState('');
+  const [state, setState] = useState('');
+  const [locality, setLocality] = useState('');
+  const [subjectAltNames, setSubjectAltNames] = useState<string[]>([]);
+  const [sanInput, setSanInput] = useState('');
+  const [keySize, setKeySize] = useState<2048 | 4096>(2048);
+  const [algorithm, setAlgorithm] = useState<'RSA' | 'ECDSA'>('RSA');
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   const getKeyUsageDefaults = (type: string) => {
     switch (type) {
       case 'client':
-        return { keyUsage: ['digitalSignature'], extendedKeyUsage: ['clientAuth'] };
+        return { keyUsage: ['digitalSignature', 'keyAgreement'], extendedKeyUsage: ['clientAuth'] };
       case 'server':
         return { keyUsage: ['digitalSignature', 'keyEncipherment'], extendedKeyUsage: ['serverAuth'] };
       case 'code_signing':
@@ -1538,9 +1596,20 @@ function CreateCertificateModal({
     }
   };
 
+  const addSAN = () => {
+    if (sanInput.trim() && !subjectAltNames.includes(sanInput.trim())) {
+      setSubjectAltNames([...subjectAltNames, sanInput.trim()]);
+      setSanInput('');
+    }
+  };
+
+  const removeSAN = (san: string) => {
+    setSubjectAltNames(subjectAltNames.filter(s => s !== san));
+  };
+
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-      <div className="bg-surface border border-border rounded-xl p-6 w-full max-w-md max-h-[90vh] overflow-y-auto">
+      <div className="bg-surface border border-border rounded-xl p-6 w-full max-w-2xl max-h-[90vh] overflow-y-auto">
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-lg font-semibold text-text-primary">Issue New Certificate</h3>
           <button onClick={onClose} className="text-text-muted hover:text-text-primary">
@@ -1556,16 +1625,23 @@ function CreateCertificateModal({
               certType,
               validity,
               issuerId,
-              subjectDid: subjectDid || undefined,
-              serviceId: serviceId || undefined,
+              organization: organization || undefined,
+              organizationalUnit: organizationalUnit || undefined,
+              country: country || undefined,
+              state: state || undefined,
+              locality: locality || undefined,
+              subjectAltNames: subjectAltNames.length > 0 ? subjectAltNames : undefined,
+              keySize,
+              algorithm,
               keyUsage,
               extendedKeyUsage,
             });
           }}
           className="space-y-4"
         >
+          {/* Certificate Type */}
           <div>
-            <label className="block text-sm text-text-muted mb-1">Certificate Type</label>
+            <label className="block text-sm font-medium text-text-muted mb-1">Certificate Type</label>
             <select
               value={certType}
               onChange={(e) => setCertType(e.target.value as 'client' | 'server' | 'code_signing')}
@@ -1576,100 +1652,240 @@ function CreateCertificateModal({
               <option value="code_signing">Code Signing Certificate</option>
             </select>
           </div>
-          <div>
-            <label className="block text-sm text-text-muted mb-1">Common Name</label>
-            <input
-              type="text"
-              value={commonName}
-              onChange={(e) => setCommonName(e.target.value)}
-              placeholder={
-                certType === 'client'
-                  ? 'e.g., did:web:user.exprsn.io'
-                  : certType === 'server'
-                  ? 'e.g., api.exprsn.io'
-                  : 'e.g., Exprsn Mobile App v2.1'
-              }
-              className="w-full px-4 py-2 bg-surface-hover border border-border rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent"
-              required
-            />
-          </div>
-          <div>
-            <label className="block text-sm text-text-muted mb-1">Issuing CA</label>
-            <select
-              value={issuerId}
-              onChange={(e) => setIssuerId(e.target.value)}
-              className="w-full px-4 py-2 bg-surface-hover border border-border rounded-lg text-text-primary focus:outline-none focus:border-accent"
-            >
-              {caCerts?.map((ca) => (
-                <option key={ca.id} value={ca.id}>
-                  {ca.commonName}
-                </option>
-              ))}
-            </select>
-          </div>
-          {certType === 'client' && (
+
+          {/* Subject Information */}
+          <div className="space-y-3 border border-border rounded-lg p-4">
+            <h4 className="text-sm font-medium text-text-primary">Subject Information</h4>
+
             <div>
-              <label className="block text-sm text-text-muted mb-1">Subject DID (optional)</label>
+              <label className="block text-sm text-text-muted mb-1">Common Name (CN) *</label>
               <input
                 type="text"
-                value={subjectDid}
-                onChange={(e) => setSubjectDid(e.target.value)}
-                placeholder="did:web:..."
+                value={commonName}
+                onChange={(e) => setCommonName(e.target.value)}
+                placeholder={
+                  certType === 'client'
+                    ? 'e.g., user@example.com or did:web:user.exprsn.io'
+                    : certType === 'server'
+                    ? 'e.g., api.exprsn.io'
+                    : 'e.g., Exprsn Mobile App v2.1'
+                }
                 className="w-full px-4 py-2 bg-surface-hover border border-border rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent"
+                required
               />
             </div>
-          )}
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-sm text-text-muted mb-1">Organization (O)</label>
+                <input
+                  type="text"
+                  value={organization}
+                  onChange={(e) => setOrganization(e.target.value)}
+                  placeholder="e.g., Exprsn Inc"
+                  className="w-full px-4 py-2 bg-surface-hover border border-border rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent"
+                />
+              </div>
+              <div>
+                <label className="block text-sm text-text-muted mb-1">Organizational Unit (OU)</label>
+                <input
+                  type="text"
+                  value={organizationalUnit}
+                  onChange={(e) => setOrganizationalUnit(e.target.value)}
+                  placeholder="e.g., Engineering"
+                  className="w-full px-4 py-2 bg-surface-hover border border-border rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-3 gap-3">
+              <div>
+                <label className="block text-sm text-text-muted mb-1">Country (C)</label>
+                <input
+                  type="text"
+                  value={country}
+                  onChange={(e) => setCountry(e.target.value)}
+                  placeholder="US"
+                  maxLength={2}
+                  className="w-full px-4 py-2 bg-surface-hover border border-border rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent"
+                />
+              </div>
+              <div>
+                <label className="block text-sm text-text-muted mb-1">State/Province (ST)</label>
+                <input
+                  type="text"
+                  value={state}
+                  onChange={(e) => setState(e.target.value)}
+                  placeholder="California"
+                  className="w-full px-4 py-2 bg-surface-hover border border-border rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent"
+                />
+              </div>
+              <div>
+                <label className="block text-sm text-text-muted mb-1">City/Locality (L)</label>
+                <input
+                  type="text"
+                  value={locality}
+                  onChange={(e) => setLocality(e.target.value)}
+                  placeholder="San Francisco"
+                  className="w-full px-4 py-2 bg-surface-hover border border-border rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent"
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Subject Alternative Names */}
           {certType === 'server' && (
-            <div>
-              <label className="block text-sm text-text-muted mb-1">Service ID (optional)</label>
-              <input
-                type="text"
-                value={serviceId}
-                onChange={(e) => setServiceId(e.target.value)}
-                placeholder="e.g., api-service"
-                className="w-full px-4 py-2 bg-surface-hover border border-border rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent"
-              />
+            <div className="space-y-2 border border-border rounded-lg p-4">
+              <h4 className="text-sm font-medium text-text-primary">Subject Alternative Names (SAN)</h4>
+              <p className="text-xs text-text-muted">Additional domains or IPs for this certificate</p>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={sanInput}
+                  onChange={(e) => setSanInput(e.target.value)}
+                  onKeyPress={(e) => e.key === 'Enter' && (e.preventDefault(), addSAN())}
+                  placeholder="e.g., DNS:*.exprsn.io or IP:192.168.1.1"
+                  className="flex-1 px-4 py-2 bg-surface-hover border border-border rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent"
+                />
+                <button
+                  type="button"
+                  onClick={addSAN}
+                  className="px-4 py-2 bg-accent/10 text-accent hover:bg-accent/20 rounded-lg transition-colors"
+                >
+                  Add
+                </button>
+              </div>
+              {subjectAltNames.length > 0 && (
+                <div className="flex flex-wrap gap-2 mt-2">
+                  {subjectAltNames.map((san) => (
+                    <span key={san} className="px-2 py-1 bg-surface-hover rounded text-xs text-text-primary flex items-center gap-1">
+                      {san}
+                      <button type="button" onClick={() => removeSAN(san)} className="text-red-500 hover:text-red-400">×</button>
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
           )}
+
+          {/* Certificate Settings */}
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-sm text-text-muted mb-1">Issuing CA</label>
+              <select
+                value={issuerId}
+                onChange={(e) => setIssuerId(e.target.value)}
+                className="w-full px-4 py-2 bg-surface-hover border border-border rounded-lg text-text-primary focus:outline-none focus:border-accent"
+                required
+              >
+                {issuers?.map((issuer) => (
+                  <option key={issuer.id} value={issuer.id}>
+                    {issuer.subject} ({issuer.type})
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm text-text-muted mb-1">Validity Period</label>
+              <select
+                value={validity}
+                onChange={(e) => setValidity(Number(e.target.value))}
+                className="w-full px-4 py-2 bg-surface-hover border border-border rounded-lg text-text-primary focus:outline-none focus:border-accent"
+              >
+                <option value={30}>30 days</option>
+                <option value={90}>90 days</option>
+                <option value={180}>180 days</option>
+                <option value={365}>1 year</option>
+                <option value={730}>2 years</option>
+                {certType === 'code_signing' && <option value={1095}>3 years</option>}
+              </select>
+            </div>
+          </div>
+
+          {/* Advanced Settings */}
           <div>
-            <label className="block text-sm text-text-muted mb-1">Validity Period</label>
-            <select
-              value={validity}
-              onChange={(e) => setValidity(Number(e.target.value))}
-              className="w-full px-4 py-2 bg-surface-hover border border-border rounded-lg text-text-primary focus:outline-none focus:border-accent"
+            <button
+              type="button"
+              onClick={() => setShowAdvanced(!showAdvanced)}
+              className="text-sm text-accent hover:underline"
             >
-              <option value={90}>90 days</option>
-              <option value={180}>180 days</option>
-              <option value={365}>1 year</option>
-              <option value={730}>2 years</option>
-              {certType === 'code_signing' && <option value={1095}>3 years</option>}
-            </select>
+              {showAdvanced ? 'Hide' : 'Show'} Advanced Settings
+            </button>
           </div>
-          <div className="pt-2">
-            <p className="text-xs text-text-muted mb-2">Key Usage:</p>
-            <div className="flex flex-wrap gap-1">
-              {getKeyUsageDefaults(certType).keyUsage.map((usage) => (
-                <span key={usage} className="px-2 py-0.5 bg-surface-hover rounded text-xs text-text-muted">
-                  {usage}
-                </span>
-              ))}
+
+          {showAdvanced && (
+            <div className="space-y-3 border border-border rounded-lg p-4">
+              <h4 className="text-sm font-medium text-text-primary">Cryptographic Settings</h4>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-sm text-text-muted mb-1">Algorithm</label>
+                  <select
+                    value={algorithm}
+                    onChange={(e) => setAlgorithm(e.target.value as 'RSA' | 'ECDSA')}
+                    className="w-full px-4 py-2 bg-surface-hover border border-border rounded-lg text-text-primary focus:outline-none focus:border-accent"
+                  >
+                    <option value="RSA">RSA</option>
+                    <option value="ECDSA">ECDSA</option>
+                  </select>
+                </div>
+                {algorithm === 'RSA' && (
+                  <div>
+                    <label className="block text-sm text-text-muted mb-1">Key Size</label>
+                    <select
+                      value={keySize}
+                      onChange={(e) => setKeySize(Number(e.target.value) as 2048 | 4096)}
+                      className="w-full px-4 py-2 bg-surface-hover border border-border rounded-lg text-text-primary focus:outline-none focus:border-accent"
+                    >
+                      <option value={2048}>2048 bits</option>
+                      <option value={4096}>4096 bits</option>
+                    </select>
+                  </div>
+                )}
+              </div>
+
+              <div className="space-y-2">
+                <div>
+                  <p className="text-xs text-text-muted mb-1">Key Usage:</p>
+                  <div className="flex flex-wrap gap-1">
+                    {getKeyUsageDefaults(certType).keyUsage.map((usage) => (
+                      <span key={usage} className="px-2 py-0.5 bg-accent/10 text-accent rounded text-xs">
+                        {usage}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <p className="text-xs text-text-muted mb-1">Extended Key Usage:</p>
+                  <div className="flex flex-wrap gap-1">
+                    {getKeyUsageDefaults(certType).extendedKeyUsage.map((usage) => (
+                      <span key={usage} className="px-2 py-0.5 bg-accent/10 text-accent rounded text-xs">
+                        {usage}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              </div>
             </div>
-            <p className="text-xs text-text-muted mt-2 mb-2">Extended Key Usage:</p>
-            <div className="flex flex-wrap gap-1">
-              {getKeyUsageDefaults(certType).extendedKeyUsage.map((usage) => (
-                <span key={usage} className="px-2 py-0.5 bg-surface-hover rounded text-xs text-text-muted">
-                  {usage}
-                </span>
-              ))}
-            </div>
+          )}
+
+          {/* Action Buttons */}
+          <div className="flex gap-3 pt-2">
+            <button
+              type="button"
+              onClick={onClose}
+              className="flex-1 px-4 py-2 bg-surface-hover border border-border text-text-primary rounded-lg transition-colors hover:bg-surface"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={isPending || !commonName || !issuerId}
+              className="flex-1 px-4 py-2 bg-accent hover:bg-accent-hover text-text-inverse rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isPending ? 'Issuing Certificate...' : 'Issue Certificate'}
+            </button>
           </div>
-          <button
-            type="submit"
-            disabled={isPending || !commonName}
-            className="w-full px-4 py-2 bg-accent hover:bg-accent-hover text-text-inverse rounded-lg transition-colors disabled:opacity-50"
-          >
-            {isPending ? 'Issuing...' : 'Issue Certificate'}
-          </button>
         </form>
       </div>
     </div>

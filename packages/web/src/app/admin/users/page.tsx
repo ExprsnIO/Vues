@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import Link from 'next/link';
 import { api } from '@/lib/api';
@@ -9,6 +9,9 @@ import { BulkActionBar } from '@/components/admin/BulkActionBar';
 import { ExportButton } from '@/components/admin/ExportModal';
 import { DataTable, Column } from '@/components/admin/ui/DataTable';
 import { FilterBar } from '@/components/admin/ui/FilterBar';
+import { RowActionMenu } from '@/components/admin/ui/ActionMenu';
+import { SuspendUserModal } from '@/components/admin/modals/SuspendUserModal';
+import { BanUserModal } from '@/components/admin/modals/BanUserModal';
 import { useAdminFilters } from '@/hooks/useAdminFilters';
 import toast from 'react-hot-toast';
 
@@ -24,8 +27,13 @@ interface User {
   createdAt: string;
 }
 
+type ModalType = 'suspend' | 'ban' | null;
+type ModalUser = { did: string; handle: string; displayName?: string } | null;
+
 export default function AdminUsersPage() {
   const queryClient = useQueryClient();
+  const [activeModal, setActiveModal] = useState<ModalType>(null);
+  const [selectedUser, setSelectedUser] = useState<ModalUser>(null);
 
   const filters = useAdminFilters({
     defaultSort: { key: 'createdAt', direction: 'desc' },
@@ -68,6 +76,44 @@ export default function AdminUsersPage() {
       toast.error('Failed to update user');
     },
   });
+
+  const unsuspendMutation = useMutation({
+    mutationFn: (userDid: string) =>
+      api.adminUsersUnsuspend({ userDid }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'users'] });
+      toast.success('User unsuspended');
+    },
+    onError: () => {
+      toast.error('Failed to unsuspend user');
+    },
+  });
+
+  const unbanMutation = useMutation({
+    mutationFn: (userDid: string) =>
+      api.adminUsersUnban({ userDid }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'users'] });
+      toast.success('User unbanned');
+    },
+    onError: () => {
+      toast.error('Failed to unban user');
+    },
+  });
+
+  const openModal = (type: ModalType, user: User) => {
+    setSelectedUser({
+      did: user.did,
+      handle: user.handle,
+      displayName: user.displayName,
+    });
+    setActiveModal(type);
+  };
+
+  const closeModal = () => {
+    setActiveModal(null);
+    setSelectedUser(null);
+  };
 
   const users: User[] = data?.users || [];
 
@@ -155,10 +201,64 @@ export default function AdminUsersPage() {
           >
             View
           </Link>
+          <div onClick={(e) => e.stopPropagation()}>
+            <RowActionMenu
+              items={[
+                ...(user.status === 'suspend'
+                  ? [
+                      {
+                        label: 'Unsuspend',
+                        onClick: () => unsuspendMutation.mutate(user.did),
+                        icon: (
+                          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                          </svg>
+                        ),
+                      },
+                    ]
+                  : [
+                      {
+                        label: 'Suspend',
+                        onClick: () => openModal('suspend', user),
+                        icon: (
+                          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
+                          </svg>
+                        ),
+                        variant: 'default' as const,
+                      },
+                    ]),
+                ...(user.status === 'ban'
+                  ? [
+                      {
+                        label: 'Unban',
+                        onClick: () => unbanMutation.mutate(user.did),
+                        icon: (
+                          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                          </svg>
+                        ),
+                      },
+                    ]
+                  : [
+                      {
+                        label: 'Ban',
+                        onClick: () => openModal('ban', user),
+                        icon: (
+                          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
+                          </svg>
+                        ),
+                        variant: 'danger' as const,
+                      },
+                    ]),
+              ]}
+            />
+          </div>
         </div>
       ),
     },
-  ], [verifyMutation]);
+  ], [verifyMutation, unsuspendMutation, unbanMutation]);
 
   const filterConfig = [
     {
@@ -227,6 +327,22 @@ export default function AdminUsersPage() {
         onClearSelection={() => filters.setFilter('selected', [])}
         onActionComplete={() => filters.setFilter('selected', [])}
       />
+
+      {/* Modals */}
+      {selectedUser && (
+        <>
+          <SuspendUserModal
+            isOpen={activeModal === 'suspend'}
+            onClose={closeModal}
+            user={selectedUser}
+          />
+          <BanUserModal
+            isOpen={activeModal === 'ban'}
+            onClose={closeModal}
+            user={selectedUser}
+          />
+        </>
+      )}
     </div>
   );
 }

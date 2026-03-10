@@ -55,9 +55,16 @@ import { paymentsAdminRouter } from './routes/payments-admin.js';
 import { liveAdminRouter } from './routes/live-admin.js';
 import { moderationAdminRouter } from './routes/moderation-admin.js';
 import { adminSettingsRouter } from './routes/admin-settings.js';
+import { adminDomainRolesRouter } from './routes/admin-domain-roles.js';
+import { adminDomainGroupsRouter } from './routes/admin-domain-groups.js';
+import { adminDomainAuthRouter } from './routes/admin-domain-auth.js';
+import { adminDomainAppealsRouter } from './routes/admin-domain-appeals.js';
+import { adminDomainTransfersRouter } from './routes/admin-domain-transfers.js';
+import { adminPaymentsRouter } from './routes/admin-payments.js';
 import { renderAdminRouter } from './routes/render-admin.js';
 import { presetsRouter } from './routes/presets.js';
 import { clusterAdminRouter } from './routes/cluster-admin.js';
+import { gpuAdminRouter } from './routes/gpu-admin.js';
 import { studioRouter } from './routes/studio.js';
 import { effectsRouter } from './routes/effects.js';
 import soundsRouter from './routes/sounds.js';
@@ -282,6 +289,12 @@ app.route('/xrpc', paymentsAdminRouter);
 app.route('/xrpc', liveAdminRouter);
 app.route('/xrpc', moderationAdminRouter);
 app.route('/xrpc', adminSettingsRouter); // Admin settings for auth/CA/moderation
+app.route('/xrpc', adminDomainRolesRouter); // Admin domain roles management
+app.route('/xrpc', adminDomainGroupsRouter); // Admin domain groups management
+app.route('/xrpc', adminDomainAuthRouter); // Admin domain OAuth and MFA settings
+app.route('/xrpc', adminDomainAppealsRouter); // Admin domain appeals workflow
+app.route('/xrpc', adminDomainTransfersRouter); // Admin domain transfers
+app.route('/xrpc', adminPaymentsRouter); // Admin payment provider management
 app.route('/xrpc', renderAdminRouter); // Render pipeline admin
 // NOTE: presetsRouter and clusterAdminRouter are mounted in main() after setup wizard
 // because clusterAdminRouter.use('*', adminAuthMiddleware) would intercept /first-run
@@ -389,6 +402,7 @@ async function main() {
   // This prevents adminAuthMiddleware from catching /first-run
   app.route('/', presetsRouter);
   app.route('/', clusterAdminRouter);
+  app.route('/', gpuAdminRouter);
   app.route('/', plcRouter);
 
   // Initialize OAuth client

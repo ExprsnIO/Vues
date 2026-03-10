@@ -7,9 +7,14 @@ import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import { useAdminDomain } from '@/lib/admin-domain-context';
+import { RowActionMenu } from '@/components/admin/ui/ActionMenu';
+import { SuspendUserModal } from '@/components/admin/modals/SuspendUserModal';
+import { BanUserModal } from '@/components/admin/modals/BanUserModal';
 import toast from 'react-hot-toast';
 
 type UserRole = 'admin' | 'moderator' | 'member';
+type ModalType = 'suspend' | 'ban' | null;
+type ModalUser = { did: string; handle: string; displayName?: string } | null;
 
 interface DomainUser {
   id: string;
@@ -17,6 +22,7 @@ interface DomainUser {
   role: string;
   createdAt: string;
   isActive?: boolean;
+  status?: string;
   permissions?: string[];
   directPermissions?: string[];
   assignedRoles?: Array<{ id: string; name: string; displayName?: string }>;
@@ -45,6 +51,8 @@ export default function DomainUsersPage() {
   const [bulkAction, setBulkAction] = useState<'role' | 'remove' | null>(null);
   const [bulkRole, setBulkRole] = useState<UserRole>('member');
   const [includeInheritedAdmins, setIncludeInheritedAdmins] = useState(false);
+  const [activeModal, setActiveModal] = useState<ModalType>(null);
+  const [modalUser, setModalUser] = useState<ModalUser>(null);
   const queryClient = useQueryClient();
 
   // Sync URL param with context
@@ -140,6 +148,44 @@ export default function DomainUsersPage() {
     },
     onError: (error: Error) => toast.error(error.message),
   });
+
+  const unsuspendMutation = useMutation({
+    mutationFn: (userDid: string) =>
+      api.adminDomainUsersUnsuspend({ domainId, userDid }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'domain', domainId] });
+      toast.success('User unsuspended');
+    },
+    onError: () => {
+      toast.error('Failed to unsuspend user');
+    },
+  });
+
+  const unbanMutation = useMutation({
+    mutationFn: (userDid: string) =>
+      api.adminDomainUsersUnban({ domainId, userDid }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'domain', domainId] });
+      toast.success('User unbanned');
+    },
+    onError: () => {
+      toast.error('Failed to unban user');
+    },
+  });
+
+  const openModal = (type: ModalType, user: DomainUser) => {
+    setModalUser({
+      did: user.userDid,
+      handle: user.user?.handle || '',
+      displayName: user.user?.displayName,
+    });
+    setActiveModal(type);
+  };
+
+  const closeModal = () => {
+    setActiveModal(null);
+    setModalUser(null);
+  };
 
   const domain = domainData?.domain;
   const allUsers = usersData?.users || [];
@@ -368,12 +414,66 @@ export default function DomainUsersPage() {
                       {user.source === 'global_inherited' ? (
                         <span className="text-text-muted text-sm">Managed globally</span>
                       ) : (
-                        <button
-                          onClick={() => { if (confirm('Remove this user from the domain?')) removeMutation.mutate(user.userDid); }}
-                          className="text-red-400 hover:text-red-300 text-sm"
-                        >
-                          Remove
-                        </button>
+                        <>
+                          <button
+                            onClick={() => { if (confirm('Remove this user from the domain?')) removeMutation.mutate(user.userDid); }}
+                            className="text-red-400 hover:text-red-300 text-sm"
+                          >
+                            Remove
+                          </button>
+                          <RowActionMenu
+                            items={[
+                              ...(user.status === 'suspend'
+                                ? [
+                                    {
+                                      label: 'Unsuspend',
+                                      onClick: () => unsuspendMutation.mutate(user.userDid),
+                                      icon: (
+                                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                                        </svg>
+                                      ),
+                                    },
+                                  ]
+                                : [
+                                    {
+                                      label: 'Suspend',
+                                      onClick: () => openModal('suspend', user),
+                                      icon: (
+                                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
+                                        </svg>
+                                      ),
+                                      variant: 'default' as const,
+                                    },
+                                  ]),
+                              ...(user.status === 'ban'
+                                ? [
+                                    {
+                                      label: 'Unban',
+                                      onClick: () => unbanMutation.mutate(user.userDid),
+                                      icon: (
+                                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                                        </svg>
+                                      ),
+                                    },
+                                  ]
+                                : [
+                                    {
+                                      label: 'Ban',
+                                      onClick: () => openModal('ban', user),
+                                      icon: (
+                                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
+                                        </svg>
+                                      ),
+                                      variant: 'danger' as const,
+                                    },
+                                  ]),
+                            ]}
+                          />
+                        </>
                       )}
                     </div>
                   </td>
@@ -574,6 +674,24 @@ export default function DomainUsersPage() {
       {/* Add User Modal */}
       {showAddUser && (
         <AddUserModal domainId={domainId} onClose={() => setShowAddUser(false)} />
+      )}
+
+      {/* Moderation Modals */}
+      {modalUser && (
+        <>
+          <SuspendUserModal
+            isOpen={activeModal === 'suspend'}
+            onClose={closeModal}
+            user={modalUser}
+            domainId={domainId}
+          />
+          <BanUserModal
+            isOpen={activeModal === 'ban'}
+            onClose={closeModal}
+            user={modalUser}
+            domainId={domainId}
+          />
+        </>
       )}
     </div>
   );

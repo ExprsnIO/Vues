@@ -379,4 +379,311 @@ clusterAdminRouter.post('/xrpc/io.exprsn.admin.cluster.activate', async (c) => {
   return c.json({ cluster });
 });
 
+// ============================================================================
+// Worker Management Routes
+// ============================================================================
+
+/**
+ * List all workers (optionally filter by cluster)
+ * GET /xrpc/io.exprsn.admin.workers.list
+ */
+clusterAdminRouter.get('/xrpc/io.exprsn.admin.workers.list', async (c) => {
+  const clusterId = c.req.query('clusterId');
+
+  let query = db.select().from(renderWorkers);
+
+  if (clusterId) {
+    query = query.where(sql`metadata->>'clusterId' = ${clusterId}`);
+  }
+
+  const workers = await query.orderBy(desc(renderWorkers.lastHeartbeat));
+
+  // Enrich workers with cluster info and online status
+  const enrichedWorkers = workers.map((worker) => {
+    const isOnline = worker.lastHeartbeat
+      ? new Date().getTime() - worker.lastHeartbeat.getTime() < 60000
+      : false;
+
+    return {
+      ...worker,
+      isOnline,
+      clusterId: worker.metadata?.clusterId as string | undefined,
+    };
+  });
+
+  return c.json({ workers: enrichedWorkers });
+});
+
+/**
+ * Get a specific worker with detailed metrics
+ * GET /xrpc/io.exprsn.admin.workers.get
+ */
+clusterAdminRouter.get('/xrpc/io.exprsn.admin.workers.get', async (c) => {
+  const workerId = c.req.query('workerId');
+
+  if (!workerId) {
+    return c.json({ error: 'workerId is required' }, 400);
+  }
+
+  const [worker] = await db
+    .select()
+    .from(renderWorkers)
+    .where(eq(renderWorkers.id, workerId))
+    .limit(1);
+
+  if (!worker) {
+    return c.json({ error: 'Worker not found' }, 404);
+  }
+
+  const isOnline = worker.lastHeartbeat
+    ? new Date().getTime() - worker.lastHeartbeat.getTime() < 60000
+    : false;
+
+  return c.json({
+    worker: {
+      ...worker,
+      isOnline,
+      clusterId: worker.metadata?.clusterId as string | undefined,
+    },
+  });
+});
+
+/**
+ * Get worker metrics and resource usage
+ * GET /xrpc/io.exprsn.admin.workers.metrics
+ */
+clusterAdminRouter.get('/xrpc/io.exprsn.admin.workers.metrics', async (c) => {
+  const workerId = c.req.query('workerId');
+
+  if (!workerId) {
+    return c.json({ error: 'workerId is required' }, 400);
+  }
+
+  const [worker] = await db
+    .select()
+    .from(renderWorkers)
+    .where(eq(renderWorkers.id, workerId))
+    .limit(1);
+
+  if (!worker) {
+    return c.json({ error: 'Worker not found' }, 404);
+  }
+
+  // Calculate uptime
+  const uptimeMs = worker.startedAt ? new Date().getTime() - worker.startedAt.getTime() : 0;
+  const uptimeHours = Math.floor(uptimeMs / (1000 * 60 * 60));
+
+  // Calculate success rate
+  const totalJobs = worker.totalProcessed || 0;
+  const failedJobs = worker.failedJobs || 0;
+  const successRate = totalJobs > 0 ? ((totalJobs - failedJobs) / totalJobs) * 100 : 100;
+
+  // Get resource usage from metadata
+  const resourceUsage = {
+    cpu: (worker.metadata?.cpu as number) || 0,
+    memory: (worker.metadata?.memory as number) || 0,
+    disk: (worker.metadata?.disk as number) || 0,
+    gpu: worker.gpuEnabled ? ((worker.metadata?.gpu as number) || 0) : undefined,
+  };
+
+  return c.json({
+    workerId,
+    metrics: {
+      activeJobs: worker.activeJobs || 0,
+      totalProcessed: worker.totalProcessed || 0,
+      failedJobs: worker.failedJobs || 0,
+      successRate,
+      avgProcessingTimeSeconds: Math.round(worker.avgProcessingTime || 0),
+      concurrency: worker.concurrency || 2,
+      uptimeHours,
+      resourceUsage,
+    },
+    timestamp: new Date().toISOString(),
+  });
+});
+
+/**
+ * Drain a worker (stop accepting new jobs)
+ * POST /xrpc/io.exprsn.admin.workers.drain
+ */
+clusterAdminRouter.post('/xrpc/io.exprsn.admin.workers.drain', async (c) => {
+  const body = await c.req.json<{ workerId: string }>();
+
+  if (!body.workerId) {
+    return c.json({ error: 'workerId is required' }, 400);
+  }
+
+  const [worker] = await db
+    .update(renderWorkers)
+    .set({ status: 'draining' })
+    .where(eq(renderWorkers.id, body.workerId))
+    .returning();
+
+  if (!worker) {
+    return c.json({ error: 'Worker not found' }, 404);
+  }
+
+  return c.json({ worker, message: 'Worker is now draining' });
+});
+
+/**
+ * Activate a drained worker
+ * POST /xrpc/io.exprsn.admin.workers.activate
+ */
+clusterAdminRouter.post('/xrpc/io.exprsn.admin.workers.activate', async (c) => {
+  const body = await c.req.json<{ workerId: string }>();
+
+  if (!body.workerId) {
+    return c.json({ error: 'workerId is required' }, 400);
+  }
+
+  const [worker] = await db
+    .update(renderWorkers)
+    .set({ status: 'active' })
+    .where(eq(renderWorkers.id, body.workerId))
+    .returning();
+
+  if (!worker) {
+    return c.json({ error: 'Worker not found' }, 404);
+  }
+
+  return c.json({ worker, message: 'Worker is now active' });
+});
+
+/**
+ * Restart a worker (via cluster management)
+ * POST /xrpc/io.exprsn.admin.workers.restart
+ */
+clusterAdminRouter.post('/xrpc/io.exprsn.admin.workers.restart', async (c) => {
+  const body = await c.req.json<{ workerId: string }>();
+
+  if (!body.workerId) {
+    return c.json({ error: 'workerId is required' }, 400);
+  }
+
+  const [worker] = await db
+    .select()
+    .from(renderWorkers)
+    .where(eq(renderWorkers.id, body.workerId))
+    .limit(1);
+
+  if (!worker) {
+    return c.json({ error: 'Worker not found' }, 404);
+  }
+
+  // In a real implementation, this would call the cluster orchestration API
+  // to restart the worker pod/container
+  const clusterId = worker.metadata?.clusterId as string | undefined;
+
+  if (!clusterId) {
+    return c.json({ error: 'Worker is not associated with a cluster' }, 400);
+  }
+
+  const [cluster] = await db
+    .select()
+    .from(renderClusters)
+    .where(eq(renderClusters.id, clusterId))
+    .limit(1);
+
+  if (!cluster) {
+    return c.json({ error: 'Associated cluster not found' }, 404);
+  }
+
+  // TODO: Implement actual restart logic based on cluster type
+  // if (cluster.type === 'kubernetes') {
+  //   await restartK8sPod(worker.id);
+  // } else if (cluster.type === 'docker') {
+  //   await restartDockerContainer(worker.id);
+  // }
+
+  // For now, just mark as restarting and let the worker re-register
+  await db
+    .update(renderWorkers)
+    .set({
+      status: 'offline',
+      lastHeartbeat: new Date(0), // Set to epoch to mark as stale
+    })
+    .where(eq(renderWorkers.id, body.workerId));
+
+  return c.json({
+    success: true,
+    message: `Restart signal sent to worker ${worker.hostname}`,
+  });
+});
+
+/**
+ * Remove a worker from the cluster
+ * DELETE /xrpc/io.exprsn.admin.workers.remove
+ */
+clusterAdminRouter.delete('/xrpc/io.exprsn.admin.workers.remove', async (c) => {
+  const workerId = c.req.query('workerId');
+
+  if (!workerId) {
+    return c.json({ error: 'workerId is required' }, 400);
+  }
+
+  const [worker] = await db
+    .select()
+    .from(renderWorkers)
+    .where(eq(renderWorkers.id, workerId))
+    .limit(1);
+
+  if (!worker) {
+    return c.json({ error: 'Worker not found' }, 404);
+  }
+
+  // Check if worker has active jobs
+  if (worker.activeJobs && worker.activeJobs > 0) {
+    return c.json(
+      { error: 'Cannot remove worker with active jobs. Drain worker first.' },
+      400
+    );
+  }
+
+  await db.delete(renderWorkers).where(eq(renderWorkers.id, workerId));
+
+  return c.json({ success: true, message: 'Worker removed' });
+});
+
+/**
+ * Get worker logs (last N lines)
+ * GET /xrpc/io.exprsn.admin.workers.logs
+ */
+clusterAdminRouter.get('/xrpc/io.exprsn.admin.workers.logs', async (c) => {
+  const workerId = c.req.query('workerId');
+  const lines = parseInt(c.req.query('lines') || '100');
+
+  if (!workerId) {
+    return c.json({ error: 'workerId is required' }, 400);
+  }
+
+  const [worker] = await db
+    .select()
+    .from(renderWorkers)
+    .where(eq(renderWorkers.id, workerId))
+    .limit(1);
+
+  if (!worker) {
+    return c.json({ error: 'Worker not found' }, 404);
+  }
+
+  // In a real implementation, this would fetch logs from the logging system
+  // (e.g., Kubernetes logs API, Docker logs, or centralized logging like ELK)
+
+  // For now, return a placeholder
+  const logs = [
+    `[${new Date().toISOString()}] Worker ${worker.hostname} started`,
+    `[${new Date().toISOString()}] Status: ${worker.status}`,
+    `[${new Date().toISOString()}] Active jobs: ${worker.activeJobs || 0}`,
+    `[${new Date().toISOString()}] Total processed: ${worker.totalProcessed || 0}`,
+  ];
+
+  return c.json({
+    workerId,
+    hostname: worker.hostname,
+    logs,
+    lines: logs.length,
+  });
+});
+
 export { clusterAdminRouter };

@@ -5,6 +5,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import Link from 'next/link';
 import { api, AdminOrganization } from '@/lib/api';
 import { ExportButton } from '@/components/admin/ExportModal';
+import { CreateOrganizationModal } from '@/components/admin/CreateOrganizationModal';
 import toast from 'react-hot-toast';
 
 export default function AdminOrganizationsPage() {
@@ -15,6 +16,7 @@ export default function AdminOrganizationsPage() {
   const [sort, setSort] = useState('recent');
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [showBulkModal, setShowBulkModal] = useState(false);
+  const [showCreateModal, setShowCreateModal] = useState(false);
   const [bulkAction, setBulkAction] = useState<'verify' | 'unverify' | 'enableApi' | 'disableApi' | 'delete' | null>(null);
   const [deleteReason, setDeleteReason] = useState('');
 
@@ -156,6 +158,25 @@ export default function AdminOrganizationsPage() {
           {selectedIds.size > 0 && (
             <span className="text-sm text-text-muted">{selectedIds.size} selected</span>
           )}
+          <button
+            onClick={() => setShowCreateModal(true)}
+            className="px-4 py-2 bg-accent hover:bg-accent-hover text-text-inverse rounded-lg transition-colors flex items-center gap-2"
+          >
+            <svg
+              className="w-5 h-5"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M12 4v16m8-8H4"
+              />
+            </svg>
+            Create Organization
+          </button>
           <ExportButton
             exportType="organizations"
             filters={{
@@ -471,6 +492,12 @@ export default function AdminOrganizationsPage() {
           </div>
         </div>
       )}
+
+      {/* Create Organization Modal */}
+      <CreateOrganizationModal
+        isOpen={showCreateModal}
+        onClose={() => setShowCreateModal(false)}
+      />
     </div>
   );
 }

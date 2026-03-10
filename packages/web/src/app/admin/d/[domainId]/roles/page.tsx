@@ -5,15 +5,21 @@ import { useParams } from 'next/navigation';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api';
 import { DataTable } from '@/components/admin/ui/DataTable';
+import { CreateRoleModal } from '@/components/admin/domains/CreateRoleModal';
+import { EditRoleModal } from '@/components/admin/domains/EditRoleModal';
+import toast from 'react-hot-toast';
 
 interface DomainRole {
   id: string;
+  domainId: string;
   name: string;
-  description: string;
-  permissions: string[];
-  userCount: number;
+  displayName: string;
+  description?: string;
   isSystem: boolean;
+  priority: number;
+  permissions: string[];
   createdAt: string;
+  updatedAt: string;
 }
 
 export default function DomainRolesPage() {
@@ -21,55 +27,53 @@ export default function DomainRolesPage() {
   const domainId = params.domainId as string;
   const [search, setSearch] = useState('');
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const [editingRoleId, setEditingRoleId] = useState<string | null>(null);
+  const [deletingRoleId, setDeletingRoleId] = useState<string | null>(null);
   const queryClient = useQueryClient();
 
-  const { data: roles = [], isLoading } = useQuery<DomainRole[]>({
+  // Fetch roles
+  const { data, isLoading, error } = useQuery({
     queryKey: ['admin', 'domain', domainId, 'roles'],
-    queryFn: async () => {
-      // TODO: Replace with actual API call
-      return [
-        {
-          id: '1',
-          name: 'Admin',
-          description: 'Full administrative access to the domain',
-          permissions: ['*'],
-          userCount: 3,
-          isSystem: true,
-          createdAt: new Date().toISOString(),
-        },
-        {
-          id: '2',
-          name: 'Moderator',
-          description: 'Can moderate content and manage reports',
-          permissions: ['content:read', 'content:moderate', 'reports:manage'],
-          userCount: 12,
-          isSystem: true,
-          createdAt: new Date().toISOString(),
-        },
-        {
-          id: '3',
-          name: 'Content Creator',
-          description: 'Can create and manage own content',
-          permissions: ['content:create', 'content:edit_own', 'content:delete_own'],
-          userCount: 156,
-          isSystem: false,
-          createdAt: new Date().toISOString(),
-        },
-        {
-          id: '4',
-          name: 'Viewer',
-          description: 'Basic viewing permissions',
-          permissions: ['content:read'],
-          userCount: 1250,
-          isSystem: true,
-          createdAt: new Date().toISOString(),
-        },
-      ];
+    queryFn: () => api.adminDomainRolesList(domainId, { includeSystem: true }),
+  });
+
+  const roles = data?.roles || [];
+
+  // Delete mutation
+  const deleteMutation = useMutation({
+    mutationFn: (roleId: string) => api.adminDomainRolesDelete(roleId),
+    onSuccess: () => {
+      toast.success('Role deleted successfully');
+      queryClient.invalidateQueries({ queryKey: ['admin', 'domain', domainId, 'roles'] });
+      setDeletingRoleId(null);
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || 'Failed to delete role');
+      setDeletingRoleId(null);
     },
   });
 
+  const handleDelete = (roleId: string, roleName: string) => {
+    if (confirm(`Are you sure you want to delete the role "${roleName}"? This action cannot be undone.`)) {
+      setDeletingRoleId(roleId);
+      deleteMutation.mutate(roleId);
+    }
+  };
+
+  const handleCreateSuccess = () => {
+    queryClient.invalidateQueries({ queryKey: ['admin', 'domain', domainId, 'roles'] });
+  };
+
+  const handleEditSuccess = () => {
+    queryClient.invalidateQueries({ queryKey: ['admin', 'domain', domainId, 'roles'] });
+  };
+
   const filteredRoles = roles.filter((role) =>
-    search ? role.name.toLowerCase().includes(search.toLowerCase()) : true
+    search ?
+      role.name.toLowerCase().includes(search.toLowerCase()) ||
+      role.displayName.toLowerCase().includes(search.toLowerCase()) ||
+      role.description?.toLowerCase().includes(search.toLowerCase())
+    : true
   );
 
   const columns = [
@@ -78,7 +82,10 @@ export default function DomainRolesPage() {
       header: 'Role Name',
       render: (role: DomainRole) => (
         <div className="flex items-center gap-2">
-          <div className="font-medium text-text-primary">{role.name}</div>
+          <div>
+            <div className="font-medium text-text-primary">{role.displayName}</div>
+            <div className="text-xs text-text-muted font-mono">{role.name}</div>
+          </div>
           {role.isSystem && (
             <span className="px-1.5 py-0.5 text-xs bg-accent/10 text-accent rounded">
               System
@@ -91,7 +98,16 @@ export default function DomainRolesPage() {
       key: 'description',
       header: 'Description',
       render: (role: DomainRole) => (
-        <span className="text-text-secondary text-sm">{role.description}</span>
+        <span className="text-text-secondary text-sm">
+          {role.description || <span className="text-text-muted italic">No description</span>}
+        </span>
+      ),
+    },
+    {
+      key: 'priority',
+      header: 'Priority',
+      render: (role: DomainRole) => (
+        <span className="text-text-secondary font-mono">{role.priority}</span>
       ),
     },
     {
@@ -99,46 +115,64 @@ export default function DomainRolesPage() {
       header: 'Permissions',
       render: (role: DomainRole) => (
         <div className="flex flex-wrap gap-1">
-          {role.permissions.slice(0, 3).map((perm) => (
-            <span
-              key={perm}
-              className="px-1.5 py-0.5 text-xs bg-surface-hover text-text-muted rounded"
-            >
-              {perm}
-            </span>
-          ))}
-          {role.permissions.length > 3 && (
-            <span className="px-1.5 py-0.5 text-xs bg-surface-hover text-text-muted rounded">
-              +{role.permissions.length - 3} more
-            </span>
+          {role.permissions.length === 0 ? (
+            <span className="text-xs text-text-muted italic">No permissions</span>
+          ) : (
+            <>
+              {role.permissions.slice(0, 2).map((perm) => (
+                <span
+                  key={perm}
+                  className="px-1.5 py-0.5 text-xs bg-surface-hover text-text-muted rounded font-mono"
+                  title={perm}
+                >
+                  {perm.split('.').pop()}
+                </span>
+              ))}
+              {role.permissions.length > 2 && (
+                <span
+                  className="px-1.5 py-0.5 text-xs bg-surface-hover text-text-muted rounded"
+                  title={role.permissions.join(', ')}
+                >
+                  +{role.permissions.length - 2} more
+                </span>
+              )}
+            </>
           )}
         </div>
-      ),
-    },
-    {
-      key: 'userCount',
-      header: 'Users',
-      render: (role: DomainRole) => (
-        <span className="text-text-secondary">{role.userCount}</span>
       ),
     },
     {
       key: 'actions',
       header: '',
       render: (role: DomainRole) => (
-        <div className="flex gap-2">
-          <button className="px-3 py-1 text-sm text-accent hover:text-accent-hover">
-            Edit
+        <div className="flex gap-2 justify-end">
+          <button
+            onClick={() => setEditingRoleId(role.id)}
+            className="px-3 py-1 text-sm text-accent hover:text-accent-hover"
+          >
+            {role.isSystem ? 'View' : 'Edit'}
           </button>
           {!role.isSystem && (
-            <button className="px-3 py-1 text-sm text-red-500 hover:text-red-400">
-              Delete
+            <button
+              onClick={() => handleDelete(role.id, role.displayName)}
+              disabled={deletingRoleId === role.id}
+              className="px-3 py-1 text-sm text-red-500 hover:text-red-400 disabled:opacity-50"
+            >
+              {deletingRoleId === role.id ? 'Deleting...' : 'Delete'}
             </button>
           )}
         </div>
       ),
     },
   ];
+
+  // Calculate stats
+  const stats = {
+    total: roles.length,
+    system: roles.filter((r) => r.isSystem).length,
+    custom: roles.filter((r) => !r.isSystem).length,
+    totalPermissions: roles.reduce((sum, r) => sum + r.permissions.length, 0),
+  };
 
   return (
     <div className="space-y-6">
@@ -161,27 +195,30 @@ export default function DomainRolesPage() {
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         <div className="bg-surface p-4 rounded-lg border border-border">
           <p className="text-text-muted text-sm">Total Roles</p>
-          <p className="text-2xl font-bold text-text-primary">{roles.length}</p>
+          <p className="text-2xl font-bold text-text-primary">{stats.total}</p>
         </div>
         <div className="bg-surface p-4 rounded-lg border border-border">
           <p className="text-text-muted text-sm">System Roles</p>
-          <p className="text-2xl font-bold text-accent">
-            {roles.filter((r) => r.isSystem).length}
-          </p>
+          <p className="text-2xl font-bold text-accent">{stats.system}</p>
         </div>
         <div className="bg-surface p-4 rounded-lg border border-border">
           <p className="text-text-muted text-sm">Custom Roles</p>
-          <p className="text-2xl font-bold text-text-primary">
-            {roles.filter((r) => !r.isSystem).length}
-          </p>
+          <p className="text-2xl font-bold text-text-primary">{stats.custom}</p>
         </div>
         <div className="bg-surface p-4 rounded-lg border border-border">
-          <p className="text-text-muted text-sm">Total Assigned</p>
-          <p className="text-2xl font-bold text-text-primary">
-            {roles.reduce((sum, r) => sum + r.userCount, 0)}
-          </p>
+          <p className="text-text-muted text-sm">Total Permissions</p>
+          <p className="text-2xl font-bold text-text-primary">{stats.totalPermissions}</p>
         </div>
       </div>
+
+      {/* Error State */}
+      {error && (
+        <div className="bg-red-500/10 border border-red-500/20 rounded-lg p-4">
+          <p className="text-red-500 text-sm">
+            Failed to load roles: {error instanceof Error ? error.message : 'Unknown error'}
+          </p>
+        </div>
+      )}
 
       {/* Search */}
       <div className="flex items-center gap-4">
@@ -202,6 +239,23 @@ export default function DomainRolesPage() {
         isLoading={isLoading}
         emptyMessage="No roles found"
       />
+
+      {/* Modals */}
+      <CreateRoleModal
+        domainId={domainId}
+        isOpen={showCreateModal}
+        onClose={() => setShowCreateModal(false)}
+        onSuccess={handleCreateSuccess}
+      />
+
+      {editingRoleId && (
+        <EditRoleModal
+          roleId={editingRoleId}
+          isOpen={!!editingRoleId}
+          onClose={() => setEditingRoleId(null)}
+          onSuccess={handleEditSuccess}
+        />
+      )}
     </div>
   );
 }

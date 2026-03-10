@@ -216,7 +216,7 @@
       "idx": 30,
       "version": "7",
       "when": 1772300000000,
-      "tag": "0030_domain_admin_rbac",
+      "tag": "0030_user_moderation_appeals",
       "breakpoints": true
     },
     {
@@ -252,6 +252,27 @@
       "version": "7",
       "when": 1772800000000,
       "tag": "0035_exprsn_did_certificates",
+      "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1773086374444,
+      "tag": "0036_fresh_dreaming_celestial",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1773089427650,
+      "tag": "0037_broad_rafael_vega",
+      "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1773100564768,
+      "tag": "0038_mysterious_mysterio",
       "breakpoints": true
     }
   ]
