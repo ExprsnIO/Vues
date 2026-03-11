@@ -1,0 +1,83 @@
+{
+  "lexicon": 1,
+  "id": "io.exprsn.identity.rotateKeys",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Rotate cryptographic keys for a did:exprsn by reissuing certificate",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["did"],
+          "properties": {
+            "did": {
+              "type": "string",
+              "format": "did",
+              "description": "The did:exprsn to rotate keys for"
+            }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["did", "handle", "certificate", "privateKey", "publicKeyMultibase"],
+          "properties": {
+            "did": {
+              "type": "string",
+              "format": "did",
+              "description": "The DID (unchanged)"
+            },
+            "handle": {
+              "type": "string",
+              "description": "The handle"
+            },
+            "certificate": {
+              "type": "object",
+              "required": ["id", "pem", "fingerprint", "validUntil"],
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "pem": {
+                  "type": "string"
+                },
+                "fingerprint": {
+                  "type": "string"
+                },
+                "validUntil": {
+                  "type": "string",
+                  "format": "datetime"
+                }
+              }
+            },
+            "privateKey": {
+              "type": "string",
+              "description": "New private key in PEM format (RETURNED ONCE)"
+            },
+            "publicKeyMultibase": {
+              "type": "string",
+              "description": "New public key in multibase format"
+            }
+          }
+        }
+      },
+      "errors": [
+        {
+          "name": "NotFound",
+          "description": "DID not found"
+        },
+        {
+          "name": "InactiveDid",
+          "description": "Cannot rotate keys for inactive DID"
+        },
+        {
+          "name": "RotationFailed",
+          "description": "Key rotation failed"
+        }
+      ]
+    }
+  }
+}

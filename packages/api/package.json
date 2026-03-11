@@ -37,7 +37,9 @@
     "db:seed": "tsx scripts/seed.ts",
     "seed:community": "tsx scripts/seed-community-data.ts",
     "seed:admin": "tsx scripts/seed-admin.ts",
-    "seed:federation": "tsx scripts/seed-federation-settings.ts"
+    "seed:federation": "tsx scripts/seed-federation-settings.ts",
+    "encrypt:credentials": "tsx scripts/encrypt-payment-credentials.ts",
+    "encrypt:credentials:dry-run": "tsx scripts/encrypt-payment-credentials.ts --dry-run"
   },
   "dependencies": {
     "@atproto/api": "^0.14.5",

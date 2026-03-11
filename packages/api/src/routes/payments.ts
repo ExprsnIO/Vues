@@ -18,6 +18,23 @@ import { eq, and, desc, sql, gte, inArray } from 'drizzle-orm';
 import { authMiddleware } from '../auth/middleware.js';
 import { PaymentGatewayFactory } from '../services/payments/index.js';
 import type { PaymentProvider } from '@exprsn/shared/types';
+import { encryptCredentials, decryptCredentials } from '../utils/encryption.js';
+import { zValidator, getValidatedData } from '../utils/zod-validator.js';
+import {
+  createPaymentConfigSchema,
+  updatePaymentConfigSchema,
+  deletePaymentConfigSchema,
+  chargeSchema,
+  refundSchema,
+  tipSchema,
+  capturePaymentSchema,
+  voidPaymentSchema,
+  attachPaymentMethodSchema,
+  removePaymentMethodSchema,
+  createSubscriptionTierSchema,
+  subscribeSchema,
+  cancelSubscriptionSchema,
+} from '../utils/validation-schemas.js';
 
 type AuthContext = {
   Variables: {
@@ -50,17 +67,21 @@ async function checkOrgPaymentPermission(
   return member.role === 'owner' || member.role === 'admin';
 }
 
-// Helper to decrypt credentials (placeholder - implement with proper encryption)
-function decryptCredentials(encrypted: unknown): Record<string, string> {
-  // In production, use proper encryption (e.g., node-forge with a key from env)
-  // For now, assuming credentials are stored as JSON
-  return encrypted as Record<string, string>;
-}
+// Helper to decrypt credentials - safely handle both encrypted and unencrypted data
+function safeDecryptCredentials(encrypted: unknown): Record<string, string> {
+  if (!encrypted || typeof encrypted !== 'object') {
+    return {};
+  }
 
-// Helper to encrypt credentials (placeholder - implement with proper encryption)
-function encryptCredentials(credentials: Record<string, string>): Record<string, string> {
-  // In production, use proper encryption
-  return credentials;
+  const creds = encrypted as Record<string, string>;
+
+  try {
+    // Try to decrypt - if it fails, assume it's already unencrypted (for backward compatibility)
+    return decryptCredentials(creds);
+  } catch (error) {
+    console.warn('Failed to decrypt credentials, using as-is:', error);
+    return creds;
+  }
 }
 
 // ============================================
@@ -68,22 +89,13 @@ function encryptCredentials(credentials: Record<string, string>): Record<string,
 // ============================================
 
 // Create payment configuration
-paymentRoutes.post('/io.exprsn.payments.createConfig', authMiddleware, async (c) => {
+paymentRoutes.post('/io.exprsn.payments.createConfig', authMiddleware, zValidator('json', createPaymentConfigSchema), async (c) => {
   const userDid = c.get('did');
   if (!userDid) {
     throw new HTTPException(401, { message: 'Authentication required' });
   }
 
-  const body = await c.req.json<{
-    provider: PaymentProvider;
-    credentials: Record<string, string>;
-    organizationId?: string;
-    testMode?: boolean;
-  }>();
-
-  if (!body.provider || !body.credentials) {
-    throw new HTTPException(400, { message: 'Provider and credentials required' });
-  }
+  const body = getValidatedData<typeof createPaymentConfigSchema._output>(c);
 
   // Validate provider
   if (!PaymentGatewayFactory.isProviderSupported(body.provider)) {
@@ -211,22 +223,13 @@ paymentRoutes.get('/io.exprsn.payments.getConfigs', authMiddleware, async (c) =>
 });
 
 // Update payment configuration
-paymentRoutes.post('/io.exprsn.payments.updateConfig', authMiddleware, async (c) => {
+paymentRoutes.post('/io.exprsn.payments.updateConfig', authMiddleware, zValidator('json', updatePaymentConfigSchema), async (c) => {
   const userDid = c.get('did');
   if (!userDid) {
     throw new HTTPException(401, { message: 'Authentication required' });
   }
 
-  const body = await c.req.json<{
-    configId: string;
-    credentials?: Record<string, string>;
-    testMode?: boolean;
-    isActive?: boolean;
-  }>();
-
-  if (!body.configId) {
-    throw new HTTPException(400, { message: 'Config ID required' });
-  }
+  const body = getValidatedData<typeof updatePaymentConfigSchema._output>(c);
 
   // Get existing config
   const existing = await db
@@ -287,16 +290,13 @@ paymentRoutes.post('/io.exprsn.payments.updateConfig', authMiddleware, async (c)
 });
 
 // Delete payment configuration
-paymentRoutes.post('/io.exprsn.payments.deleteConfig', authMiddleware, async (c) => {
+paymentRoutes.post('/io.exprsn.payments.deleteConfig', authMiddleware, zValidator('json', deletePaymentConfigSchema), async (c) => {
   const userDid = c.get('did');
   if (!userDid) {
     throw new HTTPException(401, { message: 'Authentication required' });
   }
 
-  const body = await c.req.json<{ configId: string }>();
-  if (!body.configId) {
-    throw new HTTPException(400, { message: 'Config ID required' });
-  }
+  const body = getValidatedData<typeof deletePaymentConfigSchema._output>(c);
 
   const existing = await db
     .select()
@@ -331,30 +331,13 @@ paymentRoutes.post('/io.exprsn.payments.deleteConfig', authMiddleware, async (c)
 // ============================================
 
 // Process a charge
-paymentRoutes.post('/io.exprsn.payments.charge', authMiddleware, async (c) => {
+paymentRoutes.post('/io.exprsn.payments.charge', authMiddleware, zValidator('json', chargeSchema), async (c) => {
   const userDid = c.get('did');
   if (!userDid) {
     throw new HTTPException(401, { message: 'Authentication required' });
   }
 
-  const body = await c.req.json<{
-    configId: string;
-    amount: number;
-    currency?: string;
-    recipientDid?: string;
-    description?: string;
-    paymentMethodId?: string;
-    metadata?: Record<string, unknown>;
-    capture?: boolean;
-  }>();
-
-  if (!body.configId || !body.amount) {
-    throw new HTTPException(400, { message: 'Config ID and amount required' });
-  }
-
-  if (body.amount <= 0) {
-    throw new HTTPException(400, { message: 'Amount must be positive' });
-  }
+  const body = getValidatedData<typeof chargeSchema._output>(c);
 
   // Get config
   const configResult = await db
@@ -390,7 +373,7 @@ paymentRoutes.post('/io.exprsn.payments.charge', authMiddleware, async (c) => {
   }
 
   // Get gateway
-  const credentials = decryptCredentials(config.credentials);
+  const credentials = safeDecryptCredentials(config.credentials);
   const gateway = PaymentGatewayFactory.getOrCreate(
     body.configId,
     config.provider as PaymentProvider,
@@ -474,21 +457,13 @@ paymentRoutes.post('/io.exprsn.payments.charge', authMiddleware, async (c) => {
 });
 
 // Process a refund
-paymentRoutes.post('/io.exprsn.payments.refund', authMiddleware, async (c) => {
+paymentRoutes.post('/io.exprsn.payments.refund', authMiddleware, zValidator('json', refundSchema), async (c) => {
   const userDid = c.get('did');
   if (!userDid) {
     throw new HTTPException(401, { message: 'Authentication required' });
   }
 
-  const body = await c.req.json<{
-    transactionId: string;
-    amount?: number;
-    reason?: string;
-  }>();
-
-  if (!body.transactionId) {
-    throw new HTTPException(400, { message: 'Transaction ID required' });
-  }
+  const body = getValidatedData<typeof refundSchema._output>(c);
 
   // Get original transaction
   const txResult = await db
@@ -522,7 +497,7 @@ paymentRoutes.post('/io.exprsn.payments.refund', authMiddleware, async (c) => {
   }
 
   // Get gateway
-  const credentials = decryptCredentials(config.credentials);
+  const credentials = safeDecryptCredentials(config.credentials);
   const gateway = PaymentGatewayFactory.getOrCreate(
     config.id,
     config.provider as PaymentProvider,
@@ -589,26 +564,13 @@ paymentRoutes.post('/io.exprsn.payments.refund', authMiddleware, async (c) => {
 });
 
 // Send a tip
-paymentRoutes.post('/io.exprsn.payments.tip', authMiddleware, async (c) => {
+paymentRoutes.post('/io.exprsn.payments.tip', authMiddleware, zValidator('json', tipSchema), async (c) => {
   const userDid = c.get('did');
   if (!userDid) {
     throw new HTTPException(401, { message: 'Authentication required' });
   }
 
-  const body = await c.req.json<{
-    recipientDid: string;
-    amount: number;
-    message?: string;
-    paymentMethodId?: string;
-  }>();
-
-  if (!body.recipientDid || !body.amount) {
-    throw new HTTPException(400, { message: 'Recipient and amount required' });
-  }
-
-  if (body.amount < 100) {
-    throw new HTTPException(400, { message: 'Minimum tip is $1.00 (100 cents)' });
-  }
+  const body = getValidatedData<typeof tipSchema._output>(c);
 
   if (body.recipientDid === userDid) {
     throw new HTTPException(400, { message: 'Cannot tip yourself' });
@@ -633,7 +595,7 @@ paymentRoutes.post('/io.exprsn.payments.tip', authMiddleware, async (c) => {
   }
 
   // Get gateway
-  const credentials = decryptCredentials(recipientConfig.credentials);
+  const credentials = safeDecryptCredentials(recipientConfig.credentials);
   const gateway = PaymentGatewayFactory.getOrCreate(
     recipientConfig.id,
     recipientConfig.provider as PaymentProvider,
@@ -709,20 +671,13 @@ paymentRoutes.post('/io.exprsn.payments.tip', authMiddleware, async (c) => {
 });
 
 // Capture an authorized payment
-paymentRoutes.post('/io.exprsn.payments.capture', authMiddleware, async (c) => {
+paymentRoutes.post('/io.exprsn.payments.capture', authMiddleware, zValidator('json', capturePaymentSchema), async (c) => {
   const userDid = c.get('did');
   if (!userDid) {
     throw new HTTPException(401, { message: 'Authentication required' });
   }
 
-  const body = await c.req.json<{
-    transactionId: string;
-    amount?: number;
-  }>();
-
-  if (!body.transactionId) {
-    throw new HTTPException(400, { message: 'Transaction ID required' });
-  }
+  const body = getValidatedData<typeof capturePaymentSchema._output>(c);
 
   // Get transaction
   const txResult = await db
@@ -756,7 +711,7 @@ paymentRoutes.post('/io.exprsn.payments.capture', authMiddleware, async (c) => {
   }
 
   // Get gateway
-  const credentials = decryptCredentials(config.credentials);
+  const credentials = safeDecryptCredentials(config.credentials);
   const gateway = PaymentGatewayFactory.getOrCreate(
     config.id,
     config.provider as PaymentProvider,
@@ -785,17 +740,13 @@ paymentRoutes.post('/io.exprsn.payments.capture', authMiddleware, async (c) => {
 });
 
 // Void an authorized payment
-paymentRoutes.post('/io.exprsn.payments.void', authMiddleware, async (c) => {
+paymentRoutes.post('/io.exprsn.payments.void', authMiddleware, zValidator('json', voidPaymentSchema), async (c) => {
   const userDid = c.get('did');
   if (!userDid) {
     throw new HTTPException(401, { message: 'Authentication required' });
   }
 
-  const body = await c.req.json<{ transactionId: string }>();
-
-  if (!body.transactionId) {
-    throw new HTTPException(400, { message: 'Transaction ID required' });
-  }
+  const body = getValidatedData<typeof voidPaymentSchema._output>(c);
 
   // Get transaction
   const txResult = await db
@@ -829,7 +780,7 @@ paymentRoutes.post('/io.exprsn.payments.void', authMiddleware, async (c) => {
   }
 
   // Get gateway
-  const credentials = decryptCredentials(config.credentials);
+  const credentials = safeDecryptCredentials(config.credentials);
   const gateway = PaymentGatewayFactory.getOrCreate(
     config.id,
     config.provider as PaymentProvider,
@@ -1030,21 +981,13 @@ paymentRoutes.get('/io.exprsn.payments.getTransaction', authMiddleware, async (c
 // ============================================
 
 // Attach payment method
-paymentRoutes.post('/io.exprsn.payments.attachPaymentMethod', authMiddleware, async (c) => {
+paymentRoutes.post('/io.exprsn.payments.attachPaymentMethod', authMiddleware, zValidator('json', attachPaymentMethodSchema), async (c) => {
   const userDid = c.get('did');
   if (!userDid) {
     throw new HTTPException(401, { message: 'Authentication required' });
   }
 
-  const body = await c.req.json<{
-    configId: string;
-    token: string;
-    setAsDefault?: boolean;
-  }>();
-
-  if (!body.configId || !body.token) {
-    throw new HTTPException(400, { message: 'Config ID and token required' });
-  }
+  const body = getValidatedData<typeof attachPaymentMethodSchema._output>(c);
 
   // Get config
   const configResult = await db
@@ -1070,7 +1013,7 @@ paymentRoutes.post('/io.exprsn.payments.attachPaymentMethod', authMiddleware, as
     )
     .limit(1);
 
-  const credentials = decryptCredentials(config.credentials);
+  const credentials = safeDecryptCredentials(config.credentials);
   const gateway = PaymentGatewayFactory.getOrCreate(
     body.configId,
     config.provider as PaymentProvider,
@@ -1204,16 +1147,13 @@ paymentRoutes.get('/io.exprsn.payments.listPaymentMethods', authMiddleware, asyn
 });
 
 // Remove payment method
-paymentRoutes.post('/io.exprsn.payments.removePaymentMethod', authMiddleware, async (c) => {
+paymentRoutes.post('/io.exprsn.payments.removePaymentMethod', authMiddleware, zValidator('json', removePaymentMethodSchema), async (c) => {
   const userDid = c.get('did');
   if (!userDid) {
     throw new HTTPException(401, { message: 'Authentication required' });
   }
 
-  const body = await c.req.json<{ paymentMethodId: string }>();
-  if (!body.paymentMethodId) {
-    throw new HTTPException(400, { message: 'Payment method ID required' });
-  }
+  const body = getValidatedData<typeof removePaymentMethodSchema._output>(c);
 
   const methodResult = await db
     .select({
@@ -1235,7 +1175,7 @@ paymentRoutes.post('/io.exprsn.payments.removePaymentMethod', authMiddleware, as
   }
 
   // Detach from provider
-  const credentials = decryptCredentials(data.config.credentials);
+  const credentials = safeDecryptCredentials(data.config.credentials);
   const gateway = PaymentGatewayFactory.getOrCreate(
     data.config.id,
     data.config.provider as PaymentProvider,
@@ -1299,7 +1239,7 @@ paymentRoutes.post('/io.exprsn.payments.webhook/stripe', async (c) => {
     .where(eq(paymentConfigs.provider, 'stripe'));
 
   for (const config of configs) {
-    const credentials = decryptCredentials(config.credentials);
+    const credentials = safeDecryptCredentials(config.credentials);
     if (!credentials.webhookSecret) continue;
 
     try {
@@ -1338,7 +1278,7 @@ paymentRoutes.post('/io.exprsn.payments.webhook/paypal', async (c) => {
     .where(eq(paymentConfigs.provider, 'paypal'));
 
   for (const config of configs) {
-    const credentials = decryptCredentials(config.credentials);
+    const credentials = safeDecryptCredentials(config.credentials);
     if (!credentials.webhookId) continue;
 
     try {
@@ -1377,7 +1317,7 @@ paymentRoutes.post('/io.exprsn.payments.webhook/authorizenet', async (c) => {
     .where(eq(paymentConfigs.provider, 'authorizenet'));
 
   for (const config of configs) {
-    const credentials = decryptCredentials(config.credentials);
+    const credentials = safeDecryptCredentials(config.credentials);
     if (!credentials.signatureKey) continue;
 
     try {
@@ -1449,30 +1389,13 @@ async function processWebhookEvent(
 // ============================================
 
 // Create subscription tier
-paymentRoutes.post('/io.exprsn.payments.createSubscriptionTier', authMiddleware, async (c) => {
+paymentRoutes.post('/io.exprsn.payments.createSubscriptionTier', authMiddleware, zValidator('json', createSubscriptionTierSchema), async (c) => {
   const userDid = c.get('did');
   if (!userDid) {
     throw new HTTPException(401, { message: 'Authentication required' });
   }
 
-  const body = await c.req.json<{
-    name: string;
-    description?: string;
-    price: number; // cents/month
-    benefits?: {
-      earlyAccess?: boolean;
-      exclusiveContent?: boolean;
-      behindTheScenes?: boolean;
-      directMessaging?: boolean;
-      customEmojis?: boolean;
-      badgeColor?: string;
-    };
-    maxSubscribers?: number;
-  }>();
-
-  if (!body.name || body.price === undefined || body.price < 100) {
-    throw new HTTPException(400, { message: 'Name and price (min $1.00) required' });
-  }
+  const body = getValidatedData<typeof createSubscriptionTierSchema._output>(c);
 
   const tierId = nanoid();
   await db.insert(creatorSubscriptionTiers).values({
@@ -1528,20 +1451,13 @@ paymentRoutes.get('/io.exprsn.payments.getSubscriptionTiers', async (c) => {
 });
 
 // Subscribe to a creator
-paymentRoutes.post('/io.exprsn.payments.subscribe', authMiddleware, async (c) => {
+paymentRoutes.post('/io.exprsn.payments.subscribe', authMiddleware, zValidator('json', subscribeSchema), async (c) => {
   const userDid = c.get('did');
   if (!userDid) {
     throw new HTTPException(401, { message: 'Authentication required' });
   }
 
-  const body = await c.req.json<{
-    tierId: string;
-    paymentMethodId?: string;
-  }>();
-
-  if (!body.tierId) {
-    throw new HTTPException(400, { message: 'tierId required' });
-  }
+  const body = getValidatedData<typeof subscribeSchema._output>(c);
 
   // Get tier
   const tierResult = await db
@@ -1635,16 +1551,13 @@ paymentRoutes.post('/io.exprsn.payments.subscribe', authMiddleware, async (c) =>
 });
 
 // Cancel subscription
-paymentRoutes.post('/io.exprsn.payments.cancelSubscription', authMiddleware, async (c) => {
+paymentRoutes.post('/io.exprsn.payments.cancelSubscription', authMiddleware, zValidator('json', cancelSubscriptionSchema), async (c) => {
   const userDid = c.get('did');
   if (!userDid) {
     throw new HTTPException(401, { message: 'Authentication required' });
   }
 
-  const body = await c.req.json<{ subscriptionId: string }>();
-  if (!body.subscriptionId) {
-    throw new HTTPException(400, { message: 'subscriptionId required' });
-  }
+  const body = getValidatedData<typeof cancelSubscriptionSchema._output>(c);
 
   const subResult = await db
     .select()

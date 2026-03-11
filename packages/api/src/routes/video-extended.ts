@@ -1,9 +1,9 @@
 import { Hono } from 'hono';
-import { HTTPException } from 'hono/http-exception';
 import { authMiddleware, optionalAuthMiddleware } from '../auth/middleware.js';
 import { db, videos, users, stitches, duets, shares, sounds, comments } from '../db/index.js';
 import { eq, desc, and, sql, like, ilike } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
+import { badRequest, notFound, forbidden, videoNotFound } from '../utils/api-errors.js';
 
 export const videoExtendedRouter = new Hono();
 
@@ -20,11 +20,11 @@ videoExtendedRouter.post('/io.exprsn.video.stitch', authMiddleware, async (c) =>
   const userDid = c.get('did');
 
   if (!videoUri || !originalVideoUri) {
-    throw new HTTPException(400, { message: 'Video URI and original video URI are required' });
+    throw badRequest('Video URI and original video URI are required');
   }
 
   if (endTime === undefined || endTime <= 0) {
-    throw new HTTPException(400, { message: 'End time is required and must be positive' });
+    throw badRequest('End time is required and must be positive');
   }
 
   // Verify both videos exist
@@ -37,16 +37,16 @@ videoExtendedRouter.post('/io.exprsn.video.stitch', authMiddleware, async (c) =>
   });
 
   if (!video) {
-    throw new HTTPException(404, { message: 'Video not found' });
+    throw videoNotFound(videoUri);
   }
 
   if (!originalVideo) {
-    throw new HTTPException(404, { message: 'Original video not found' });
+    throw videoNotFound(originalVideoUri);
   }
 
   // Check if original video allows stitching
   if (!originalVideo.allowStitch) {
-    throw new HTTPException(403, { message: 'Original video does not allow stitching' });
+    throw forbidden('Original video does not allow stitching');
   }
 
   const stitchId = nanoid();
@@ -76,7 +76,7 @@ videoExtendedRouter.get('/io.exprsn.video.getStitches', optionalAuthMiddleware, 
   const cursor = c.req.query('cursor');
 
   if (!uri) {
-    throw new HTTPException(400, { message: 'Video URI is required' });
+    throw badRequest('Video URI is required');
   }
 
   const conditions = [eq(stitches.originalVideoUri, uri)];
@@ -144,7 +144,7 @@ videoExtendedRouter.post('/io.exprsn.video.duet', authMiddleware, async (c) => {
   const userDid = c.get('did');
 
   if (!videoUri || !originalVideoUri) {
-    throw new HTTPException(400, { message: 'Video URI and original video URI are required' });
+    throw badRequest('Video URI and original video URI are required');
   }
 
   // Verify both videos exist
@@ -157,16 +157,16 @@ videoExtendedRouter.post('/io.exprsn.video.duet', authMiddleware, async (c) => {
   });
 
   if (!video) {
-    throw new HTTPException(404, { message: 'Video not found' });
+    throw videoNotFound();
   }
 
   if (!originalVideo) {
-    throw new HTTPException(404, { message: 'Original video not found' });
+    throw videoNotFound(originalVideoUri);
   }
 
   // Check if original video allows duets
   if (!originalVideo.allowDuet) {
-    throw new HTTPException(403, { message: 'Original video does not allow duets' });
+    throw forbidden('Original video does not allow duets');
   }
 
   const duetId = nanoid();
@@ -195,7 +195,7 @@ videoExtendedRouter.get('/io.exprsn.video.getDuets', optionalAuthMiddleware, asy
   const cursor = c.req.query('cursor');
 
   if (!uri) {
-    throw new HTTPException(400, { message: 'Video URI is required' });
+    throw badRequest('Video URI is required');
   }
 
   const conditions = [eq(duets.originalVideoUri, uri)];
@@ -261,7 +261,7 @@ videoExtendedRouter.get('/io.exprsn.video.getVideosBySound', optionalAuthMiddlew
   const cursor = c.req.query('cursor');
 
   if (!soundId) {
-    throw new HTTPException(400, { message: 'Sound ID is required' });
+    throw badRequest('Sound ID is required');
   }
 
   // Get sound info
@@ -270,7 +270,7 @@ videoExtendedRouter.get('/io.exprsn.video.getVideosBySound', optionalAuthMiddlew
   });
 
   if (!sound) {
-    throw new HTTPException(404, { message: 'Sound not found' });
+    throw notFound('Sound not found');
   }
 
   const conditions = [eq(videos.soundUri, soundId)];
@@ -342,7 +342,7 @@ videoExtendedRouter.get('/io.exprsn.video.getVideosByTag', optionalAuthMiddlewar
   const cursor = c.req.query('cursor');
 
   if (!tag) {
-    throw new HTTPException(400, { message: 'Tag is required' });
+    throw badRequest('Tag is required');
   }
 
   // Normalize tag (remove # if present, lowercase)
@@ -420,7 +420,7 @@ videoExtendedRouter.post('/io.exprsn.video.share', authMiddleware, async (c) => 
   const userDid = c.get('did');
 
   if (!videoUri) {
-    throw new HTTPException(400, { message: 'Video URI is required' });
+    throw badRequest('Video URI is required');
   }
 
   // Verify video exists
@@ -429,7 +429,7 @@ videoExtendedRouter.post('/io.exprsn.video.share', authMiddleware, async (c) => 
   });
 
   if (!video) {
-    throw new HTTPException(404, { message: 'Video not found' });
+    throw videoNotFound();
   }
 
   const shareId = nanoid();
@@ -466,7 +466,7 @@ videoExtendedRouter.post('/io.exprsn.video.deleteComment', authMiddleware, async
   const userDid = c.get('did');
 
   if (!uri) {
-    throw new HTTPException(400, { message: 'Comment URI is required' });
+    throw badRequest('Comment URI is required');
   }
 
   const comment = await db.query.comments.findFirst({
@@ -474,12 +474,12 @@ videoExtendedRouter.post('/io.exprsn.video.deleteComment', authMiddleware, async
   });
 
   if (!comment) {
-    throw new HTTPException(404, { message: 'Comment not found' });
+    throw notFound('Comment not found');
   }
 
   // Can only delete own comments (or if video owner - but keeping simple for now)
   if (comment.authorDid !== userDid) {
-    throw new HTTPException(403, { message: 'Not authorized to delete this comment' });
+    throw forbidden('Not authorized to delete this comment');
   }
 
   // Delete the comment
@@ -515,7 +515,7 @@ videoExtendedRouter.post('/io.exprsn.video.collab', authMiddleware, async (c) =>
   const userDid = c.get('did');
 
   if (!videoUri || !originalVideoUri) {
-    throw new HTTPException(400, { message: 'Video URI and original video URI are required' });
+    throw badRequest('Video URI and original video URI are required');
   }
 
   // Verify both videos exist
@@ -528,16 +528,16 @@ videoExtendedRouter.post('/io.exprsn.video.collab', authMiddleware, async (c) =>
   });
 
   if (!video) {
-    throw new HTTPException(404, { message: 'Video not found' });
+    throw videoNotFound();
   }
 
   if (!originalVideo) {
-    throw new HTTPException(404, { message: 'Original video not found' });
+    throw videoNotFound(originalVideoUri);
   }
 
   // Check if original video allows duets (collabs)
   if (!originalVideo.allowDuet) {
-    throw new HTTPException(403, { message: 'Original video does not allow collabs' });
+    throw forbidden('Original video does not allow collabs');
   }
 
   const collabId = nanoid();
@@ -567,7 +567,7 @@ videoExtendedRouter.get('/io.exprsn.video.getCollabs', optionalAuthMiddleware, a
   const cursor = c.req.query('cursor');
 
   if (!uri) {
-    throw new HTTPException(400, { message: 'Video URI is required' });
+    throw badRequest('Video URI is required');
   }
 
   const conditions = [eq(duets.originalVideoUri, uri)];
@@ -632,11 +632,11 @@ videoExtendedRouter.post('/io.exprsn.video.loop', authMiddleware, async (c) => {
   const userDid = c.get('did');
 
   if (!videoUri || !originalVideoUri) {
-    throw new HTTPException(400, { message: 'Video URI and original video URI are required' });
+    throw badRequest('Video URI and original video URI are required');
   }
 
   if (endTime === undefined || endTime <= 0) {
-    throw new HTTPException(400, { message: 'End time is required and must be positive' });
+    throw badRequest('End time is required and must be positive');
   }
 
   // Verify both videos exist
@@ -649,16 +649,16 @@ videoExtendedRouter.post('/io.exprsn.video.loop', authMiddleware, async (c) => {
   });
 
   if (!video) {
-    throw new HTTPException(404, { message: 'Video not found' });
+    throw videoNotFound();
   }
 
   if (!originalVideo) {
-    throw new HTTPException(404, { message: 'Original video not found' });
+    throw videoNotFound(originalVideoUri);
   }
 
   // Check if original video allows stitching (loops)
   if (!originalVideo.allowStitch) {
-    throw new HTTPException(403, { message: 'Original video does not allow loops' });
+    throw forbidden('Original video does not allow loops');
   }
 
   const loopId = nanoid();
@@ -689,7 +689,7 @@ videoExtendedRouter.get('/io.exprsn.video.getLoops', optionalAuthMiddleware, asy
   const cursor = c.req.query('cursor');
 
   if (!uri) {
-    throw new HTTPException(400, { message: 'Video URI is required' });
+    throw badRequest('Video URI is required');
   }
 
   const conditions = [eq(stitches.originalVideoUri, uri)];

@@ -1,0 +1,76 @@
+{
+  "lexicon": 1,
+  "id": "io.exprsn.identity.getCertificateInfo",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Get detailed certificate information for a did:exprsn",
+      "parameters": {
+        "type": "params",
+        "required": ["did"],
+        "properties": {
+          "did": {
+            "type": "string",
+            "format": "did",
+            "description": "The did:exprsn to get certificate info for"
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["certificateId", "fingerprint", "commonName", "issuer", "notBefore", "notAfter", "status", "certificateType"],
+          "properties": {
+            "certificateId": {
+              "type": "string",
+              "description": "Certificate ID"
+            },
+            "fingerprint": {
+              "type": "string",
+              "description": "SHA-256 fingerprint"
+            },
+            "commonName": {
+              "type": "string",
+              "description": "Certificate common name (CN)"
+            },
+            "issuer": {
+              "type": "string",
+              "description": "Issuing CA name"
+            },
+            "notBefore": {
+              "type": "string",
+              "format": "datetime",
+              "description": "Certificate validity start"
+            },
+            "notAfter": {
+              "type": "string",
+              "format": "datetime",
+              "description": "Certificate validity end"
+            },
+            "status": {
+              "type": "string",
+              "knownValues": ["active", "revoked", "expired"],
+              "description": "Certificate status"
+            },
+            "certificateType": {
+              "type": "string",
+              "knownValues": ["platform", "organization"],
+              "description": "Type of certificate (platform-issued or org-issued)"
+            },
+            "organizationId": {
+              "type": "string",
+              "description": "Organization ID (if org certificate)"
+            }
+          }
+        }
+      },
+      "errors": [
+        {
+          "name": "NotFound",
+          "description": "DID or certificate not found"
+        }
+      ]
+    }
+  }
+}

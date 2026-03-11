@@ -1,0 +1,48 @@
+{
+  "lexicon": 1,
+  "id": "io.exprsn.identity.getCertificateStatus",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Check certificate status for a did:exprsn (OCSP-like functionality)",
+      "parameters": {
+        "type": "params",
+        "required": ["did"],
+        "properties": {
+          "did": {
+            "type": "string",
+            "format": "did",
+            "description": "The did:exprsn to check"
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["status"],
+          "properties": {
+            "status": {
+              "type": "string",
+              "knownValues": ["good", "revoked", "unknown"],
+              "description": "Certificate status"
+            },
+            "certificateId": {
+              "type": "string",
+              "description": "Certificate ID"
+            },
+            "revocationTime": {
+              "type": "string",
+              "format": "datetime",
+              "description": "When the certificate was revoked (if applicable)"
+            },
+            "revocationReason": {
+              "type": "string",
+              "description": "Reason for revocation (if applicable)"
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { JWTService } from '../services/sso/JWTService.js';
 import { CRLService } from '../services/ca/CRLService.js';
 import { OCSPResponder } from '../services/ca/OCSPResponder.js';
+import { ExprsnDidService } from '../services/did/exprsn.js';
 
 /**
  * Well-known routes configuration
@@ -43,8 +44,24 @@ export function createWellKnownRouter(config: WellKnownConfig) {
   /**
    * /.well-known/did.json
    * Return the full DID document for this service
+   * Supports both did:web and did:exprsn resolution
    */
-  router.get('/did.json', (c) => {
+  router.get('/did.json', async (c) => {
+    // Check if this is a did:exprsn request via query parameter
+    const did = c.req.query('did');
+
+    if (did && did.startsWith('did:exprsn:')) {
+      // Resolve did:exprsn
+      const document = await ExprsnDidService.getDidDocument(did);
+      if (!document) {
+        return c.json({ error: 'DID not found' }, 404);
+      }
+      return c.json(document, 200, {
+        'Content-Type': 'application/did+json',
+      });
+    }
+
+    // Default: return service did:web document
     const services: Array<{
       id: string;
       type: string;
@@ -346,6 +363,103 @@ export function createWellKnownRouter(config: WellKnownConfig) {
     } catch (error) {
       return c.json({ error: 'Status not available' }, 500);
     }
+  });
+
+  /**
+   * /.well-known/did-exprsn/{did}
+   * Resolve did:exprsn to DID document (following DID resolution spec)
+   */
+  router.get('/did-exprsn/:did', async (c) => {
+    const didParam = c.req.param('did');
+    const did = didParam.startsWith('did:exprsn:') ? didParam : `did:exprsn:${didParam}`;
+
+    try {
+      const document = await ExprsnDidService.getDidDocument(did);
+
+      if (!document) {
+        return c.json({ error: 'DID not found' }, 404);
+      }
+
+      return c.json(document, 200, {
+        'Content-Type': 'application/did+json',
+        'Cache-Control': 'public, max-age=3600',
+      });
+    } catch (error) {
+      console.error('did:exprsn resolution error:', error);
+      return c.json({ error: 'Resolution failed' }, 500);
+    }
+  });
+
+  /**
+   * /.well-known/did-exprsn/{did}/certificate-chain
+   * Get certificate chain for a did:exprsn
+   */
+  router.get('/did-exprsn/:did/certificate-chain', async (c) => {
+    const didParam = c.req.param('did');
+    const did = didParam.startsWith('did:exprsn:') ? didParam : `did:exprsn:${didParam}`;
+
+    try {
+      const chain = await ExprsnDidService.getCertificateChain(did);
+
+      if (chain.length === 0) {
+        return c.json({ error: 'DID not found' }, 404);
+      }
+
+      // Return as concatenated PEM
+      return new Response(chain.join('\n'), {
+        headers: {
+          'Content-Type': 'application/x-pem-file',
+          'Cache-Control': 'public, max-age=3600',
+        },
+      });
+    } catch (error) {
+      console.error('Certificate chain fetch error:', error);
+      return c.json({ error: 'Failed to fetch certificate chain' }, 500);
+    }
+  });
+
+  /**
+   * /.well-known/did-exprsn/{did}/status
+   * Get certificate status for a did:exprsn (OCSP-like)
+   */
+  router.get('/did-exprsn/:did/status', async (c) => {
+    const didParam = c.req.param('did');
+    const did = didParam.startsWith('did:exprsn:') ? didParam : `did:exprsn:${didParam}`;
+
+    try {
+      const status = await ExprsnDidService.checkCertificateStatus(did);
+
+      return c.json(status, 200, {
+        'Cache-Control': 'public, max-age=300', // 5 minutes cache
+      });
+    } catch (error) {
+      console.error('Certificate status check error:', error);
+      return c.json({ error: 'Failed to check status' }, 500);
+    }
+  });
+
+  /**
+   * /.well-known/did-configuration.json
+   * DID Configuration Resource for domain verification
+   * https://identity.foundation/.well-known/resources/did-configuration/
+   */
+  router.get('/did-configuration.json', async (c) => {
+    const didConfiguration = {
+      '@context': 'https://identity.foundation/.well-known/did-configuration/v1',
+      linked_dids: [
+        // Service DID (did:web)
+        {
+          did: config.serviceDid,
+          origin: `https://${config.domain}`,
+        },
+        // Could add platform did:exprsn here if desired
+      ],
+    };
+
+    return c.json(didConfiguration, 200, {
+      'Content-Type': 'application/json',
+      'Cache-Control': 'public, max-age=86400',
+    });
   });
 
   return router;

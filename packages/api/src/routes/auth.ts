@@ -17,6 +17,12 @@ import {
   sanitizeInput,
 } from '../auth/security-middleware.js';
 import { getNotificationService } from '../services/notifications/index.js';
+import { zValidator, getValidatedData } from '../utils/zod-validator.js';
+import {
+  createAccountSchema,
+  createSessionSchema,
+  revokeSessionSchema,
+} from '../utils/validation-schemas.js';
 
 export const authRouter = new Hono();
 
@@ -405,42 +411,10 @@ async function createUserSignupData(
  * POST /xrpc/io.exprsn.auth.createAccount
  * Rate limited: 3 signups per hour per IP
  */
-authRouter.post('/io.exprsn.auth.createAccount', authRateLimiter('signup'), async (c) => {
-  const body = await c.req.json<{
-    handle: string;
-    email: string;
-    password: string;
-    displayName?: string;
-    accountType?: AccountType;
-    organizationType?: OrganizationType;
-    organizationName?: string;
-    didMethod?: DidMethod;
-  }>();
+authRouter.post('/io.exprsn.auth.createAccount', authRateLimiter('signup'), zValidator('json', createAccountSchema), async (c) => {
+  const body = getValidatedData<typeof createAccountSchema._output>(c);
 
-  // Validate required fields
-  if (!body.handle || !body.email || !body.password) {
-    throw new HTTPException(400, {
-      message: 'Missing required fields: handle, email, password',
-    });
-  }
-
-  // Validate handle
-  const handleValidation = validateHandle(body.handle);
-  if (!handleValidation.valid) {
-    throw new HTTPException(400, { message: handleValidation.error });
-  }
-
-  // Validate email
-  if (!validateEmail(body.email)) {
-    throw new HTTPException(400, { message: 'Invalid email format' });
-  }
-
-  // Validate password
-  if (body.password.length < 8) {
-    throw new HTTPException(400, { message: 'Password must be at least 8 characters' });
-  }
-
-  const handle = handleValidation.normalized!;
+  const handle = body.handle.toLowerCase().trim();
 
   // Check if handle exists in actor_repos
   const existingHandle = await db.query.actorRepos.findFirst({
@@ -692,19 +666,10 @@ authRouter.post('/io.exprsn.auth.createAccount', authRateLimiter('signup'), asyn
  * POST /xrpc/io.exprsn.auth.createSession
  * Rate limited: 5 attempts per 15 minutes per IP
  */
-authRouter.post('/io.exprsn.auth.createSession', authRateLimiter('login'), async (c) => {
-  const body = await c.req.json<{
-    identifier: string; // handle or email
-    password: string;
-  }>();
+authRouter.post('/io.exprsn.auth.createSession', authRateLimiter('login'), zValidator('json', createSessionSchema), async (c) => {
+  const body = getValidatedData<typeof createSessionSchema._output>(c);
 
-  if (!body.identifier || !body.password) {
-    throw new HTTPException(400, {
-      message: 'Missing required fields: identifier, password',
-    });
-  }
-
-  const identifier = sanitizeInput(body.identifier.toLowerCase().trim());
+  const identifier = sanitizeInput(body.identifier);
   const clientIP = c.req.header('x-forwarded-for')?.split(',')[0].trim() ||
     c.req.header('x-real-ip') || 'unknown';
 
@@ -963,18 +928,14 @@ authRouter.get('/io.exprsn.auth.listSessions', async (c) => {
  * Revoke a specific session
  * POST /xrpc/io.exprsn.auth.revokeSession
  */
-authRouter.post('/io.exprsn.auth.revokeSession', async (c) => {
+authRouter.post('/io.exprsn.auth.revokeSession', zValidator('json', revokeSessionSchema), async (c) => {
   const auth = c.req.header('Authorization');
   if (!auth?.startsWith('Bearer ')) {
     throw new HTTPException(401, { message: 'Not authenticated' });
   }
 
   const accessToken = auth.slice(7);
-  const body = await c.req.json<{ sessionId: string }>();
-
-  if (!body.sessionId) {
-    throw new HTTPException(400, { message: 'Session ID is required' });
-  }
+  const body = getValidatedData<typeof revokeSessionSchema._output>(c);
 
   // Get current session to verify ownership
   const currentSession = await db.query.sessions.findFirst({

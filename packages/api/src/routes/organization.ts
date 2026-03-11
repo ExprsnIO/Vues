@@ -1,5 +1,4 @@
 import { Hono } from 'hono';
-import { HTTPException } from 'hono/http-exception';
 import { nanoid } from 'nanoid';
 import { db } from '../db/index.js';
 import {
@@ -40,6 +39,24 @@ import { authMiddleware, optionalAuthMiddleware } from '../auth/middleware.js';
 import bcrypt from 'bcryptjs';
 import * as XLSX from 'xlsx';
 import { ExprsnDidService } from '../services/did/index.js';
+import { zValidator, getValidatedData } from '../utils/zod-validator.js';
+import {
+  createOrganizationSchema,
+  inviteMemberSchema,
+  updateMemberRoleSchema,
+  removeMemberSchema,
+  respondToInviteSchema,
+} from '../utils/validation-schemas.js';
+import {
+  unauthorized,
+  badRequest,
+  forbidden,
+  notFound,
+  conflict,
+  insufficientPermissions,
+  organizationNotFound,
+  validationError,
+} from '../utils/api-errors.js';
 
 // Middleware type for authenticated requests
 type AuthContext = {

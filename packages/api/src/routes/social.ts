@@ -1,5 +1,4 @@
 import { Hono } from 'hono';
-import { HTTPException } from 'hono/http-exception';
 import { authMiddleware, optionalAuthMiddleware } from '../auth/middleware.js';
 import {
   db,
@@ -15,6 +14,13 @@ import {
 import { eq, desc, and, sql } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import { notifyNewReport } from '../websocket/admin.js';
+import {
+  badRequest,
+  notFound,
+  conflict,
+  videoNotFound,
+  validationError,
+} from '../utils/api-errors.js';
 
 export const socialRouter = new Hono();
 
@@ -31,7 +37,7 @@ socialRouter.post('/io.exprsn.video.repost', authMiddleware, async (c) => {
   const userDid = c.get('did');
 
   if (!uri || !cid) {
-    throw new HTTPException(400, { message: 'Video URI and CID are required' });
+    throw badRequest('Video URI and CID are required');
   }
 
   // Verify video exists
@@ -40,7 +46,7 @@ socialRouter.post('/io.exprsn.video.repost', authMiddleware, async (c) => {
   });
 
   if (!video) {
-    throw new HTTPException(404, { message: 'Video not found' });
+    throw videoNotFound(uri);
   }
 
   // Check if already reposted
@@ -49,7 +55,7 @@ socialRouter.post('/io.exprsn.video.repost', authMiddleware, async (c) => {
   });
 
   if (existing) {
-    throw new HTTPException(400, { message: 'Already reposted' });
+    throw conflict('Already reposted');
   }
 
   const repostId = nanoid();
@@ -82,7 +88,7 @@ socialRouter.post('/io.exprsn.video.unrepost', authMiddleware, async (c) => {
   const userDid = c.get('did');
 
   if (!uri) {
-    throw new HTTPException(400, { message: 'Video URI is required' });
+    throw badRequest('Video URI is required');
   }
 
   const existing = await db.query.reposts.findFirst({
@@ -90,7 +96,7 @@ socialRouter.post('/io.exprsn.video.unrepost', authMiddleware, async (c) => {
   });
 
   if (!existing) {
-    throw new HTTPException(404, { message: 'Repost not found' });
+    throw notFound('Repost not found');
   }
 
   await db.delete(reposts).where(eq(reposts.uri, existing.uri));
@@ -114,7 +120,7 @@ socialRouter.get('/io.exprsn.video.getReposts', optionalAuthMiddleware, async (c
   const cursor = c.req.query('cursor');
 
   if (!did) {
-    throw new HTTPException(400, { message: 'User DID is required' });
+    throw badRequest('User DID is required');
   }
 
   const conditions = [eq(reposts.authorDid, did)];
@@ -165,7 +171,7 @@ socialRouter.post('/io.exprsn.video.bookmark', authMiddleware, async (c) => {
   const userDid = c.get('did');
 
   if (!uri || !cid) {
-    throw new HTTPException(400, { message: 'Video URI and CID are required' });
+    throw badRequest('Video URI and CID are required');
   }
 
   // Verify video exists
@@ -174,7 +180,7 @@ socialRouter.post('/io.exprsn.video.bookmark', authMiddleware, async (c) => {
   });
 
   if (!video) {
-    throw new HTTPException(404, { message: 'Video not found' });
+    throw videoNotFound(uri);
   }
 
   // Check if already bookmarked
@@ -183,7 +189,7 @@ socialRouter.post('/io.exprsn.video.bookmark', authMiddleware, async (c) => {
   });
 
   if (existing) {
-    throw new HTTPException(400, { message: 'Already bookmarked' });
+    throw conflict('Already bookmarked');
   }
 
   const bookmarkId = nanoid();
@@ -216,7 +222,7 @@ socialRouter.post('/io.exprsn.video.unbookmark', authMiddleware, async (c) => {
   const userDid = c.get('did');
 
   if (!uri) {
-    throw new HTTPException(400, { message: 'Video URI is required' });
+    throw badRequest('Video URI is required');
   }
 
   const existing = await db.query.bookmarks.findFirst({
@@ -224,7 +230,7 @@ socialRouter.post('/io.exprsn.video.unbookmark', authMiddleware, async (c) => {
   });
 
   if (!existing) {
-    throw new HTTPException(404, { message: 'Bookmark not found' });
+    throw notFound('Bookmark not found');
   }
 
   await db.delete(bookmarks).where(eq(bookmarks.uri, existing.uri));
@@ -299,11 +305,11 @@ socialRouter.post('/io.exprsn.graph.block', authMiddleware, async (c) => {
   const userDid = c.get('did');
 
   if (!did) {
-    throw new HTTPException(400, { message: 'User DID is required' });
+    throw badRequest('User DID is required');
   }
 
   if (did === userDid) {
-    throw new HTTPException(400, { message: 'Cannot block yourself' });
+    throw badRequest('Cannot block yourself');
   }
 
   // Check if already blocked
@@ -312,7 +318,7 @@ socialRouter.post('/io.exprsn.graph.block', authMiddleware, async (c) => {
   });
 
   if (existing) {
-    throw new HTTPException(400, { message: 'Already blocked' });
+    throw conflict('Already blocked');
   }
 
   const blockId = nanoid();
@@ -338,7 +344,7 @@ socialRouter.post('/io.exprsn.graph.unblock', authMiddleware, async (c) => {
   const userDid = c.get('did');
 
   if (!did) {
-    throw new HTTPException(400, { message: 'User DID is required' });
+    throw badRequest('User DID is required');
   }
 
   const existing = await db.query.blocks.findFirst({
@@ -346,7 +352,7 @@ socialRouter.post('/io.exprsn.graph.unblock', authMiddleware, async (c) => {
   });
 
   if (!existing) {
-    throw new HTTPException(404, { message: 'Block not found' });
+    throw notFound('Block not found');
   }
 
   await db.delete(blocks).where(eq(blocks.uri, existing.uri));
@@ -412,11 +418,11 @@ socialRouter.post('/io.exprsn.graph.mute', authMiddleware, async (c) => {
   const userDid = c.get('did');
 
   if (!did) {
-    throw new HTTPException(400, { message: 'User DID is required' });
+    throw badRequest('User DID is required');
   }
 
   if (did === userDid) {
-    throw new HTTPException(400, { message: 'Cannot mute yourself' });
+    throw badRequest('Cannot mute yourself');
   }
 
   // Check if already muted
@@ -425,7 +431,7 @@ socialRouter.post('/io.exprsn.graph.mute', authMiddleware, async (c) => {
   });
 
   if (existing) {
-    throw new HTTPException(400, { message: 'Already muted' });
+    throw conflict('Already muted');
   }
 
   const muteId = nanoid();
@@ -451,7 +457,7 @@ socialRouter.post('/io.exprsn.graph.unmute', authMiddleware, async (c) => {
   const userDid = c.get('did');
 
   if (!did) {
-    throw new HTTPException(400, { message: 'User DID is required' });
+    throw badRequest('User DID is required');
   }
 
   const existing = await db.query.mutes.findFirst({
@@ -459,7 +465,7 @@ socialRouter.post('/io.exprsn.graph.unmute', authMiddleware, async (c) => {
   });
 
   if (!existing) {
-    throw new HTTPException(404, { message: 'Mute not found' });
+    throw notFound('Mute not found');
   }
 
   await db.delete(mutes).where(eq(mutes.uri, existing.uri));
@@ -525,7 +531,7 @@ socialRouter.post('/io.exprsn.video.report', authMiddleware, async (c) => {
   const userDid = c.get('did');
 
   if (!uri || !reason) {
-    throw new HTTPException(400, { message: 'Content URI and reason are required' });
+    throw badRequest('Content URI and reason are required');
   }
 
   const validReasons = [
@@ -541,7 +547,10 @@ socialRouter.post('/io.exprsn.video.report', authMiddleware, async (c) => {
   ];
 
   if (!validReasons.includes(reason)) {
-    throw new HTTPException(400, { message: 'Invalid report reason' });
+    throw validationError('Invalid report reason', {
+      validReasons,
+      provided: reason,
+    });
   }
 
   const reportId = nanoid();

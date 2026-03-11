@@ -10,6 +10,8 @@ import {
 } from '../db/index.js';
 import { eq, desc, and, or, gte, sql, isNull } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
+import { zValidator, getValidatedData } from '../utils/zod-validator.js';
+import { submitAppealSchema } from '../utils/validation-schemas.js';
 
 export const userModerationRouter = new Hono();
 
@@ -181,17 +183,9 @@ userModerationRouter.get('/io.exprsn.user.moderation.getAccountStatus', authMidd
  * Submit an appeal for a sanction
  * POST /xrpc/io.exprsn.user.moderation.submitAppeal
  */
-userModerationRouter.post('/io.exprsn.user.moderation.submitAppeal', authMiddleware, async (c) => {
+userModerationRouter.post('/io.exprsn.user.moderation.submitAppeal', authMiddleware, zValidator('json', submitAppealSchema), async (c) => {
   const userDid = c.get('did');
-  const { sanctionId, reason, additionalInfo } = await c.req.json();
-
-  if (!sanctionId) {
-    throw new HTTPException(400, { message: 'sanctionId is required' });
-  }
-
-  if (!reason || reason.trim().length < 50) {
-    throw new HTTPException(400, { message: 'Appeal reason must be at least 50 characters' });
-  }
+  const { sanctionId, reason, additionalInfo} = getValidatedData<typeof submitAppealSchema._output>(c);
 
   // Get the sanction
   const sanction = await db.query.userSanctions.findFirst({

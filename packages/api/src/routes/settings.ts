@@ -16,6 +16,8 @@ import type {
   EditorSettings,
   DEFAULT_SETTINGS,
 } from '@exprsn/shared';
+import { zValidator, getValidatedData } from '../utils/zod-validator.js';
+import { updateSettingsSchema } from '../utils/validation-schemas.js';
 
 export const settingsRouter = new Hono();
 
@@ -147,26 +149,9 @@ settingsRouter.get('/io.exprsn.settings.getSettings', optionalAuthMiddleware, as
  * Update user settings (partial)
  * POST /xrpc/io.exprsn.settings.updateSettings
  */
-settingsRouter.post('/io.exprsn.settings.updateSettings', authMiddleware, async (c) => {
+settingsRouter.post('/io.exprsn.settings.updateSettings', authMiddleware, zValidator('json', updateSettingsSchema), async (c) => {
   const userDid = c.get('did');
-  const update = await c.req.json<UserSettingsUpdate>();
-
-  // Validate themeId if provided
-  const validThemes = ['ocean', 'forest', 'sunset', 'lavender', 'slate'];
-  if (update.themeId && !validThemes.includes(update.themeId)) {
-    throw new HTTPException(400, { message: `Invalid theme: ${update.themeId}` });
-  }
-
-  // Validate colorMode if provided
-  const validColorModes = ['light', 'dark', 'system'];
-  if (update.colorMode && !validColorModes.includes(update.colorMode)) {
-    throw new HTTPException(400, { message: `Invalid color mode: ${update.colorMode}` });
-  }
-
-  const validFontPreferences: FontPreference[] = ['inter', 'open-dyslexic'];
-  if (update.accessibility?.fontPreference && !validFontPreferences.includes(update.accessibility.fontPreference)) {
-    throw new HTTPException(400, { message: `Invalid font preference: ${update.accessibility.fontPreference}` });
-  }
+  const update = getValidatedData<typeof updateSettingsSchema._output>(c);
 
   // Check if user has existing settings
   const existing = await db.query.userSettings.findFirst({

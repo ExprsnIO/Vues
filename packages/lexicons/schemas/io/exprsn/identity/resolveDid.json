@@ -1,0 +1,171 @@
+{
+  "lexicon": 1,
+  "id": "io.exprsn.identity.resolveDid",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Resolve a did:exprsn to its DID document with certificate chain",
+      "parameters": {
+        "type": "params",
+        "required": ["did"],
+        "properties": {
+          "did": {
+            "type": "string",
+            "format": "did",
+            "description": "The did:exprsn to resolve"
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["did", "document"],
+          "properties": {
+            "did": {
+              "type": "string",
+              "format": "did",
+              "description": "The resolved DID"
+            },
+            "document": {
+              "type": "ref",
+              "ref": "#didDocument",
+              "description": "The DID document"
+            },
+            "handle": {
+              "type": "string",
+              "description": "Associated handle (if any)"
+            },
+            "certificateChain": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "X.509 certificate chain in PEM format"
+            },
+            "status": {
+              "type": "string",
+              "knownValues": ["active", "revoked", "deactivated"],
+              "description": "DID status"
+            }
+          }
+        }
+      },
+      "errors": [
+        {
+          "name": "NotFound",
+          "description": "DID not found"
+        },
+        {
+          "name": "InvalidDid",
+          "description": "Invalid DID format"
+        }
+      ]
+    },
+    "didDocument": {
+      "type": "object",
+      "description": "W3C DID Document",
+      "required": ["@context", "id"],
+      "properties": {
+        "@context": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "JSON-LD context"
+        },
+        "id": {
+          "type": "string",
+          "format": "did",
+          "description": "The DID"
+        },
+        "alsoKnownAs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Alternative identifiers"
+        },
+        "verificationMethod": {
+          "type": "array",
+          "items": {
+            "type": "ref",
+            "ref": "#verificationMethod"
+          },
+          "description": "Verification methods"
+        },
+        "authentication": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Authentication methods"
+        },
+        "assertionMethod": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Assertion methods"
+        },
+        "service": {
+          "type": "array",
+          "items": {
+            "type": "ref",
+            "ref": "#service"
+          },
+          "description": "Service endpoints"
+        }
+      }
+    },
+    "verificationMethod": {
+      "type": "object",
+      "required": ["id", "type", "controller"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Verification method ID"
+        },
+        "type": {
+          "type": "string",
+          "description": "Verification method type"
+        },
+        "controller": {
+          "type": "string",
+          "format": "did",
+          "description": "Controller DID"
+        },
+        "x509CertificateChain": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "X.509 certificate chain"
+        },
+        "publicKeyMultibase": {
+          "type": "string",
+          "description": "Public key in multibase format"
+        }
+      }
+    },
+    "service": {
+      "type": "object",
+      "required": ["id", "type", "serviceEndpoint"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Service ID"
+        },
+        "type": {
+          "type": "string",
+          "description": "Service type"
+        },
+        "serviceEndpoint": {
+          "type": "string",
+          "format": "uri",
+          "description": "Service endpoint URL"
+        }
+      }
+    }
+  }
+}

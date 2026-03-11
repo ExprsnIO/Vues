@@ -22,6 +22,7 @@ import {
 } from '../auth/middleware.js';
 import { PaymentGatewayFactory } from '../services/payments/PaymentGatewayFactory.js';
 import type { PaymentProvider } from '@exprsn/shared/types';
+import { encryptCredentials, decryptCredentials, isEncrypted } from '../utils/encryption.js';
 
 export const adminPaymentsRouter = new Hono();
 
@@ -56,13 +57,41 @@ function sanitizeCredentials(credentials: Record<string, unknown>) {
   // Remove sensitive data from credentials for audit logs
   const sanitized: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(credentials)) {
-    if (typeof value === 'string' && value.length > 8) {
-      sanitized[key] = `${value.substring(0, 4)}...${value.substring(value.length - 4)}`;
+    if (typeof value === 'string') {
+      // If encrypted, just show [ENCRYPTED]
+      if (value.includes(':') && value.split(':').length === 5) {
+        sanitized[key] = '[ENCRYPTED]';
+      } else if (value.length > 8) {
+        sanitized[key] = `${value.substring(0, 4)}...${value.substring(value.length - 4)}`;
+      } else {
+        sanitized[key] = '[REDACTED]';
+      }
     } else {
       sanitized[key] = '[REDACTED]';
     }
   }
   return sanitized;
+}
+
+// Helper to safely decrypt credentials - handle both encrypted and unencrypted data
+function safeDecryptCredentials(encrypted: unknown): Record<string, string> {
+  if (!encrypted || typeof encrypted !== 'object') {
+    return {};
+  }
+
+  const creds = encrypted as Record<string, string>;
+
+  // Check if already encrypted
+  if (!isEncrypted(creds)) {
+    return creds;
+  }
+
+  try {
+    return decryptCredentials(creds);
+  } catch (error) {
+    console.error('Failed to decrypt credentials:', error);
+    throw new Error('Failed to decrypt payment credentials');
+  }
 }
 
 // ============================================
@@ -292,7 +321,7 @@ adminPaymentsRouter.post(
       userDid: null, // Admin configs are not user-specific
       provider: data.provider,
       providerAccountId: data.providerAccountId || null,
-      credentials: data.credentials,
+      credentials: encryptCredentials(data.credentials),
       testMode: data.testMode,
       isActive: true,
       createdAt: new Date(),
@@ -377,7 +406,7 @@ adminPaymentsRouter.put(
       updatedAt: new Date(),
     };
 
-    if (data.credentials) updates.credentials = data.credentials;
+    if (data.credentials) updates.credentials = encryptCredentials(data.credentials);
     if (data.testMode !== undefined) updates.testMode = data.testMode;
     if (data.isActive !== undefined) updates.isActive = data.isActive;
     if (data.providerAccountId !== undefined) updates.providerAccountId = data.providerAccountId;
@@ -507,9 +536,10 @@ adminPaymentsRouter.post(
     }
 
     try {
+      const credentials = safeDecryptCredentials(config.credentials);
       const gateway = PaymentGatewayFactory.create(
         config.provider as PaymentProvider,
-        config.credentials as Record<string, string>,
+        credentials,
         config.testMode
       );
 

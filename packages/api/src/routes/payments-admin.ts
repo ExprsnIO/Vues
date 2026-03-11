@@ -6,11 +6,33 @@ import { paymentConfigs, paymentTransactions, payoutRequests, users, creatorEarn
 import { adminAuthMiddleware, requirePermission, ADMIN_PERMISSIONS } from '../auth/middleware.js';
 import { PaymentGatewayFactory } from '../services/payments/PaymentGatewayFactory.js';
 import type { PaymentProvider } from '@exprsn/shared/types';
+import { encryptCredentials, decryptCredentials, isEncrypted } from '../utils/encryption.js';
 
 export const paymentsAdminRouter = new Hono();
 
 // Apply admin auth to all routes
 paymentsAdminRouter.use('*', adminAuthMiddleware);
+
+// Helper to safely decrypt credentials - handle both encrypted and unencrypted data
+function safeDecryptCredentials(encrypted: unknown): Record<string, string> {
+  if (!encrypted || typeof encrypted !== 'object') {
+    return {};
+  }
+
+  const creds = encrypted as Record<string, string>;
+
+  // Check if already encrypted
+  if (!isEncrypted(creds)) {
+    return creds;
+  }
+
+  try {
+    return decryptCredentials(creds);
+  } catch (error) {
+    console.error('Failed to decrypt credentials:', error);
+    throw new Error('Failed to decrypt payment credentials');
+  }
+}
 
 // ============================================
 // Dashboard & Stats
@@ -237,10 +259,11 @@ paymentsAdminRouter.post(
 
     if (transaction.providerTransactionId) {
       try {
+        const credentials = safeDecryptCredentials(config.credentials);
         const gateway = PaymentGatewayFactory.getOrCreate(
           config.id,
           config.provider as PaymentProvider,
-          config.credentials as Record<string, string>,
+          credentials,
           config.testMode
         );
 
@@ -491,7 +514,7 @@ paymentsAdminRouter.post(
       // Update existing
       const updates: Record<string, unknown> = { updatedAt: now };
       if (body.providerAccountId !== undefined) updates.providerAccountId = body.providerAccountId;
-      if (body.credentials !== undefined) updates.credentials = body.credentials;
+      if (body.credentials !== undefined) updates.credentials = encryptCredentials(body.credentials);
       if (body.testMode !== undefined) updates.testMode = body.testMode;
       if (body.isActive !== undefined) updates.isActive = body.isActive;
 
@@ -507,7 +530,7 @@ paymentsAdminRouter.post(
         organizationId: body.organizationId,
         userDid: body.userDid,
         providerAccountId: body.providerAccountId,
-        credentials: body.credentials,
+        credentials: body.credentials ? encryptCredentials(body.credentials) : undefined,
         testMode: body.testMode ?? true,
         isActive: body.isActive ?? false,
         createdAt: now,

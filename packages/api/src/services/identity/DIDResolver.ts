@@ -308,13 +308,15 @@ export class DIDResolver {
   }
 
   /**
-   * Resolve from authoritative source (PLC or did:web)
+   * Resolve from authoritative source (PLC, did:web, or did:exprsn)
    */
   private async resolveFromSource(did: string): Promise<ResolvedIdentity | null> {
     if (did.startsWith('did:plc:')) {
       return this.resolveFromPLC(did);
     } else if (did.startsWith('did:web:')) {
       return this.resolveFromWeb(did);
+    } else if (did.startsWith('did:exprsn:')) {
+      return this.resolveFromExprsn(did);
     }
     return null;
   }
@@ -376,6 +378,29 @@ export class DIDResolver {
       return this.parseDocument(did, doc, 'web');
     } catch (error) {
       console.error(`[DIDResolver] Failed to resolve ${did} from web:`, error);
+      return null;
+    }
+  }
+
+  /**
+   * Resolve from did:exprsn (certificate-backed DID)
+   */
+  private async resolveFromExprsn(did: string): Promise<ResolvedIdentity | null> {
+    try {
+      // Import ExprsnDidService dynamically to avoid circular dependency
+      const { ExprsnDidService } = await import('../did/exprsn.js');
+
+      // Get DID document from exprsn service
+      const document = await ExprsnDidService.getDidDocument(did);
+
+      if (!document) {
+        return null;
+      }
+
+      // Parse the document following same pattern as other methods
+      return this.parseDocument(did, document as unknown as DIDDocument, 'web'); // Use 'web' as source type
+    } catch (error) {
+      console.error(`[DIDResolver] Failed to resolve ${did} from exprsn:`, error);
       return null;
     }
   }

@@ -1,0 +1,66 @@
+{
+  "lexicon": 1,
+  "id": "io.exprsn.identity.revokeDid",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Revoke a did:exprsn by revoking its underlying certificate (admin only)",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["did", "reason"],
+          "properties": {
+            "did": {
+              "type": "string",
+              "format": "did",
+              "description": "The did:exprsn to revoke"
+            },
+            "reason": {
+              "type": "string",
+              "description": "Reason for revocation",
+              "maxLength": 500
+            }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["success", "did", "revokedAt"],
+          "properties": {
+            "success": {
+              "type": "boolean"
+            },
+            "did": {
+              "type": "string",
+              "format": "did"
+            },
+            "revokedAt": {
+              "type": "string",
+              "format": "datetime"
+            },
+            "reason": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "errors": [
+        {
+          "name": "NotFound",
+          "description": "DID not found"
+        },
+        {
+          "name": "AlreadyRevoked",
+          "description": "DID is already revoked"
+        },
+        {
+          "name": "Unauthorized",
+          "description": "Insufficient permissions"
+        }
+      ]
+    }
+  }
+}

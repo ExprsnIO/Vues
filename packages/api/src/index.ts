@@ -45,6 +45,7 @@ import { certAuthRouter } from './routes/auth-certificate.js';
 import { certExportRouter } from './routes/certificates-export.js';
 import { pinningRouter } from './routes/pinning.js';
 import { identityRouter } from './routes/identity.js';
+import { identityExprsnRouter } from './routes/identity-exprsn.js';
 import { registryRouter, initializeServiceRegistry } from './routes/registry.js';
 import { federationRouter } from './routes/federation.js';
 import { plcRouter } from './routes/plc.js';
@@ -90,6 +91,7 @@ import { Redis } from 'ioredis';
 import { RelayService, CommitEvent as RelayCommitEvent } from '@exprsn/relay';
 import { initializeRenderService, S3StorageProvider } from './services/studio/RenderService.js';
 import { setRelayService } from './services/relay/index.js';
+import { globalErrorHandler, notFoundHandler } from './middleware/error-handler.js';
 
 // Global relay service reference for use by PDS
 let relayService: RelayService | null = null;
@@ -278,6 +280,7 @@ app.route('/xrpc', effectsRouter);
 app.route('/xrpc', configRoutes);
 // Identity, registry, federation, sync, and PLC routes
 app.route('/xrpc', identityRouter);
+app.route('/xrpc', identityExprsnRouter); // did:exprsn identity management
 app.route('/xrpc', registryRouter);
 app.route('/xrpc', federationRouter);
 app.route('/', syncRouter); // Sync routes for federation
@@ -324,28 +327,11 @@ app.route('/.well-known', wellKnownRouter);
 const ocspRouter = createOCSPRouter();
 app.route('/ocsp', ocspRouter);
 
-// Error handling
-app.onError((err, c) => {
-  console.error('Server error:', err);
-  return c.json(
-    {
-      error: 'InternalServerError',
-      message: process.env.NODE_ENV === 'development' ? err.message : 'An error occurred',
-    },
-    500
-  );
-});
+// Global error handling
+app.onError(globalErrorHandler);
 
 // 404 handler
-app.notFound((c) => {
-  return c.json(
-    {
-      error: 'NotFound',
-      message: `Route ${c.req.method} ${c.req.path} not found`,
-    },
-    404
-  );
-});
+app.notFound(notFoundHandler);
 
 /**
  * Create onCommit callback that bridges PDS commits to relay

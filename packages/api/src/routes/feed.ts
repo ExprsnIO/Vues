@@ -23,65 +23,109 @@ const forYouAlgorithm = createForYouAlgorithm(db as PostgresJsDatabase<typeof sc
 
 export const feedRouter = new Hono();
 
-// Helper to build video view
-async function buildVideoView(video: typeof videos.$inferSelect, viewerDid?: string) {
-  const author = await db.query.users.findFirst({
-    where: eq(users.did, video.authorDid),
-  });
+// Helper to build video views in batch (optimized to prevent N+1 queries)
+async function buildVideoViewsBatch(
+  videos: (typeof videos.$inferSelect)[],
+  viewerDid?: string
+) {
+  if (videos.length === 0) return [];
 
-  let viewer = undefined;
+  const videoUris = videos.map((v) => v.uri);
+  const authorDids = [...new Set(videos.map((v) => v.authorDid))];
+
+  // Batch fetch all authors in a single query
+  const authorsResult = await db.query.users.findMany({
+    where: inArray(users.did, authorDids),
+    columns: {
+      did: true,
+      handle: true,
+      displayName: true,
+      avatar: true,
+      verified: true,
+    },
+  });
+  const authorMap = new Map(authorsResult.map((a) => [a.did, a]));
+
+  // Batch fetch viewer engagement if authenticated
+  let likesMap = new Map<string, typeof likes.$inferSelect>();
+  let repostsMap = new Map<string, typeof reposts.$inferSelect>();
+  let bookmarksMap = new Map<string, typeof bookmarks.$inferSelect>();
+
   if (viewerDid) {
-    const [likeRecord, repostRecord, bookmarkRecord] = await Promise.all([
-      db.query.likes.findFirst({
-        where: and(eq(likes.videoUri, video.uri), eq(likes.authorDid, viewerDid)),
+    const [likesResult, repostsResult, bookmarksResult] = await Promise.all([
+      db.query.likes.findMany({
+        where: and(
+          eq(likes.authorDid, viewerDid),
+          inArray(likes.videoUri, videoUris)
+        ),
       }),
-      db.query.reposts.findFirst({
-        where: and(eq(reposts.videoUri, video.uri), eq(reposts.authorDid, viewerDid)),
+      db.query.reposts.findMany({
+        where: and(
+          eq(reposts.authorDid, viewerDid),
+          inArray(reposts.videoUri, videoUris)
+        ),
       }),
-      db.query.bookmarks.findFirst({
-        where: and(eq(bookmarks.videoUri, video.uri), eq(bookmarks.authorDid, viewerDid)),
+      db.query.bookmarks.findMany({
+        where: and(
+          eq(bookmarks.authorDid, viewerDid),
+          inArray(bookmarks.videoUri, videoUris)
+        ),
       }),
     ]);
 
-    viewer = {
-      liked: !!likeRecord,
-      likeUri: likeRecord?.uri,
-      reposted: !!repostRecord,
-      repostUri: repostRecord?.uri,
-      bookmarked: !!bookmarkRecord,
-      bookmarkUri: bookmarkRecord?.uri,
-    };
+    likesMap = new Map(likesResult.map((l) => [l.videoUri, l]));
+    repostsMap = new Map(repostsResult.map((r) => [r.videoUri, r]));
+    bookmarksMap = new Map(bookmarksResult.map((b) => [b.videoUri, b]));
   }
 
-  return {
-    uri: video.uri,
-    cid: video.cid,
-    author: {
-      did: author?.did || video.authorDid,
-      handle: author?.handle || 'unknown',
-      displayName: author?.displayName,
-      avatar: author?.avatar,
-      verified: author?.verified,
-    },
-    video: {
-      thumbnail: video.thumbnailUrl,
-      aspectRatio: video.aspectRatio,
-      duration: video.duration,
-      cdnUrl: video.cdnUrl,
-      hlsPlaylist: video.hlsPlaylist,
-    },
-    caption: video.caption,
-    tags: video.tags,
-    viewCount: video.viewCount,
-    likeCount: video.likeCount,
-    commentCount: video.commentCount,
-    shareCount: video.shareCount,
-    repostCount: video.repostCount,
-    bookmarkCount: video.bookmarkCount,
-    createdAt: video.createdAt.toISOString(),
-    indexedAt: video.indexedAt.toISOString(),
-    viewer,
-  };
+  // Build video views from pre-fetched data
+  return videos.map((video) => {
+    const author = authorMap.get(video.authorDid);
+    const likeRecord = likesMap.get(video.uri);
+    const repostRecord = repostsMap.get(video.uri);
+    const bookmarkRecord = bookmarksMap.get(video.uri);
+
+    const viewer = viewerDid
+      ? {
+          liked: !!likeRecord,
+          likeUri: likeRecord?.uri,
+          reposted: !!repostRecord,
+          repostUri: repostRecord?.uri,
+          bookmarked: !!bookmarkRecord,
+          bookmarkUri: bookmarkRecord?.uri,
+        }
+      : undefined;
+
+    return {
+      uri: video.uri,
+      cid: video.cid,
+      author: {
+        did: author?.did || video.authorDid,
+        handle: author?.handle || 'unknown',
+        displayName: author?.displayName,
+        avatar: author?.avatar,
+        verified: author?.verified,
+      },
+      video: {
+        thumbnail: video.thumbnailUrl,
+        aspectRatio: video.aspectRatio,
+        duration: video.duration,
+        cdnUrl: video.cdnUrl,
+        hlsPlaylist: video.hlsPlaylist,
+      },
+      caption: video.caption,
+      tags: video.tags,
+      viewCount: video.viewCount,
+      likeCount: video.likeCount,
+      commentCount: video.commentCount,
+      shareCount: video.shareCount,
+      repostCount: video.repostCount,
+      bookmarkCount: video.bookmarkCount,
+      createdAt: video.createdAt.toISOString(),
+      indexedAt: video.indexedAt.toISOString(),
+      viewer,
+    };
+  });
 }
 
 // =============================================================================
@@ -144,12 +188,9 @@ feedRouter.get('/io.exprsn.feed.getTimeline', authMiddleware, async (c) => {
     .orderBy(desc(videos.createdAt))
     .limit(limit);
 
-  // Build feed with video views
-  const feed = await Promise.all(
-    results.map(async (video) => ({
-      post: await buildVideoView(video, userDid),
-    }))
-  );
+  // Build feed with video views (batch optimized)
+  const videoViews = await buildVideoViewsBatch(results, userDid);
+  const feed = videoViews.map((post) => ({ post }));
 
   const lastResult = results[results.length - 1];
   const nextCursor =
@@ -208,9 +249,9 @@ feedRouter.get('/io.exprsn.feed.getActorLikes', optionalAuthMiddleware, async (c
     .orderBy(desc(likes.createdAt))
     .limit(limit);
 
-  const feed = await Promise.all(
-    results.map(async (r) => await buildVideoView(r.video, viewerDid))
-  );
+  // Extract videos from results and batch process
+  const videosToProcess = results.map((r) => r.video);
+  const feed = await buildVideoViewsBatch(videosToProcess, viewerDid);
 
   const lastLikeResult = results[results.length - 1];
   const nextCursor =
@@ -291,9 +332,9 @@ feedRouter.get('/io.exprsn.feed.getSuggestedFeed', optionalAuthMiddleware, async
       )
       .limit(limit);
 
-    const feed = await Promise.all(
-      results.map(async (r) => await buildVideoView(r.video, viewerDid))
-    );
+    // Extract videos and batch process
+    const videosToProcess = results.map((r) => r.video);
+    const feed = await buildVideoViewsBatch(videosToProcess, viewerDid);
 
     const lastSuggestedResult = results[results.length - 1];
     const nextCursor =
@@ -417,22 +458,19 @@ feedRouter.get('/io.exprsn.feed.getActorFeed', optionalAuthMiddleware, async (c)
   // Apply limit
   const limitedItems = feedItems.slice(0, limit);
 
-  // Build feed
-  const feed = await Promise.all(
-    limitedItems.map(async (item) => {
-      const post = await buildVideoView(item.video, viewerDid);
-      return {
-        post,
-        reason: item.isRepost
-          ? {
-              $type: 'io.exprsn.feed.getTimeline#reasonRepost',
-              by: item.repostBy,
-              indexedAt: item.timestamp.toISOString(),
-            }
-          : undefined,
-      };
-    })
-  );
+  // Build feed (batch optimized)
+  const videosToProcess = limitedItems.map((item) => item.video);
+  const videoViews = await buildVideoViewsBatch(videosToProcess, viewerDid);
+  const feed = limitedItems.map((item, index) => ({
+    post: videoViews[index],
+    reason: item.isRepost
+      ? {
+          $type: 'io.exprsn.feed.getTimeline#reasonRepost',
+          by: item.repostBy,
+          indexedAt: item.timestamp.toISOString(),
+        }
+      : undefined,
+  }));
 
   const lastFeedItem = limitedItems[limitedItems.length - 1];
   const nextCursor =
@@ -514,21 +552,18 @@ feedRouter.get('/io.exprsn.feed.getFollowingBlend', authMiddleware, async (c) =>
   const followingUris = new Set(followingVideos.map((v) => v.uri));
   const discoveryItems = fypResult.items.filter((i) => !followingUris.has(i.video.uri));
 
-  // Build following video views
-  const followingFeed = await Promise.all(
-    followingVideos.map(async (video) => ({
-      ...(await buildVideoView(video, userDid)),
-      _source: 'following' as const,
-    }))
-  );
+  // Build following video views (batch optimized)
+  const followingViews = await buildVideoViewsBatch(followingVideos, userDid);
+  const followingFeed = followingViews.map((view) => ({
+    ...view,
+    _source: 'following' as const,
+  }));
 
   // Build discovery video views with same shape as following
-  const discoveryFeed = await Promise.all(
-    discoveryItems.slice(0, discoveryLimit).map(async (item) => ({
-      ...item.video,
-      _source: 'discovery' as const,
-    }))
-  );
+  const discoveryFeed = discoveryItems.slice(0, discoveryLimit).map((item) => ({
+    ...item.video,
+    _source: 'discovery' as const,
+  }));
 
   // Interleave: every 4th video is discovery
   type FeedItem = { _source: 'following' | 'discovery'; [key: string]: unknown };
@@ -615,9 +650,9 @@ feedRouter.get('/io.exprsn.feed.getExplore', optionalAuthMiddleware, async (c) =
     }
   }
 
-  const feed = await Promise.all(
-    selectedVideos.map(async (r) => await buildVideoView(r.video, viewerDid))
-  );
+  // Extract videos and batch process
+  const videosToProcess = selectedVideos.map((r) => r.video);
+  const feed = await buildVideoViewsBatch(videosToProcess, viewerDid);
 
   return c.json({
     feed,
@@ -686,47 +721,65 @@ feedRouter.get('/io.exprsn.feed.getChallenges', optionalAuthMiddleware, async (c
     .limit(limit)
     .offset(offset);
 
-  // For each challenge, get top 3 entries
-  const challengeFeeds = await Promise.all(
-    activeChallenges.map(async (challenge) => {
-      const topEntries = await db
-        .select({
-          entry: schema.challengeEntries,
-          video: videos,
-        })
-        .from(schema.challengeEntries)
-        .innerJoin(videos, eq(schema.challengeEntries.videoUri, videos.uri))
-        .where(eq(schema.challengeEntries.challengeId, challenge.id))
-        .orderBy(desc(schema.challengeEntries.engagementScore))
-        .limit(3);
-
-      const entries = await Promise.all(
-        topEntries.map(async (e) => ({
-          entry: {
-            id: e.entry.id,
-            score: e.entry.engagementScore,
-            rank: e.entry.rank,
-          },
-          video: await buildVideoView(e.video, viewerDid),
-        }))
-      );
-
-      return {
-        challenge: {
-          id: challenge.id,
-          name: challenge.name,
-          description: challenge.description,
-          hashtag: challenge.hashtag,
-          bannerUrl: challenge.bannerImageUrl,
-          participantCount: challenge.participantCount,
-          startDate: challenge.startAt.toISOString(),
-          endDate: challenge.endAt.toISOString(),
-          prizes: challenge.prizes,
-        },
-        entries,
-      };
+  // Batch fetch all challenge entries to avoid N+1
+  const challengeIds = activeChallenges.map((c) => c.id);
+  const allEntriesQuery = await db
+    .select({
+      entry: schema.challengeEntries,
+      video: videos,
     })
+    .from(schema.challengeEntries)
+    .innerJoin(videos, eq(schema.challengeEntries.videoUri, videos.uri))
+    .where(inArray(schema.challengeEntries.challengeId, challengeIds))
+    .orderBy(desc(schema.challengeEntries.engagementScore));
+
+  // Group entries by challenge and take top 3 per challenge
+  const entriesByChallenge = new Map<string, typeof allEntriesQuery>();
+  for (const entry of allEntriesQuery) {
+    const challengeId = entry.entry.challengeId;
+    if (!entriesByChallenge.has(challengeId)) {
+      entriesByChallenge.set(challengeId, []);
+    }
+    const challengeEntries = entriesByChallenge.get(challengeId)!;
+    if (challengeEntries.length < 3) {
+      challengeEntries.push(entry);
+    }
+  }
+
+  // Extract all videos and batch process them
+  const allVideosForChallenges = allEntriesQuery.map((e) => e.video);
+  const allVideoViews = await buildVideoViewsBatch(allVideosForChallenges, viewerDid);
+  const videoViewMap = new Map(
+    allVideosForChallenges.map((v, idx) => [v.uri, allVideoViews[idx]])
   );
+
+  // Build challenge feeds from pre-fetched data
+  const challengeFeeds = activeChallenges.map((challenge) => {
+    const topEntries = entriesByChallenge.get(challenge.id) || [];
+    const entries = topEntries.map((e) => ({
+      entry: {
+        id: e.entry.id,
+        score: e.entry.engagementScore,
+        rank: e.entry.rank,
+      },
+      video: videoViewMap.get(e.video.uri)!,
+    }));
+
+    return {
+      challenge: {
+        id: challenge.id,
+        name: challenge.name,
+        description: challenge.description,
+        hashtag: challenge.hashtag,
+        bannerUrl: challenge.bannerImageUrl,
+        participantCount: challenge.participantCount,
+        startDate: challenge.startAt.toISOString(),
+        endDate: challenge.endAt.toISOString(),
+        prizes: challenge.prizes,
+      },
+      entries,
+    };
+  });
 
   return c.json({
     challenges: challengeFeeds,

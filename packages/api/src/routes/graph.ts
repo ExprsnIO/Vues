@@ -1,10 +1,10 @@
 import { Hono } from 'hono';
-import { HTTPException } from 'hono/http-exception';
 import { authMiddleware, optionalAuthMiddleware } from '../auth/middleware.js';
 import { db, users, follows, lists, listItems } from '../db/index.js';
 import { eq, desc, and, sql, or } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import { getNotificationService } from '../services/notifications/index.js';
+import { badRequest, notFound, conflict, forbidden, userNotFound, validationError } from '../utils/api-errors.js';
 
 export const graphRouter = new Hono();
 
@@ -21,11 +21,11 @@ graphRouter.post('/io.exprsn.graph.follow', authMiddleware, async (c) => {
   const userDid = c.get('did');
 
   if (!did) {
-    throw new HTTPException(400, { message: 'User DID is required' });
+    throw badRequest('User DID is required');
   }
 
   if (did === userDid) {
-    throw new HTTPException(400, { message: 'Cannot follow yourself' });
+    throw badRequest('Cannot follow yourself');
   }
 
   // Check if target user exists
@@ -34,7 +34,7 @@ graphRouter.post('/io.exprsn.graph.follow', authMiddleware, async (c) => {
   });
 
   if (!targetUser) {
-    throw new HTTPException(404, { message: 'User not found' });
+    throw userNotFound(did);
   }
 
   // Check if already following
@@ -43,7 +43,7 @@ graphRouter.post('/io.exprsn.graph.follow', authMiddleware, async (c) => {
   });
 
   if (existing) {
-    throw new HTTPException(400, { message: 'Already following' });
+    throw conflict('Already following');
   }
 
   const followId = nanoid();
@@ -94,7 +94,7 @@ graphRouter.post('/io.exprsn.graph.unfollow', authMiddleware, async (c) => {
   const userDid = c.get('did');
 
   if (!did) {
-    throw new HTTPException(400, { message: 'User DID is required' });
+    throw badRequest('User DID is required');
   }
 
   const existing = await db.query.follows.findFirst({
@@ -102,7 +102,7 @@ graphRouter.post('/io.exprsn.graph.unfollow', authMiddleware, async (c) => {
   });
 
   if (!existing) {
-    throw new HTTPException(404, { message: 'Follow not found' });
+    throw notFound('Follow not found');
   }
 
   await db.delete(follows).where(eq(follows.uri, existing.uri));
@@ -132,7 +132,7 @@ graphRouter.get('/io.exprsn.graph.getFollowers', optionalAuthMiddleware, async (
   const viewerDid = c.get('did');
 
   if (!did) {
-    throw new HTTPException(400, { message: 'User DID is required' });
+    throw badRequest('User DID is required');
   }
 
   // Verify user exists
@@ -141,7 +141,7 @@ graphRouter.get('/io.exprsn.graph.getFollowers', optionalAuthMiddleware, async (
   });
 
   if (!targetUser) {
-    throw new HTTPException(404, { message: 'User not found' });
+    throw userNotFound(did);
   }
 
   const conditions = [eq(follows.followeeDid, did)];
@@ -220,7 +220,7 @@ graphRouter.get('/io.exprsn.graph.getFollowing', optionalAuthMiddleware, async (
   const viewerDid = c.get('did');
 
   if (!did) {
-    throw new HTTPException(400, { message: 'User DID is required' });
+    throw badRequest('User DID is required');
   }
 
   // Verify user exists
@@ -229,7 +229,7 @@ graphRouter.get('/io.exprsn.graph.getFollowing', optionalAuthMiddleware, async (
   });
 
   if (!targetUser) {
-    throw new HTTPException(404, { message: 'User not found' });
+    throw userNotFound(did);
   }
 
   const followingConditions = [eq(follows.followerDid, did)];
@@ -310,16 +310,16 @@ graphRouter.post('/io.exprsn.graph.createList', authMiddleware, async (c) => {
   const userDid = c.get('did');
 
   if (!name) {
-    throw new HTTPException(400, { message: 'List name is required' });
+    throw badRequest('List name is required');
   }
 
   if (!purpose) {
-    throw new HTTPException(400, { message: 'List purpose is required' });
+    throw badRequest('List purpose is required');
   }
 
   const validPurposes = ['curatelist', 'modlist', 'referencelist'];
   if (!validPurposes.includes(purpose)) {
-    throw new HTTPException(400, { message: `Invalid purpose. Must be one of: ${validPurposes.join(', ')}` });
+    throw validationError(`Invalid purpose. Must be one of: ${validPurposes.join(', ')}`);
   }
 
   const listId = nanoid();
@@ -348,7 +348,7 @@ graphRouter.post('/io.exprsn.graph.updateList', authMiddleware, async (c) => {
   const userDid = c.get('did');
 
   if (!uri) {
-    throw new HTTPException(400, { message: 'List URI is required' });
+    throw badRequest('List URI is required');
   }
 
   const list = await db.query.lists.findFirst({
@@ -356,11 +356,11 @@ graphRouter.post('/io.exprsn.graph.updateList', authMiddleware, async (c) => {
   });
 
   if (!list) {
-    throw new HTTPException(404, { message: 'List not found' });
+    throw notFound('List not found');
   }
 
   if (list.authorDid !== userDid) {
-    throw new HTTPException(403, { message: 'Not authorized to update this list' });
+    throw forbidden('Not authorized to update this list');
   }
 
   await db
@@ -385,7 +385,7 @@ graphRouter.post('/io.exprsn.graph.deleteList', authMiddleware, async (c) => {
   const userDid = c.get('did');
 
   if (!uri) {
-    throw new HTTPException(400, { message: 'List URI is required' });
+    throw badRequest('List URI is required');
   }
 
   const list = await db.query.lists.findFirst({
@@ -393,11 +393,11 @@ graphRouter.post('/io.exprsn.graph.deleteList', authMiddleware, async (c) => {
   });
 
   if (!list) {
-    throw new HTTPException(404, { message: 'List not found' });
+    throw notFound('List not found');
   }
 
   if (list.authorDid !== userDid) {
-    throw new HTTPException(403, { message: 'Not authorized to delete this list' });
+    throw forbidden('Not authorized to delete this list');
   }
 
   // Delete list (cascade will delete items)
@@ -416,7 +416,7 @@ graphRouter.get('/io.exprsn.graph.getLists', optionalAuthMiddleware, async (c) =
   const cursor = c.req.query('cursor');
 
   if (!did) {
-    throw new HTTPException(400, { message: 'User DID is required' });
+    throw badRequest('User DID is required');
   }
 
   // Verify user exists
@@ -425,7 +425,7 @@ graphRouter.get('/io.exprsn.graph.getLists', optionalAuthMiddleware, async (c) =
   });
 
   if (!user) {
-    throw new HTTPException(404, { message: 'User not found' });
+    throw userNotFound(did);
   }
 
   const listConditions = [eq(lists.authorDid, did)];
@@ -476,7 +476,7 @@ graphRouter.get('/io.exprsn.graph.getList', optionalAuthMiddleware, async (c) =>
   const cursor = c.req.query('cursor');
 
   if (!uri) {
-    throw new HTTPException(400, { message: 'List URI is required' });
+    throw badRequest('List URI is required');
   }
 
   const list = await db.query.lists.findFirst({
@@ -484,7 +484,7 @@ graphRouter.get('/io.exprsn.graph.getList', optionalAuthMiddleware, async (c) =>
   });
 
   if (!list) {
-    throw new HTTPException(404, { message: 'List not found' });
+    throw notFound('List not found');
   }
 
   // Get list creator
@@ -559,7 +559,7 @@ graphRouter.post('/io.exprsn.graph.addListItem', authMiddleware, async (c) => {
   const userDid = c.get('did');
 
   if (!listUri || !subjectDid) {
-    throw new HTTPException(400, { message: 'List URI and subject DID are required' });
+    throw badRequest('List URI and subject DID are required');
   }
 
   // Verify list exists and user owns it
@@ -568,11 +568,11 @@ graphRouter.post('/io.exprsn.graph.addListItem', authMiddleware, async (c) => {
   });
 
   if (!list) {
-    throw new HTTPException(404, { message: 'List not found' });
+    throw notFound('List not found');
   }
 
   if (list.authorDid !== userDid) {
-    throw new HTTPException(403, { message: 'Not authorized to modify this list' });
+    throw forbidden('Not authorized to modify this list');
   }
 
   // Verify subject user exists
@@ -581,7 +581,7 @@ graphRouter.post('/io.exprsn.graph.addListItem', authMiddleware, async (c) => {
   });
 
   if (!subjectUser) {
-    throw new HTTPException(404, { message: 'User not found' });
+    throw userNotFound(did);
   }
 
   // Check if already in list
@@ -590,7 +590,7 @@ graphRouter.post('/io.exprsn.graph.addListItem', authMiddleware, async (c) => {
   });
 
   if (existing) {
-    throw new HTTPException(400, { message: 'User already in list' });
+    throw conflict('User already in list');
   }
 
   const itemId = nanoid();
@@ -622,7 +622,7 @@ graphRouter.post('/io.exprsn.graph.removeListItem', authMiddleware, async (c) =>
   const userDid = c.get('did');
 
   if (!listUri || !subjectDid) {
-    throw new HTTPException(400, { message: 'List URI and subject DID are required' });
+    throw badRequest('List URI and subject DID are required');
   }
 
   // Verify list exists and user owns it
@@ -631,11 +631,11 @@ graphRouter.post('/io.exprsn.graph.removeListItem', authMiddleware, async (c) =>
   });
 
   if (!list) {
-    throw new HTTPException(404, { message: 'List not found' });
+    throw notFound('List not found');
   }
 
   if (list.authorDid !== userDid) {
-    throw new HTTPException(403, { message: 'Not authorized to modify this list' });
+    throw forbidden('Not authorized to modify this list');
   }
 
   const existing = await db.query.listItems.findFirst({
@@ -643,7 +643,7 @@ graphRouter.post('/io.exprsn.graph.removeListItem', authMiddleware, async (c) =>
   });
 
   if (!existing) {
-    throw new HTTPException(404, { message: 'User not in list' });
+    throw notFound('User not in list');
   }
 
   await db.delete(listItems).where(eq(listItems.uri, existing.uri));

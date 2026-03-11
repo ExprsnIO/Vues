@@ -1,0 +1,160 @@
+{
+  "lexicon": 1,
+  "id": "io.exprsn.identity.createDid",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Create a new did:exprsn identity with certificate-based authentication",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["handle", "certificateType"],
+          "properties": {
+            "handle": {
+              "type": "string",
+              "description": "Handle for the identity (without @ prefix)",
+              "maxLength": 64
+            },
+            "email": {
+              "type": "string",
+              "format": "email",
+              "description": "Email address for certificate issuance",
+              "maxLength": 255
+            },
+            "displayName": {
+              "type": "string",
+              "description": "Display name for the user",
+              "maxLength": 128
+            },
+            "certificateType": {
+              "type": "string",
+              "description": "Type of certificate to issue",
+              "knownValues": ["creator", "organization", "member"]
+            },
+            "organizationId": {
+              "type": "string",
+              "description": "Organization ID (required for organization/member types)",
+              "maxLength": 64
+            },
+            "role": {
+              "type": "string",
+              "description": "Role within organization (for member type)",
+              "maxLength": 64
+            }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["did", "handle", "certificate", "privateKey", "publicKeyMultibase"],
+          "properties": {
+            "did": {
+              "type": "string",
+              "format": "did",
+              "description": "The generated did:exprsn identifier"
+            },
+            "handle": {
+              "type": "string",
+              "description": "The handle assigned to this DID"
+            },
+            "certificate": {
+              "type": "ref",
+              "ref": "#certificateInfo",
+              "description": "Primary client authentication certificate"
+            },
+            "privateKey": {
+              "type": "string",
+              "description": "Private key in PEM format (RETURNED ONCE - store securely!)"
+            },
+            "publicKeyMultibase": {
+              "type": "string",
+              "description": "Public key in multibase format for AT Protocol"
+            },
+            "additionalCertificates": {
+              "type": "ref",
+              "ref": "#additionalCertificates",
+              "description": "Additional certificates (code signing, etc.)"
+            }
+          }
+        }
+      },
+      "errors": [
+        {
+          "name": "InvalidHandle",
+          "description": "Handle is invalid or already taken"
+        },
+        {
+          "name": "OrganizationNotFound",
+          "description": "Specified organization does not exist"
+        },
+        {
+          "name": "CertificateIssuanceFailed",
+          "description": "Failed to issue certificate"
+        }
+      ]
+    },
+    "certificateInfo": {
+      "type": "object",
+      "required": ["id", "pem", "fingerprint", "validUntil"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Certificate ID"
+        },
+        "pem": {
+          "type": "string",
+          "description": "Certificate in PEM format"
+        },
+        "fingerprint": {
+          "type": "string",
+          "description": "SHA-256 fingerprint of the certificate"
+        },
+        "validUntil": {
+          "type": "string",
+          "format": "datetime",
+          "description": "Certificate expiration date"
+        }
+      }
+    },
+    "additionalCertificates": {
+      "type": "object",
+      "properties": {
+        "codeSigning": {
+          "type": "ref",
+          "ref": "#codeSigningCert",
+          "description": "Code signing certificate"
+        }
+      }
+    },
+    "codeSigningCert": {
+      "type": "object",
+      "required": ["id", "pem", "privateKey", "fingerprint", "validUntil"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Certificate ID"
+        },
+        "pem": {
+          "type": "string",
+          "description": "Certificate in PEM format"
+        },
+        "privateKey": {
+          "type": "string",
+          "description": "Private key in PEM format (RETURNED ONCE)"
+        },
+        "fingerprint": {
+          "type": "string",
+          "description": "SHA-256 fingerprint"
+        },
+        "validUntil": {
+          "type": "string",
+          "format": "datetime",
+          "description": "Certificate expiration date"
+        }
+      }
+    }
+  }
+}
