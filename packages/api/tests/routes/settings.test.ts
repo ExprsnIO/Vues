@@ -136,7 +136,8 @@ describe('Settings Routes', () => {
 
       expect(res.status).toBe(400);
       const data = await res.json();
-      expect(data.message).toContain('Invalid theme');
+      // Zod returns "Invalid enum value" for invalid enum values
+      expect(data.message).toMatch(/Invalid (theme|enum value)/);
     });
 
     it('should validate colorMode', async () => {
@@ -147,7 +148,8 @@ describe('Settings Routes', () => {
 
       expect(res.status).toBe(400);
       const data = await res.json();
-      expect(data.message).toContain('Invalid color mode');
+      // Zod returns "Invalid enum value" for invalid enum values
+      expect(data.message).toMatch(/Invalid (color mode|enum value)/);
     });
 
     it('should accept valid themeId values', async () => {

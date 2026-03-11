@@ -55,7 +55,7 @@ describe('Auth Routes', () => {
 
       expect(res.status).toBe(400);
       const data = await res.json();
-      expect(data.message).toContain('Missing required fields');
+      expect(data.message).toContain('Required');
     });
 
     it('should validate handle format - minimum length', async () => {
@@ -151,7 +151,7 @@ describe('Auth Routes', () => {
 
       expect(res.status).toBe(400);
       const data = await res.json();
-      expect(data.message).toContain('Missing required fields');
+      expect(data.message).toContain('Required');
     });
 
     it('should return 401 for invalid credentials', async () => {
