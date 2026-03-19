@@ -29,6 +29,16 @@ interface APNsClient {
 
 let apnsClient: APNsClient | null = null;
 
+// Helper to safely import optional modules
+async function safeImport(moduleName: string): Promise<any> {
+  try {
+    // @ts-ignore - Dynamic import of optional peer dependency
+    return await import(moduleName);
+  } catch {
+    return null;
+  }
+}
+
 export class PushProvider {
   private fcmEnabled: boolean;
   private apnsEnabled: boolean;
@@ -43,7 +53,13 @@ export class PushProvider {
     // Initialize FCM
     if (process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_PRIVATE_KEY) {
       try {
-        const admin = await import('firebase-admin');
+        // Dynamic import with proper error handling
+        const admin = await safeImport('firebase-admin');
+
+        if (!admin) {
+          console.log('firebase-admin module not installed, skipping FCM initialization');
+          return;
+        }
 
         if (!admin.apps?.length) {
           admin.initializeApp({
@@ -68,7 +84,13 @@ export class PushProvider {
     // Initialize APNs (optional - FCM can handle iOS via FCM tokens)
     if (process.env.APNS_KEY_ID && process.env.APNS_TEAM_ID && process.env.APNS_KEY_PATH) {
       try {
-        const apn = await import('apn');
+        // Dynamic import with proper error handling
+        const apn = await safeImport('apn');
+
+        if (!apn) {
+          console.log('apn module not installed, skipping APNs initialization');
+          return;
+        }
 
         apnsClient = new apn.Provider({
           token: {
@@ -233,7 +255,10 @@ export class PushProvider {
         const invalidTokens: string[] = [];
         response.responses.forEach((resp, idx) => {
           if (!resp.success && resp.error?.code === 'messaging/registration-token-not-registered') {
-            invalidTokens.push(tokens[idx]);
+            const token = tokens[idx];
+            if (token) {
+              invalidTokens.push(token);
+            }
           }
         });
 
@@ -275,7 +300,17 @@ export class PushProvider {
 
     try {
       // Dynamic import to avoid bundling issues
-      const apn = await import('apn');
+      const apn = await safeImport('apn');
+
+      if (!apn) {
+        return {
+          success: false,
+          successCount: 0,
+          failureCount: tokens.length,
+          invalidTokens: [],
+          error: 'apn module not installed',
+        };
+      }
 
       const notification = new apn.Notification();
       notification.alert = {

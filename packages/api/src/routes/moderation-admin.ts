@@ -6,6 +6,13 @@
 import { Hono } from 'hono';
 import { adminAuthMiddleware, requirePermission, ADMIN_PERMISSIONS } from '../auth/middleware.js';
 import { getModerationService } from '../services/moderation/service.js';
+import {
+  getWorkflowEngine,
+  type WorkflowTrigger,
+  type WorkflowAction,
+  type WorkflowCondition,
+} from '../services/moderation/WorkflowEngine.js';
+import { getWorkflowMetrics } from '../services/moderation/WorkflowEventHandlers.js';
 
 export const moderationAdminRouter = new Hono();
 
@@ -666,3 +673,445 @@ moderationAdminRouter.get(
     }
   }
 );
+
+// ============================================
+// Workflow Management
+// ============================================
+
+const VALID_TRIGGERS: WorkflowTrigger[] = [
+  'content_submitted',
+  'report_received',
+  'ai_review_complete',
+  'manual_review',
+  'appeal_submitted',
+  'user_action_expired',
+  'threshold_exceeded',
+];
+
+const VALID_ACTIONS: WorkflowAction[] = [
+  'auto_approve',
+  'auto_reject',
+  'escalate',
+  'assign_moderator',
+  'request_ai_review',
+  'notify_user',
+  'notify_admin',
+  'apply_warning',
+  'apply_mute',
+  'apply_suspension',
+  'apply_ban',
+  'send_webhook',
+];
+
+/**
+ * Get all workflow rules
+ */
+moderationAdminRouter.get(
+  '/io.exprsn.admin.moderation.workflows.list',
+  requirePermission(ADMIN_PERMISSIONS.CONTENT_MODERATE),
+  async (c) => {
+    try {
+      const engine = getWorkflowEngine();
+      const rules = engine.getRules();
+
+      return c.json({
+        rules: rules.map(rule => ({
+          id: rule.id,
+          name: rule.name,
+          description: rule.description,
+          trigger: rule.trigger,
+          conditions: rule.conditions,
+          actions: rule.actions,
+          priority: rule.priority,
+          enabled: rule.enabled,
+          cooldownMs: rule.cooldownMs,
+          maxExecutionsPerHour: rule.maxExecutionsPerHour,
+        })),
+      });
+    } catch (error) {
+      console.error('Failed to list workflow rules:', error);
+      return c.json({ error: 'Failed to list workflow rules' }, 500);
+    }
+  }
+);
+
+/**
+ * Get a single workflow rule
+ */
+moderationAdminRouter.get(
+  '/io.exprsn.admin.moderation.workflows.get',
+  requirePermission(ADMIN_PERMISSIONS.CONTENT_MODERATE),
+  async (c) => {
+    const ruleId = c.req.query('id');
+
+    if (!ruleId) {
+      return c.json({ error: 'Rule ID is required' }, 400);
+    }
+
+    try {
+      const engine = getWorkflowEngine();
+      const rule = engine.getRule(ruleId);
+
+      if (!rule) {
+        return c.json({ error: 'Rule not found' }, 404);
+      }
+
+      return c.json({ rule });
+    } catch (error) {
+      console.error('Failed to get workflow rule:', error);
+      return c.json({ error: 'Failed to get workflow rule' }, 500);
+    }
+  }
+);
+
+/**
+ * Create a new workflow rule
+ */
+moderationAdminRouter.post(
+  '/io.exprsn.admin.moderation.workflows.create',
+  requirePermission(ADMIN_PERMISSIONS.SETTINGS_MANAGE),
+  async (c) => {
+    try {
+      const body = await c.req.json<{
+        name: string;
+        description?: string;
+        trigger: WorkflowTrigger;
+        conditions: WorkflowCondition[];
+        actions: Array<{ type: WorkflowAction; params?: Record<string, unknown> }>;
+        priority?: number;
+        enabled?: boolean;
+        cooldownMs?: number;
+        maxExecutionsPerHour?: number;
+      }>();
+
+      // Validate required fields
+      if (!body.name || body.name.length < 1) {
+        return c.json({ error: 'Name is required' }, 400);
+      }
+
+      if (!body.trigger || !VALID_TRIGGERS.includes(body.trigger)) {
+        return c.json({ error: 'Invalid trigger type', validTriggers: VALID_TRIGGERS }, 400);
+      }
+
+      if (!Array.isArray(body.actions) || body.actions.length === 0) {
+        return c.json({ error: 'At least one action is required' }, 400);
+      }
+
+      // Validate actions
+      for (const action of body.actions) {
+        if (!VALID_ACTIONS.includes(action.type)) {
+          return c.json({ error: `Invalid action type: ${action.type}`, validActions: VALID_ACTIONS }, 400);
+        }
+      }
+
+      const engine = getWorkflowEngine();
+      const ruleId = await engine.addRule({
+        name: body.name,
+        description: body.description,
+        trigger: body.trigger,
+        conditions: body.conditions || [],
+        actions: body.actions,
+        priority: body.priority || 0,
+        enabled: body.enabled ?? true,
+        cooldownMs: body.cooldownMs,
+        maxExecutionsPerHour: body.maxExecutionsPerHour,
+      });
+
+      const rule = engine.getRule(ruleId);
+
+      return c.json({ rule }, 201);
+    } catch (error) {
+      console.error('Failed to create workflow rule:', error);
+      return c.json({ error: error instanceof Error ? error.message : 'Failed to create workflow rule' }, 500);
+    }
+  }
+);
+
+/**
+ * Update a workflow rule
+ */
+moderationAdminRouter.post(
+  '/io.exprsn.admin.moderation.workflows.update',
+  requirePermission(ADMIN_PERMISSIONS.SETTINGS_MANAGE),
+  async (c) => {
+    try {
+      const body = await c.req.json<{
+        id: string;
+        name?: string;
+        description?: string;
+        trigger?: WorkflowTrigger;
+        conditions?: WorkflowCondition[];
+        actions?: Array<{ type: WorkflowAction; params?: Record<string, unknown> }>;
+        priority?: number;
+        enabled?: boolean;
+        cooldownMs?: number;
+        maxExecutionsPerHour?: number;
+      }>();
+
+      if (!body.id) {
+        return c.json({ error: 'Rule ID is required' }, 400);
+      }
+
+      // Validate trigger if provided
+      if (body.trigger && !VALID_TRIGGERS.includes(body.trigger)) {
+        return c.json({ error: 'Invalid trigger type', validTriggers: VALID_TRIGGERS }, 400);
+      }
+
+      // Validate actions if provided
+      if (body.actions) {
+        for (const action of body.actions) {
+          if (!VALID_ACTIONS.includes(action.type)) {
+            return c.json({ error: `Invalid action type: ${action.type}`, validActions: VALID_ACTIONS }, 400);
+          }
+        }
+      }
+
+      const engine = getWorkflowEngine();
+
+      await engine.updateRule(body.id, {
+        name: body.name,
+        description: body.description,
+        trigger: body.trigger,
+        conditions: body.conditions,
+        actions: body.actions,
+        priority: body.priority,
+        enabled: body.enabled,
+        cooldownMs: body.cooldownMs,
+        maxExecutionsPerHour: body.maxExecutionsPerHour,
+      });
+
+      const rule = engine.getRule(body.id);
+
+      return c.json({ rule });
+    } catch (error) {
+      console.error('Failed to update workflow rule:', error);
+      return c.json({ error: error instanceof Error ? error.message : 'Failed to update workflow rule' }, 500);
+    }
+  }
+);
+
+/**
+ * Delete a workflow rule
+ */
+moderationAdminRouter.post(
+  '/io.exprsn.admin.moderation.workflows.delete',
+  requirePermission(ADMIN_PERMISSIONS.SETTINGS_MANAGE),
+  async (c) => {
+    try {
+      const body = await c.req.json<{ id: string }>();
+
+      if (!body.id) {
+        return c.json({ error: 'Rule ID is required' }, 400);
+      }
+
+      const engine = getWorkflowEngine();
+      await engine.deleteRule(body.id);
+
+      return c.json({ success: true });
+    } catch (error) {
+      console.error('Failed to delete workflow rule:', error);
+      return c.json({ error: error instanceof Error ? error.message : 'Failed to delete workflow rule' }, 500);
+    }
+  }
+);
+
+/**
+ * Toggle workflow rule enabled/disabled
+ */
+moderationAdminRouter.post(
+  '/io.exprsn.admin.moderation.workflows.toggle',
+  requirePermission(ADMIN_PERMISSIONS.SETTINGS_MANAGE),
+  async (c) => {
+    try {
+      const body = await c.req.json<{ id: string; enabled: boolean }>();
+
+      if (!body.id) {
+        return c.json({ error: 'Rule ID is required' }, 400);
+      }
+
+      if (typeof body.enabled !== 'boolean') {
+        return c.json({ error: 'enabled must be a boolean' }, 400);
+      }
+
+      const engine = getWorkflowEngine();
+      await engine.updateRule(body.id, { enabled: body.enabled });
+
+      const rule = engine.getRule(body.id);
+
+      return c.json({ rule });
+    } catch (error) {
+      console.error('Failed to toggle workflow rule:', error);
+      return c.json({ error: error instanceof Error ? error.message : 'Failed to toggle workflow rule' }, 500);
+    }
+  }
+);
+
+/**
+ * Get workflow metrics
+ */
+moderationAdminRouter.get(
+  '/io.exprsn.admin.moderation.workflows.metrics',
+  requirePermission(ADMIN_PERMISSIONS.CONTENT_VIEW),
+  async (c) => {
+    try {
+      const metrics = await getWorkflowMetrics();
+      const engine = getWorkflowEngine();
+      const rules = engine.getRules();
+
+      return c.json({
+        actionMetrics: metrics,
+        ruleCount: rules.length,
+        enabledRuleCount: rules.filter(r => r.enabled).length,
+        triggerCounts: rules.reduce((acc, rule) => {
+          acc[rule.trigger] = (acc[rule.trigger] || 0) + 1;
+          return acc;
+        }, {} as Record<string, number>),
+      });
+    } catch (error) {
+      console.error('Failed to get workflow metrics:', error);
+      return c.json({ error: 'Failed to get workflow metrics' }, 500);
+    }
+  }
+);
+
+/**
+ * Reload workflow rules from database
+ */
+moderationAdminRouter.post(
+  '/io.exprsn.admin.moderation.workflows.reload',
+  requirePermission(ADMIN_PERMISSIONS.SETTINGS_MANAGE),
+  async (c) => {
+    try {
+      const engine = getWorkflowEngine();
+      await engine.loadRules();
+
+      return c.json({
+        success: true,
+        ruleCount: engine.getRules().length,
+      });
+    } catch (error) {
+      console.error('Failed to reload workflow rules:', error);
+      return c.json({ error: 'Failed to reload workflow rules' }, 500);
+    }
+  }
+);
+
+/**
+ * Get available workflow triggers and actions
+ */
+moderationAdminRouter.get(
+  '/io.exprsn.admin.moderation.workflows.schema',
+  requirePermission(ADMIN_PERMISSIONS.CONTENT_VIEW),
+  async (c) => {
+    return c.json({
+      triggers: VALID_TRIGGERS.map(trigger => ({
+        id: trigger,
+        name: trigger.replace(/_/g, ' '),
+        description: getTriggerDescription(trigger),
+      })),
+      actions: VALID_ACTIONS.map(action => ({
+        id: action,
+        name: action.replace(/_/g, ' '),
+        description: getActionDescription(action),
+        params: getActionParams(action),
+      })),
+      operators: [
+        { id: 'eq', name: 'equals', description: 'Value equals' },
+        { id: 'ne', name: 'not equals', description: 'Value does not equal' },
+        { id: 'gt', name: 'greater than', description: 'Value is greater than' },
+        { id: 'gte', name: 'greater or equal', description: 'Value is greater than or equal' },
+        { id: 'lt', name: 'less than', description: 'Value is less than' },
+        { id: 'lte', name: 'less or equal', description: 'Value is less than or equal' },
+        { id: 'contains', name: 'contains', description: 'String contains substring' },
+        { id: 'in', name: 'in', description: 'Value is in array' },
+        { id: 'not_in', name: 'not in', description: 'Value is not in array' },
+      ],
+      contextFields: [
+        { field: 'riskScore', type: 'number', description: 'AI risk score (0-1)' },
+        { field: 'riskLevel', type: 'string', description: 'Risk level (safe, low, medium, high, critical)' },
+        { field: 'contentType', type: 'string', description: 'Content type (video, comment, etc.)' },
+        { field: 'reportCount', type: 'number', description: 'Number of reports for this content' },
+        { field: 'userPriorOffenses', type: 'number', description: 'Number of prior user violations' },
+        { field: 'aiScores.toxicity', type: 'number', description: 'AI toxicity score' },
+        { field: 'aiScores.nsfw', type: 'number', description: 'AI NSFW score' },
+        { field: 'aiScores.spam', type: 'number', description: 'AI spam score' },
+        { field: 'aiScores.violence', type: 'number', description: 'AI violence score' },
+        { field: 'aiScores.hatespeech', type: 'number', description: 'AI hate speech score' },
+      ],
+    });
+  }
+);
+
+function getTriggerDescription(trigger: WorkflowTrigger): string {
+  switch (trigger) {
+    case 'content_submitted': return 'Triggered when new content is submitted for moderation';
+    case 'report_received': return 'Triggered when a user reports content';
+    case 'ai_review_complete': return 'Triggered when AI finishes analyzing content';
+    case 'manual_review': return 'Triggered when a moderator reviews content';
+    case 'appeal_submitted': return 'Triggered when a user submits an appeal';
+    case 'user_action_expired': return 'Triggered when a user sanction expires';
+    case 'threshold_exceeded': return 'Triggered when content exceeds a threshold (e.g., report count)';
+    default: return '';
+  }
+}
+
+function getActionDescription(action: WorkflowAction): string {
+  switch (action) {
+    case 'auto_approve': return 'Automatically approve the content';
+    case 'auto_reject': return 'Automatically reject the content';
+    case 'escalate': return 'Escalate to higher priority queue';
+    case 'assign_moderator': return 'Assign to a specific moderator or use load balancing';
+    case 'request_ai_review': return 'Request AI analysis of the content';
+    case 'notify_user': return 'Send notification to the content author';
+    case 'notify_admin': return 'Send notification to admins';
+    case 'apply_warning': return 'Issue a warning to the user';
+    case 'apply_mute': return 'Temporarily mute the user';
+    case 'apply_suspension': return 'Temporarily suspend the user';
+    case 'apply_ban': return 'Permanently ban the user';
+    case 'send_webhook': return 'Send webhook to external URL';
+    default: return '';
+  }
+}
+
+function getActionParams(action: WorkflowAction): Array<{ name: string; type: string; required: boolean; description: string }> {
+  switch (action) {
+    case 'auto_reject':
+      return [{ name: 'reason', type: 'string', required: false, description: 'Rejection reason' }];
+    case 'escalate':
+      return [
+        { name: 'priority', type: 'number', required: false, description: 'New priority level (default: 10)' },
+        { name: 'reason', type: 'string', required: false, description: 'Escalation reason' },
+      ];
+    case 'assign_moderator':
+      return [
+        { name: 'moderatorId', type: 'string', required: false, description: 'Specific moderator ID' },
+        { name: 'loadBalanced', type: 'boolean', required: false, description: 'Use load balancing to find least-loaded moderator' },
+        { name: 'role', type: 'string', required: false, description: 'Only assign to moderators with this role' },
+      ];
+    case 'notify_user':
+      return [
+        { name: 'message', type: 'string', required: false, description: 'Notification message' },
+        { name: 'type', type: 'string', required: false, description: 'Notification type' },
+      ];
+    case 'notify_admin':
+      return [{ name: 'message', type: 'string', required: false, description: 'Alert message' }];
+    case 'apply_warning':
+      return [{ name: 'reason', type: 'string', required: false, description: 'Warning reason' }];
+    case 'apply_mute':
+      return [
+        { name: 'durationHours', type: 'number', required: false, description: 'Mute duration in hours (default: 24)' },
+        { name: 'reason', type: 'string', required: false, description: 'Mute reason' },
+      ];
+    case 'apply_suspension':
+      return [
+        { name: 'durationDays', type: 'number', required: false, description: 'Suspension duration in days (default: 7)' },
+        { name: 'reason', type: 'string', required: false, description: 'Suspension reason' },
+      ];
+    case 'apply_ban':
+      return [{ name: 'reason', type: 'string', required: false, description: 'Ban reason' }];
+    case 'send_webhook':
+      return [{ name: 'url', type: 'string', required: true, description: 'Webhook URL' }];
+    default:
+      return [];
+  }
+}

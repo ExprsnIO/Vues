@@ -221,14 +221,14 @@ export class ExprsnDidService {
       status: 'active',
     });
 
-    // Link code signing certificate to the same DID
-    await db
-      .update(caEntityCertificates)
-      .set({ subjectDid: did })
-      .where(eq(caEntityCertificates.id, codeSigningCertResult.id));
+    // NOTE: subjectDid on certificates is set by the caller AFTER the user
+    // row exists in the users table (to satisfy the FK constraint).
+    // See auth.ts createAccount handler.
 
     // Also create PLC identity record for compatibility
-    await db.insert(plcIdentities).values({
+    // Use onConflictDoNothing to handle race conditions where the handle
+    // may have been claimed between the availability check and this insert.
+    const plcInsertResult = await db.insert(plcIdentities).values({
       did,
       handle: `${input.handle}.exprsn`,
       signingKey: publicKeyMultibase,
@@ -243,7 +243,7 @@ export class ExprsnDidService {
       certificateId: clientCertResult.id,
       certificateFingerprint: clientCertResult.fingerprint,
       status: 'active',
-    });
+    }).onConflictDoNothing();
 
     return {
       did,
@@ -295,7 +295,7 @@ export class ExprsnDidService {
       organization: input.organizationName,
       organizationalUnit: `${input.organizationType} Certificate Authority`,
       validityDays: input.validityDays || 3650, // 10 years
-      pathLen: 0, // Cannot issue further intermediate CAs
+      pathLength: 0, // Cannot issue further intermediate CAs
     });
 
     // Store the org-CA link

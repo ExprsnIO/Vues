@@ -10,7 +10,7 @@ import {
   caEntityCertificates,
   caCertificateRevocationLists,
 } from '../../db/schema.js';
-import { eq, and, desc, sql } from 'drizzle-orm';
+import { eq, and, desc, sql, lt, gte } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import type { CertificateType } from '@exprsn/shared/types';
 import {
@@ -29,9 +29,59 @@ import {
   type IntermediateCertificateOptions,
   type EntityCertificateOptions,
 } from './crypto.js';
+import { OCSPResponder } from './OCSPResponder.js';
 
-// Environment variable for private key encryption
-const CA_ENCRYPTION_KEY = process.env.CA_ENCRYPTION_KEY || 'development-key-change-in-production';
+// Track whether we've warned about missing CA encryption key
+let caKeyWarningLogged = false;
+
+/**
+ * Get CA encryption key from environment
+ * SECURITY: No fallback in production - will throw if not configured
+ */
+function getCAEncryptionKey(): string {
+  const key = process.env.CA_ENCRYPTION_KEY;
+  const nodeEnv = process.env.NODE_ENV as string | undefined;
+
+  if (!key) {
+    // Always throw in production or staging
+    if (nodeEnv === 'production' || nodeEnv === 'staging') {
+      throw new Error(
+        'CRITICAL: CA_ENCRYPTION_KEY environment variable is required for certificate management. ' +
+        'Generate a secure key with: openssl rand -base64 32'
+      );
+    }
+
+    // In development/test, use a deterministic dev key but warn loudly
+    if (!caKeyWarningLogged) {
+      console.error('═'.repeat(70));
+      console.error('⚠️  SECURITY WARNING: CA_ENCRYPTION_KEY not set!');
+      console.error('   Using development-only key for CA operations.');
+      console.error('   This MUST NOT reach production.');
+      console.error('   Generate a secure key: openssl rand -base64 32');
+      console.error('═'.repeat(70));
+      caKeyWarningLogged = true;
+    }
+
+    return 'dev-ca-key-DO-NOT-USE-IN-PRODUCTION-12345';
+  }
+
+  if (key.length < 32) {
+    throw new Error('CA_ENCRYPTION_KEY must be at least 32 characters long');
+  }
+
+  return key;
+}
+
+// Lazy-loaded CA encryption key (validated on first use)
+const CA_ENCRYPTION_KEY = (() => {
+  let cachedKey: string | null = null;
+  return () => {
+    if (cachedKey === null) {
+      cachedKey = getCAEncryptionKey();
+    }
+    return cachedKey;
+  };
+})();
 
 export class CertificateManager {
   /**
@@ -72,7 +122,7 @@ export class CertificateManager {
     const certResult = await generateRootCertificate(certOptions);
 
     // Encrypt private key before storing
-    const encryptedKey = encryptPrivateKey(certResult.privateKey, CA_ENCRYPTION_KEY);
+    const encryptedKey = encryptPrivateKey(certResult.privateKey, CA_ENCRYPTION_KEY());
 
     const id = nanoid();
     await db.insert(caRootCertificates).values({
@@ -165,7 +215,7 @@ export class CertificateManager {
     }
 
     // Decrypt root CA private key
-    const rootPrivateKey = decryptPrivateKey(rootCA[0].privateKey, CA_ENCRYPTION_KEY);
+    const rootPrivateKey = decryptPrivateKey(rootCA[0].privateKey, CA_ENCRYPTION_KEY());
 
     const certResult = await generateIntermediateCertificate({
       commonName: options.commonName,
@@ -178,7 +228,7 @@ export class CertificateManager {
     });
 
     // Encrypt private key before storing
-    const encryptedKey = encryptPrivateKey(certResult.privateKey, CA_ENCRYPTION_KEY);
+    const encryptedKey = encryptPrivateKey(certResult.privateKey, CA_ENCRYPTION_KEY());
 
     const id = nanoid();
     await db.insert(caIntermediateCertificates).values({
@@ -257,7 +307,7 @@ export class CertificateManager {
       }
 
       issuerCert = intermediate[0].certificate;
-      issuerKey = decryptPrivateKey(intermediate[0].privateKey, CA_ENCRYPTION_KEY);
+      issuerKey = decryptPrivateKey(intermediate[0].privateKey, CA_ENCRYPTION_KEY());
       issuerId = intermediate[0].id;
     } else {
       // Use root CA directly
@@ -272,7 +322,7 @@ export class CertificateManager {
       }
 
       issuerCert = rootCA[0].certificate;
-      issuerKey = decryptPrivateKey(rootCA[0].privateKey, CA_ENCRYPTION_KEY);
+      issuerKey = decryptPrivateKey(rootCA[0].privateKey, CA_ENCRYPTION_KEY());
       issuerId = rootCA[0].id;
     }
 
@@ -297,7 +347,7 @@ export class CertificateManager {
     });
 
     // Encrypt private key before storing
-    const encryptedEntityKey = encryptPrivateKey(certResult.privateKey, CA_ENCRYPTION_KEY);
+    const encryptedEntityKey = encryptPrivateKey(certResult.privateKey, CA_ENCRYPTION_KEY());
 
     const id = nanoid();
     await db.insert(caEntityCertificates).values({
@@ -435,7 +485,14 @@ export class CertificateManager {
     certificateId: string,
     reason: string = 'unspecified'
   ): Promise<{ success: boolean }> {
-    const result = await db
+    // Get the certificate to find its serial number for cache invalidation
+    const [cert] = await db
+      .select({ serialNumber: caEntityCertificates.serialNumber })
+      .from(caEntityCertificates)
+      .where(eq(caEntityCertificates.id, certificateId))
+      .limit(1);
+
+    await db
       .update(caEntityCertificates)
       .set({
         status: 'revoked',
@@ -443,6 +500,11 @@ export class CertificateManager {
         revocationReason: reason,
       })
       .where(eq(caEntityCertificates.id, certificateId));
+
+    // Invalidate OCSP cache for this certificate
+    if (cert) {
+      await OCSPResponder.invalidateCertificateCache(cert.serialNumber);
+    }
 
     return { success: true };
   }
@@ -759,7 +821,7 @@ export class CertificateManager {
       .limit(1);
 
     if (intermediateCert[0]) {
-      const privateKey = decryptPrivateKey(intermediateCert[0].privateKey, CA_ENCRYPTION_KEY);
+      const privateKey = decryptPrivateKey(intermediateCert[0].privateKey, CA_ENCRYPTION_KEY());
       const signature = signData(data, privateKey);
       return { signature };
     }
@@ -772,7 +834,7 @@ export class CertificateManager {
       .limit(1);
 
     if (rootCert[0]) {
-      const privateKey = decryptPrivateKey(rootCert[0].privateKey, CA_ENCRYPTION_KEY);
+      const privateKey = decryptPrivateKey(rootCert[0].privateKey, CA_ENCRYPTION_KEY());
       const signature = signData(data, privateKey);
       return { signature };
     }
@@ -830,7 +892,7 @@ export class CertificateManager {
       reason: (cert.revocationReason as RevocationReason | undefined) ?? undefined,
     }));
 
-    const rootPrivateKey = decryptPrivateKey(rootCA[0].privateKey, CA_ENCRYPTION_KEY);
+    const rootPrivateKey = decryptPrivateKey(rootCA[0].privateKey, CA_ENCRYPTION_KEY());
     const crlResult = generateCRL(rootCA[0].certificate, rootPrivateKey, revokedList, { validityDays: 30 });
 
     // Store CRL
@@ -1123,11 +1185,17 @@ export class CertificateManager {
   ): Promise<{ revokedCount: number; revokedAt: Date }> {
     const now = new Date();
 
+    // Get serial numbers for cache invalidation before revoking
+    const certs = await db
+      .select({ serialNumber: caEntityCertificates.serialNumber })
+      .from(caEntityCertificates)
+      .where(sql`${caEntityCertificates.id} = ANY(${certificateIds})`);
+
     await db
       .update(caEntityCertificates)
       .set({
         status: 'revoked',
-        revokedAt: now.toISOString(),
+        revokedAt: now,
         revocationReason: reason,
       })
       .where(
@@ -1136,6 +1204,11 @@ export class CertificateManager {
           eq(caEntityCertificates.status, 'active')
         )
       );
+
+    // Invalidate OCSP cache for all revoked certificates
+    await Promise.all(
+      certs.map(cert => OCSPResponder.invalidateCertificateCache(cert.serialNumber))
+    );
 
     return { revokedCount: certificateIds.length, revokedAt: now };
   }
@@ -1166,7 +1239,7 @@ export class CertificateManager {
       if (format === 'pkcs12' && includePrivateKey && password) {
         // For PKCS12, we'd need to implement proper export
         // For now, return PEM with encrypted private key marker
-        const privateKey = decryptPrivateKey(cert.privateKey, CA_ENCRYPTION_KEY);
+        const privateKey = decryptPrivateKey(cert.privateKey, CA_ENCRYPTION_KEY());
         data = `-----PKCS12 EXPORT-----\n${cert.certificate}\n${privateKey}\n-----END PKCS12-----`;
       } else if (format === 'der') {
         // Convert PEM to base64 DER
@@ -1179,7 +1252,7 @@ export class CertificateManager {
         // PEM format
         data = cert.certificate;
         if (includePrivateKey) {
-          const privateKey = decryptPrivateKey(cert.privateKey, CA_ENCRYPTION_KEY);
+          const privateKey = decryptPrivateKey(cert.privateKey, CA_ENCRYPTION_KEY());
           data = privateKey + '\n' + data;
         }
       }
@@ -1234,7 +1307,7 @@ export class CertificateManager {
 
       if (intermediate[0]) {
         issuerCert = intermediate[0].certificate;
-        issuerKey = decryptPrivateKey(intermediate[0].privateKey, CA_ENCRYPTION_KEY);
+        issuerKey = decryptPrivateKey(intermediate[0].privateKey, CA_ENCRYPTION_KEY());
         actualIssuerId = intermediate[0].id;
         issuerType = 'intermediate';
       } else {
@@ -1249,7 +1322,7 @@ export class CertificateManager {
         }
 
         issuerCert = root[0].certificate;
-        issuerKey = decryptPrivateKey(root[0].privateKey, CA_ENCRYPTION_KEY);
+        issuerKey = decryptPrivateKey(root[0].privateKey, CA_ENCRYPTION_KEY());
         actualIssuerId = root[0].id;
         issuerType = 'root';
       }
@@ -1263,7 +1336,7 @@ export class CertificateManager {
 
       if (intermediate[0]) {
         issuerCert = intermediate[0].certificate;
-        issuerKey = decryptPrivateKey(intermediate[0].privateKey, CA_ENCRYPTION_KEY);
+        issuerKey = decryptPrivateKey(intermediate[0].privateKey, CA_ENCRYPTION_KEY());
         actualIssuerId = intermediate[0].id;
         issuerType = 'intermediate';
       } else {
@@ -1278,7 +1351,7 @@ export class CertificateManager {
         }
 
         issuerCert = root[0].certificate;
-        issuerKey = decryptPrivateKey(root[0].privateKey, CA_ENCRYPTION_KEY);
+        issuerKey = decryptPrivateKey(root[0].privateKey, CA_ENCRYPTION_KEY());
         actualIssuerId = root[0].id;
         issuerType = 'root';
       }
@@ -1296,7 +1369,7 @@ export class CertificateManager {
             email: certRequest.email,
           });
 
-          const encryptedKey = encryptPrivateKey(result.privateKey, CA_ENCRYPTION_KEY);
+          const encryptedKey = encryptPrivateKey(result.privateKey, CA_ENCRYPTION_KEY());
 
           const id = nanoid();
           await db.insert(caEntityCertificates).values({
@@ -1411,6 +1484,120 @@ export class CertificateManager {
       extKeyUsage: parsed.extKeyUsage,
       subjectAltNames: parsed.subjectAltNames,
     };
+  }
+
+  /**
+   * Initialize root CA (admin interface) - alias for ensureRootCA with admin logging
+   */
+  async initializeRootCA(options?: Partial<RootCertificateOptions>): Promise<{
+    id: string;
+    certificate: string;
+    serialNumber: string;
+    fingerprint: string;
+    commonName: string;
+    notBefore: Date;
+    notAfter: Date;
+  }> {
+    // Check for existing root CA first
+    const existing = await db
+      .select()
+      .from(caRootCertificates)
+      .where(eq(caRootCertificates.status, 'active'))
+      .limit(1);
+
+    if (existing[0]) {
+      return {
+        id: existing[0].id,
+        certificate: existing[0].certificate,
+        serialNumber: existing[0].serialNumber,
+        fingerprint: existing[0].fingerprint,
+        commonName: existing[0].commonName,
+        notBefore: existing[0].notBefore,
+        notAfter: existing[0].notAfter,
+      };
+    }
+
+    // Create new root CA
+    const result = await this.ensureRootCA(options);
+
+    // Fetch the full record for additional fields
+    const [created] = await db
+      .select()
+      .from(caRootCertificates)
+      .where(eq(caRootCertificates.id, result.id));
+
+    return {
+      ...result,
+      commonName: created?.commonName || options?.commonName || 'Vues Root CA',
+      notBefore: created?.notBefore || new Date(),
+      notAfter: created?.notAfter || new Date(Date.now() + 7300 * 24 * 60 * 60 * 1000),
+    };
+  }
+
+  /**
+   * Issue certificate (simplified admin interface)
+   */
+  async issueCertificate(options: {
+    commonName: string;
+    certType?: 'client' | 'server' | 'code_signing';
+    subjectDid?: string;
+    serviceId?: string;
+    email?: string;
+    validityDays?: number;
+    issuerId?: string;
+  }): Promise<{
+    id: string;
+    certificate: string;
+    serialNumber: string;
+    fingerprint: string;
+  }> {
+    return this.issueEntityCertificate({
+      commonName: options.commonName,
+      type: options.certType || 'client',
+      subjectDid: options.subjectDid,
+      serviceId: options.serviceId,
+      email: options.email,
+      validityDays: options.validityDays || 365,
+      intermediateId: options.issuerId,
+    });
+  }
+
+  /**
+   * Get certificates expiring within specified days (admin interface)
+   */
+  async getExpiringCertificates(days: number = 30): Promise<Array<{
+    id: string;
+    commonName: string;
+    serialNumber: string;
+    certType: string;
+    status: string;
+    subjectDid: string | null;
+    notAfter: Date;
+    daysUntilExpiry: number;
+  }>> {
+    const expiryDate = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+
+    const certificates = await db
+      .select()
+      .from(caEntityCertificates)
+      .where(
+        and(
+          eq(caEntityCertificates.status, 'active'),
+          sql`${caEntityCertificates.notAfter} <= ${expiryDate.toISOString()}`
+        )
+      )
+      .orderBy(caEntityCertificates.notAfter);
+
+    return certificates.map(cert => ({
+      id: cert.id,
+      commonName: cert.commonName,
+      serialNumber: cert.serialNumber,
+      certType: cert.certType,
+      status: cert.status,
+      subjectDid: cert.subjectDid,
+      notAfter: cert.notAfter,
+      daysUntilExpiry: Math.ceil((cert.notAfter.getTime() - Date.now()) / (24 * 60 * 60 * 1000)),
+    }));
   }
 }
 

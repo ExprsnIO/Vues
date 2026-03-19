@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { authMiddleware, optionalAuthMiddleware } from '../auth/middleware.js';
-import { db, dbType, userSettings } from '../db/index.js';
+import { db, userSettings } from '../db/index.js';
 import { eq } from 'drizzle-orm';
 import type {
   UserSettings,
@@ -65,9 +65,15 @@ const defaultSettings: Omit<UserSettings, 'updatedAt'> = {
   },
   editor: {
     defaultPresetId: null,
-    favoritePresetIds: [],
-    recentPresetIds: [],
-    customPresets: [],
+    favoritePresetIds: [] as string[],
+    recentPresetIds: [] as string[],
+    customPresets: [] as Array<{
+      id: string;
+      name: string;
+      description?: string;
+      effects: Array<{ type: string; params: Record<string, number | string | boolean> }>;
+      createdAt: string;
+    }>,
     showPresetDescriptions: true,
     autoApplyDefault: false,
   },
@@ -191,7 +197,7 @@ settingsRouter.post('/io.exprsn.settings.updateSettings', authMiddleware, zValid
       updatedAt: now,
     };
 
-    await db.insert(userSettings).values(newRow);
+    await db.insert(userSettings).values(newRow as typeof userSettings.$inferInsert);
 
     return c.json({
       settings: {

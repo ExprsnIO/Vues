@@ -665,7 +665,7 @@ export class PublishingService {
           and(
             eq(challenges.status, 'active'),
             inArray(
-              sql`LOWER(${challenges.hashtag})`,
+              sql`LOWER(${challenges.tag})`,
               tags.map((t) => t.toLowerCase())
             )
           )

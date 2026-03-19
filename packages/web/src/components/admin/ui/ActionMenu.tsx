@@ -156,9 +156,12 @@ export function ActionMenu({
         <div
           role="menu"
           className={`
-            absolute top-full mt-1 w-56 bg-surface border border-border rounded-lg shadow-lg z-50 p-1
+            absolute top-full mt-1 w-56 bg-surface border border-border rounded-lg shadow-xl z-[9999] p-1
             ${align === 'right' ? 'right-0' : 'left-0'}
           `}
+          style={{
+            boxShadow: '0 10px 40px rgba(0, 0, 0, 0.3), 0 2px 8px rgba(0, 0, 0, 0.2)'
+          }}
         >
           {renderSections()}
         </div>

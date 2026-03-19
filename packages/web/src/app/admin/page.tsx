@@ -197,6 +197,60 @@ export default function AdminDashboard() {
         )}
       </div>
 
+      {/* Identity & Access Stats */}
+      {isGlobal && (
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="bg-surface border border-border rounded-xl p-4">
+            <div className="flex items-center gap-3 mb-2">
+              <div className="p-2 bg-accent/10 rounded-lg">
+                <svg className="w-5 h-5 text-accent" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M12 1L3 5v6c0 5.25 3.75 10.15 9 11.35C17.25 21.15 21 16.25 21 11V5l-9-4zm-1 13l-3-3 1.41-1.41L11 11.17l4.59-4.58L17 8l-6 6z" />
+                </svg>
+              </div>
+              <div>
+                <p className="text-xs text-text-muted">did:exprsn Identities</p>
+                <p className="text-lg font-semibold text-text-primary">
+                  {formatCount(stats.exprsnIdentities || 0)}
+                </p>
+              </div>
+            </div>
+            <p className="text-xs text-text-muted">1.15x feed boost + 90 req/min rate limit</p>
+          </div>
+          <div className="bg-surface border border-border rounded-xl p-4">
+            <div className="flex items-center gap-3 mb-2">
+              <div className="p-2 bg-green-500/10 rounded-lg">
+                <svg className="w-5 h-5 text-green-500" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M12 1L3 5v6c0 5.25 3.75 10.15 9 11.35C17.25 21.15 21 16.25 21 11V5l-9-4zm-1 13l-3-3 1.41-1.41L11 11.17l4.59-4.58L17 8l-6 6z" />
+                </svg>
+              </div>
+              <div>
+                <p className="text-xs text-text-muted">Signed Videos</p>
+                <p className="text-lg font-semibold text-text-primary">
+                  {formatCount(stats.signedVideos || 0)}
+                </p>
+              </div>
+            </div>
+            <p className="text-xs text-text-muted">Cryptographically signed content</p>
+          </div>
+          <div className="bg-surface border border-border rounded-xl p-4">
+            <div className="flex items-center gap-3 mb-2">
+              <div className="p-2 bg-blue-500/10 rounded-lg">
+                <svg className="w-5 h-5 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                </svg>
+              </div>
+              <div>
+                <p className="text-xs text-text-muted">SSO Providers</p>
+                <p className="text-lg font-semibold text-text-primary">
+                  {stats.ssoProviders || 0}
+                </p>
+              </div>
+            </div>
+            <p className="text-xs text-text-muted">Active identity providers</p>
+          </div>
+        </div>
+      )}
+
       {/* Charts Section */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <AdminChart

@@ -198,23 +198,25 @@ analyticsRouter.get(
 
     // Get viewer profile info
     const viewerProfiles = await Promise.all(
-      topViewers.map(async (viewer) => {
-        const [profile] = await db
-          .select({
-            did: schema.users.did,
-            handle: schema.users.handle,
-            displayName: schema.users.displayName,
-            avatar: schema.users.avatar,
-          })
-          .from(schema.users)
-          .where(eq(schema.users.did, viewer.viewerDid))
-          .limit(1);
+      topViewers
+        .filter((viewer) => viewer.viewerDid !== null)
+        .map(async (viewer) => {
+          const [profile] = await db
+            .select({
+              did: schema.users.did,
+              handle: schema.users.handle,
+              displayName: schema.users.displayName,
+              avatar: schema.users.avatar,
+            })
+            .from(schema.users)
+            .where(eq(schema.users.did, viewer.viewerDid!))
+            .limit(1);
 
-        return {
-          ...profile,
-          viewCount: Number(viewer.viewCount),
-        };
-      })
+          return {
+            ...profile,
+            viewCount: Number(viewer.viewCount),
+          };
+        })
     );
 
     return c.json({
@@ -301,7 +303,7 @@ analyticsRouter.get(
         count: count(),
       })
       .from(schema.likes)
-      .innerJoin(schema.videos, eq(schema.likes.subjectUri, schema.videos.uri))
+      .innerJoin(schema.videos, eq(schema.likes.videoUri, schema.videos.uri))
       .where(
         and(
           eq(schema.videos.authorDid, userDid),
@@ -335,7 +337,7 @@ analyticsRouter.get(
         totalComments: sql<number>`COUNT(DISTINCT ${schema.comments.uri})`,
       })
       .from(schema.videos)
-      .leftJoin(schema.likes, eq(schema.likes.subjectUri, schema.videos.uri))
+      .leftJoin(schema.likes, eq(schema.likes.videoUri, schema.videos.uri))
       .leftJoin(schema.comments, eq(schema.comments.videoUri, schema.videos.uri))
       .where(
         and(
@@ -407,12 +409,12 @@ analyticsRouter.get(
     // Get recent likes
     const recentLikes = await db
       .select({
-        videoUri: schema.likes.subjectUri,
+        videoUri: schema.likes.videoUri,
         likerDid: schema.likes.authorDid,
         createdAt: schema.likes.createdAt,
       })
       .from(schema.likes)
-      .innerJoin(schema.videos, eq(schema.likes.subjectUri, schema.videos.uri))
+      .innerJoin(schema.videos, eq(schema.likes.videoUri, schema.videos.uri))
       .where(
         and(
           eq(schema.videos.authorDid, userDid),

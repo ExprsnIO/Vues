@@ -5,7 +5,7 @@
   "packageManager": "pnpm@9.15.0",
   "scripts": {
     "build": "turbo build",
-    "dev": "turbo dev --concurrency=32",
+    "dev": "sh scripts/dev-setup.sh && turbo dev --concurrency=32",
     "lint": "turbo lint",
     "test": "turbo test",
     "typecheck": "turbo typecheck",
@@ -14,9 +14,13 @@
     "db:generate": "pnpm --filter @exprsn/api db:generate",
     "db:migrate": "pnpm --filter @exprsn/api db:migrate",
     "db:push": "pnpm --filter @exprsn/api db:push",
-    "docker:up": "docker-compose up -d",
-    "docker:down": "docker-compose down",
-    "lexicon:gen": "pnpm --filter @exprsn/lexicons generate"
+    "docker:up": "docker compose up -d postgres redis minio createbuckets mailhog",
+    "docker:down": "docker compose down",
+    "docker:up:all": "docker compose up -d",
+    "docker:up:rabbitmq": "docker compose --profile rabbitmq up -d rabbitmq",
+    "lexicon:gen": "pnpm --filter @exprsn/lexicons generate",
+    "admin": "pnpm --filter @exprsn/api admin",
+    "setup": "pnpm --filter @exprsn/api setup"
   },
   "devDependencies": {
     "@types/node": "^22.19.13",

@@ -20,6 +20,12 @@ export const metadata: Metadata = {
   description: 'A decentralized short-form video platform built on AT Protocol',
   keywords: ['video', 'social', 'decentralized', 'atproto', 'bluesky'],
   authors: [{ name: 'Exprsn' }],
+  manifest: '/manifest.json',
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: 'black-translucent',
+    title: 'Exprsn',
+  },
   openGraph: {
     title: 'Exprsn',
     description: 'Express yourself with short-form videos',
@@ -39,7 +45,7 @@ export const viewport: Viewport = {
   initialScale: 1,
   maximumScale: 1,
   userScalable: false,
-  themeColor: '#000000',
+  themeColor: '#f83b85',
 };
 
 export default function RootLayout({

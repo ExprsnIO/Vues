@@ -4,6 +4,7 @@ import { useCallback } from 'react';
 import type { NotificationSettings as NotificationSettingsType, UserSettingsUpdate } from '@exprsn/shared';
 import { SettingsRow, ToggleSwitch, Select } from './SettingsSection';
 import { useSettingsStore } from '@/stores/settings-store';
+import { usePushNotifications } from '@/hooks/usePushNotifications';
 
 interface NotificationSettingsProps {
   notifications: NotificationSettingsType;
@@ -25,6 +26,8 @@ export function NotificationSettings({ notifications, onUpdate, isUpdating }: No
   // Use store values for display (more reliable than props)
   const currentNotifications = storeNotifications || notifications;
 
+  const { isSupported, permission, isSubscribed, subscribe, unsubscribe } = usePushNotifications();
+
   const handleChange = useCallback(
     <K extends keyof NotificationSettingsType>(key: K, value: NotificationSettingsType[K]) => {
       // Update Zustand store immediately
@@ -35,8 +38,51 @@ export function NotificationSettings({ notifications, onUpdate, isUpdating }: No
     [updateNotifications, onUpdate]
   );
 
+  const handlePushToggle = useCallback(async () => {
+    if (isSubscribed) {
+      await unsubscribe();
+    } else {
+      await subscribe();
+    }
+  }, [isSubscribed, subscribe, unsubscribe]);
+
+  const renderPushControl = () => {
+    if (!isSupported) {
+      return (
+        <span className="text-xs text-text-muted px-2 py-1 bg-surface-hover rounded-md">
+          Not supported
+        </span>
+      );
+    }
+    if (permission === 'denied') {
+      return (
+        <span className="text-xs text-amber-500 px-2 py-1 bg-amber-500/10 rounded-md">
+          Blocked in browser
+        </span>
+      );
+    }
+    return (
+      <ToggleSwitch
+        checked={isSubscribed}
+        onChange={handlePushToggle}
+        disabled={isUpdating}
+      />
+    );
+  };
+
   return (
     <div className="space-y-1">
+      <SettingsRow
+        label="Push notifications"
+        description={
+          permission === 'denied'
+            ? 'Enable push notifications in your browser settings to use this feature'
+            : 'Receive notifications even when the tab is closed'
+        }
+      >
+        {renderPushControl()}
+      </SettingsRow>
+
       <SettingsRow
         label="Likes"
         description="When someone likes your content"

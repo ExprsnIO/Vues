@@ -13,6 +13,9 @@ import {
 } from '../db/index.js';
 import { eq, desc, and, or, sql, lt, gte, inArray, notInArray, count, countDistinct, sum, isNull } from 'drizzle-orm';
 import { createUserPreferenceModel } from '../services/preferences/index.js';
+import { queueTimelinePrefetch } from '../services/prefetch/producer.js';
+import { getCachedTimeline } from '../services/prefetch/cache-reader.js';
+import { trackUserActivity } from '../services/prefetch/activity-bridge.js';
 import { createForYouAlgorithm } from '../services/feed/index.js';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import * as schema from '../db/schema.js';
@@ -24,14 +27,16 @@ const forYouAlgorithm = createForYouAlgorithm(db as PostgresJsDatabase<typeof sc
 export const feedRouter = new Hono();
 
 // Helper to build video views in batch (optimized to prevent N+1 queries)
+type VideoRecord = typeof schema.videos.$inferSelect;
+
 async function buildVideoViewsBatch(
-  videos: (typeof videos.$inferSelect)[],
+  videoRecords: VideoRecord[],
   viewerDid?: string
 ) {
-  if (videos.length === 0) return [];
+  if (videoRecords.length === 0) return [];
 
-  const videoUris = videos.map((v) => v.uri);
-  const authorDids = [...new Set(videos.map((v) => v.authorDid))];
+  const videoUris = videoRecords.map((v: VideoRecord) => v.uri);
+  const authorDids = [...new Set(videoRecords.map((v: VideoRecord) => v.authorDid))];
 
   // Batch fetch all authors in a single query
   const authorsResult = await db.query.users.findMany({
@@ -79,7 +84,7 @@ async function buildVideoViewsBatch(
   }
 
   // Build video views from pre-fetched data
-  return videos.map((video) => {
+  return videoRecords.map((video: VideoRecord) => {
     const author = authorMap.get(video.authorDid);
     const likeRecord = likesMap.get(video.uri);
     const repostRecord = repostsMap.get(video.uri);
@@ -124,6 +129,11 @@ async function buildVideoViewsBatch(
       createdAt: video.createdAt.toISOString(),
       indexedAt: video.indexedAt.toISOString(),
       viewer,
+      signature: video.contentSignature ? {
+        signed: true,
+        verified: video.signatureVerified ?? false,
+        timestamp: video.contentSignatureTimestamp,
+      } : undefined,
     };
   });
 }
@@ -153,11 +163,61 @@ function getModerationFilters() {
 /**
  * Get timeline (videos from followed users)
  * GET /xrpc/io.exprsn.feed.getTimeline
+ *
+ * Cache-first: checks prefetch cache before hitting DB.
+ * On cache miss, queries DB and queues a prefetch job for next time.
  */
 feedRouter.get('/io.exprsn.feed.getTimeline', authMiddleware, async (c) => {
   const userDid = c.get('did');
   const limit = Math.min(parseInt(c.req.query('limit') || '50', 10), 100);
   const cursor = c.req.query('cursor');
+
+  // Track activity for prefetch strategy (fire-and-forget)
+  trackUserActivity(userDid);
+
+  // ── Cache-first: check prefetch cache on initial page (no cursor) ──
+  if (!cursor) {
+    try {
+      const cached = await getCachedTimeline(userDid);
+      if (cached && cached.data.posts.length > 0) {
+        // Cache hit — resolve posts from DB by URI for fresh viewer state
+        const cachedUris = cached.data.posts.slice(0, limit).map(p => p.uri);
+
+        const cachedVideos = await db
+          .select()
+          .from(videos)
+          .where(and(
+            inArray(videos.uri, cachedUris),
+            ...getModerationFilters(),
+          ))
+          .orderBy(desc(videos.createdAt))
+          .limit(limit);
+
+        if (cachedVideos.length > 0) {
+          const videoViews = await buildVideoViewsBatch(cachedVideos, userDid);
+          const feed = videoViews.map((post) => ({ post }));
+
+          const lastCachedResult = cachedVideos[cachedVideos.length - 1];
+          const nextCursor = cachedVideos.length === limit && lastCachedResult
+            ? lastCachedResult.createdAt.toISOString()
+            : undefined;
+
+          // Queue background refresh (low priority, non-blocking)
+          queueTimelinePrefetch(userDid, 'low').catch(() => {});
+
+          return c.json({
+            feed,
+            cursor: nextCursor,
+            _cache: { hit: true, tier: cached.tier },
+          });
+        }
+      }
+    } catch {
+      // Cache read failed — fall through to DB
+    }
+  }
+
+  // ── Cache miss or paginated request: query DB directly ──
 
   // Get followed user DIDs
   const followedUsers = await db
@@ -174,7 +234,7 @@ feedRouter.get('/io.exprsn.feed.getTimeline', authMiddleware, async (c) => {
   // Get videos from followed users
   const timelineConditions = [
     inArray(videos.authorDid, followedDids),
-    ...getModerationFilters(), // Only show approved, non-deleted videos
+    ...getModerationFilters(),
   ];
   if (cursor) {
     const cursorDate = new Date(cursor);
@@ -198,9 +258,13 @@ feedRouter.get('/io.exprsn.feed.getTimeline', authMiddleware, async (c) => {
       ? lastResult.createdAt.toISOString()
       : undefined;
 
+  // Queue prefetch to warm cache for next request (fire-and-forget)
+  queueTimelinePrefetch(userDid, cursor ? 'low' : 'medium').catch(() => {});
+
   return c.json({
     feed,
     cursor: nextCursor,
+    _cache: { hit: false },
   });
 });
 
@@ -770,7 +834,7 @@ feedRouter.get('/io.exprsn.feed.getChallenges', optionalAuthMiddleware, async (c
         id: challenge.id,
         name: challenge.name,
         description: challenge.description,
-        hashtag: challenge.hashtag,
+        hashtag: challenge.tag,
         bannerUrl: challenge.bannerImageUrl,
         participantCount: challenge.participantCount,
         startDate: challenge.startAt.toISOString(),

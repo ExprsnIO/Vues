@@ -89,13 +89,11 @@ gpuAdminRouter.get('/xrpc/io.exprsn.admin.gpu.overview', async (c) => {
 gpuAdminRouter.get('/xrpc/io.exprsn.admin.gpu.workers', async (c) => {
   const gpuOnly = c.req.query('gpuOnly') === 'true';
 
-  let query = db.select().from(renderWorkers);
-
-  if (gpuOnly) {
-    query = query.where(eq(renderWorkers.gpuEnabled, true));
-  }
-
-  const workers = await query.orderBy(desc(renderWorkers.lastHeartbeat));
+  const workers = await db
+    .select()
+    .from(renderWorkers)
+    .where(gpuOnly ? eq(renderWorkers.gpuEnabled, true) : undefined)
+    .orderBy(desc(renderWorkers.lastHeartbeat));
 
   // Get active allocations for each worker
   const workersWithAllocations = await Promise.all(
@@ -267,23 +265,16 @@ gpuAdminRouter.get('/xrpc/io.exprsn.admin.gpu.metrics', async (c) => {
   // Calculate time window
   const since = new Date(Date.now() - hours * 60 * 60 * 1000);
 
-  let query = db
+  const whereConditions = workerId
+    ? and(eq(gpuMetrics.workerId, workerId), gte(gpuMetrics.timestamp, since))
+    : gte(gpuMetrics.timestamp, since);
+
+  const metrics = await db
     .select()
     .from(gpuMetrics)
-    .where(gte(gpuMetrics.timestamp, since))
+    .where(whereConditions)
     .orderBy(desc(gpuMetrics.timestamp))
     .limit(limit);
-
-  if (workerId) {
-    query = query.where(
-      and(
-        eq(gpuMetrics.workerId, workerId),
-        gte(gpuMetrics.timestamp, since)
-      )
-    );
-  }
-
-  const metrics = await query;
 
   // Calculate statistics
   const stats = {

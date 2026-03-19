@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { HTTPException } from 'hono/http-exception';
 import { nanoid } from 'nanoid';
 import { db } from '../db/index.js';
 import {
@@ -29,7 +30,7 @@ import {
   type OrgPermission,
   type OrganizationType,
 } from '@exprsn/shared';
-import { eq, and, desc, asc, sql, gte, count } from 'drizzle-orm';
+import { eq, and, desc, asc, sql, gte, count, lt } from 'drizzle-orm';
 import {
   createImportJob,
   generateCSVTemplate,
@@ -57,6 +58,7 @@ import {
   organizationNotFound,
   validationError,
 } from '../utils/api-errors.js';
+import { EmailProvider } from '../services/notifications/email.js';
 
 // Middleware type for authenticated requests
 type AuthContext = {
@@ -75,6 +77,7 @@ type OrgPermissionResult = {
     ownerDid: string;
     name: string;
     type: string;
+    requireContentApproval: boolean;
   };
 };
 
@@ -91,6 +94,7 @@ async function checkOrgPermission(
         ownerDid: organizations.ownerDid,
         name: organizations.name,
         type: organizations.type,
+        requireContentApproval: organizations.requireContentApproval,
       },
     })
     .from(organizationMembers)
@@ -504,7 +508,7 @@ organizationRoutes.post('/io.exprsn.org.setup', authMiddleware, async (c) => {
           id: nanoid(),
           organizationId: orgId,
           name: group.name,
-          color: group.color || '#6366f1',
+          color: '#6366f1', // Default color
           description: group.description,
           type: 'group',
           createdBy: userDid,
@@ -518,6 +522,17 @@ organizationRoutes.post('/io.exprsn.org.setup', authMiddleware, async (c) => {
 
   // Invite initial members
   if (body.initialMembers && body.initialMembers.length > 0) {
+    // Get organization and inviter info for emails
+    const orgInfo = await db.query.organizations.findFirst({
+      where: eq(organizations.id, orgId),
+    });
+    const inviterInfo = await db.query.users.findFirst({
+      where: eq(users.did, userDid),
+    });
+
+    const emailProvider = new EmailProvider();
+    const baseUrl = process.env.APP_URL || 'https://exprsn.io';
+
     for (const member of body.initialMembers) {
       try {
         // Create invite
@@ -536,8 +551,25 @@ organizationRoutes.post('/io.exprsn.org.setup', authMiddleware, async (c) => {
           status: 'pending',
         });
 
-        // TODO: Send invite email via email service
-        // await sendInviteEmail(member.email, inviteCode, orgName);
+        // Send invite email
+        const acceptUrl = `${baseUrl}/invite/${inviteCode}`;
+        await emailProvider.sendOrgInvite(member.email.toLowerCase(), {
+          event: 'org.invite',
+          userDid: '', // Invitee may not have an account yet
+          timestamp: new Date().toISOString(),
+          data: {
+            organizationId: orgId,
+            organizationName: orgInfo?.name || 'Organization',
+            organizationLogo: orgInfo?.avatar || undefined,
+            inviterDid: userDid,
+            inviterHandle: inviterInfo?.handle || 'someone',
+            inviterDisplayName: inviterInfo?.displayName || inviterInfo?.handle,
+            role: member.role,
+            inviteToken: inviteCode,
+            acceptUrl,
+            expiresAt: expiresAt.toISOString(),
+          },
+        });
 
         membersInvited++;
       } catch (e) {
@@ -551,16 +583,17 @@ organizationRoutes.post('/io.exprsn.org.setup', authMiddleware, async (c) => {
     id: nanoid(),
     organizationId: orgId,
     actorDid: userDid,
-    type: 'organization_setup',
-    metadata: JSON.stringify({
+    action: 'organization_setup',
+    targetType: 'organization',
+    targetId: orgId,
+    details: {
       hostingType: body.hostingType,
       plcProvider: body.plcProvider,
       federationEnabled: body.federationEnabled,
       membersInvited,
       rolesCreated,
       groupsCreated,
-    }),
-    createdAt: new Date(),
+    },
   });
 
   // Get updated organization
@@ -672,7 +705,7 @@ organizationRoutes.get('/io.exprsn.org.members.list', authMiddleware, async (c) 
     query = query.where(
       and(
         eq(organizationMembers.organizationId, orgId),
-        sql`${organizationMembers.joinedAt} < ${new Date(cursor)}`
+        lt(organizationMembers.joinedAt, new Date(cursor))
       )
     ) as typeof query;
   }
@@ -2037,7 +2070,7 @@ organizationRoutes.get('/io.exprsn.org.activity', authMiddleware, async (c) => {
     query = query.where(
       and(
         eq(organizationActivity.organizationId, organizationId),
-        sql`${organizationActivity.createdAt} < ${new Date(cursor)}`
+        lt(organizationActivity.createdAt, new Date(cursor))
       )
     ) as typeof query;
   }
@@ -2532,7 +2565,7 @@ organizationRoutes.get('/io.exprsn.org.getVideos', optionalAuthMiddleware, async
   if (cursor) {
     // @ts-expect-error - Drizzle query chaining
     query = query.where(
-      and(eq(videos.publishedAsOrgId, orgId), sql`${videos.createdAt} < ${new Date(cursor)}`)
+      and(eq(videos.publishedAsOrgId, orgId), lt(videos.createdAt, new Date(cursor)))
     );
   }
 
@@ -3048,6 +3081,15 @@ organizationRoutes.post('/io.exprsn.org.invites.accept', authMiddleware, async (
     throw new HTTPException(400, { message: 'Invite has expired' });
   }
 
+  // Check if invite has exceeded max uses
+  if (invite.maxUses !== null && invite.uses >= invite.maxUses) {
+    await db
+      .update(organizationInvites)
+      .set({ status: 'exhausted' })
+      .where(eq(organizationInvites.id, invite.id));
+    throw new HTTPException(400, { message: 'Invite has reached maximum uses' });
+  }
+
   // Check if already a member
   const existingMember = await db
     .select()
@@ -3077,10 +3119,17 @@ organizationRoutes.post('/io.exprsn.org.invites.accept', authMiddleware, async (
     joinedAt: now,
   });
 
-  // Update invite status
+  // Update invite: increment uses and potentially mark as accepted/exhausted
+  const newUses = (invite.uses || 0) + 1;
+  const isExhausted = invite.maxUses !== null && newUses >= invite.maxUses;
+
   await db
     .update(organizationInvites)
-    .set({ status: 'accepted', acceptedAt: now })
+    .set({
+      uses: newUses,
+      status: isExhausted ? 'accepted' : 'pending', // Keep pending if reusable, mark accepted when exhausted
+      acceptedAt: isExhausted ? now : invite.acceptedAt,
+    })
     .where(eq(organizationInvites.id, invite.id));
 
   // Increment member count

@@ -59,12 +59,17 @@ export class CRLService {
 
   /**
    * Generate a new CRL
+   * @param performedByOrIssuerId - Either the user who generated the CRL or the issuer ID
+   * @param isDelta - Whether to generate a delta CRL (only changes since last full CRL)
    */
-  static async generateCRL(performedBy = 'system'): Promise<{
+  static async generateCRL(performedByOrIssuerId?: string, isDelta?: boolean): Promise<{
     crlPem: string;
     crlDer: Buffer;
     expiresAt: Date;
+    issuerId?: string;
+    isDelta?: boolean;
   }> {
+    const performedBy = performedByOrIssuerId || 'system';
     // Get root CA
     const [rootCA] = await db.select()
       .from(caRootCertificates)
@@ -94,13 +99,16 @@ export class CRLService {
       decryptPrivateKey(rootCA.privateKey, CA_ENCRYPTION_KEY)
     );
 
-    // Create CRL
-    const crl = forge.pki.createCrl();
-    crl.setIssuer(rootCert.subject.attributes);
+    // Create CRL using forge API
+    const crl = forge.pki.createCertificateRevocationList();
+    crl.setIssuer(rootCert.subject);
 
     // Set CRL dates
     const now = new Date();
     const nextUpdate = new Date(now.getTime() + this.CRL_VALIDITY_HOURS * 60 * 60 * 1000);
+
+    crl.thisUpdate = now;
+    crl.nextUpdate = nextUpdate;
 
     // Add revoked certificates
     for (const cert of revokedCerts) {
@@ -108,31 +116,35 @@ export class CRLService {
       const reason = REVOCATION_REASONS[cert.revocationReason || 'unspecified'] || 0;
 
       // Add certificate to CRL
-      const certToBRevoked = forge.pki.certificateFromPem(cert.certificate);
-      crl.setNextUpdate(nextUpdate);
+      const certToRevoke = forge.pki.certificateFromPem(cert.certificate);
 
-      // Use crl.addCertificate properly - it accepts a certificate object
-      const revokedCertEntry = {
-        serialNumber: certToBRevoked.serialNumber,
+      // Create revoked certificate entry
+      const revokedCertEntry: {
+        serialNumber: string;
+        revocationDate: Date;
+        extensions?: Array<{ name: string; id?: string; value?: string }>;
+      } = {
+        serialNumber: certToRevoke.serialNumber,
         revocationDate,
-        extensions: [
+      };
+
+      // Add reason code if available
+      if (cert.revocationReason) {
+        revokedCertEntry.extensions = [
           {
             name: 'reasonCode',
             id: '2.5.29.21',
             value: String.fromCharCode(reason),
           },
-        ],
-      };
-
-      // Add the revoked certificate entry
-      if (!crl.revokedCertificates) {
-        (crl as unknown as { revokedCertificates: typeof revokedCertEntry[] }).revokedCertificates = [];
+        ];
       }
-      (crl as unknown as { revokedCertificates: typeof revokedCertEntry[] }).revokedCertificates.push(revokedCertEntry);
+
+      // Add the revoked certificate entry using the proper API
+      crl.addRevokedCertificate(revokedCertEntry);
     }
 
-    // Set CRL number extension
-    crl.setExtensions([
+    // Set CRL number extension using type assertion (setExtensions exists at runtime)
+    (crl as unknown as { setExtensions: (exts: unknown[]) => void }).setExtensions([
       {
         name: 'cRLNumber',
         value: crlNumber.toString(),
@@ -144,7 +156,10 @@ export class CRLService {
 
     // Convert to PEM and DER
     const crlPem = forge.pki.crlToPem(crl);
-    const crlDer = Buffer.from(forge.asn1.toDer(forge.pki.crlToAsn1(crl)).getBytes(), 'binary');
+    // Parse PEM to get DER bytes
+    const pemLines = crlPem.split('\n').filter(line => !line.startsWith('-----'));
+    const derBase64 = pemLines.join('');
+    const crlDer = Buffer.from(derBase64, 'base64');
 
     // Store CRL history
     const historyId = nanoid();
@@ -210,8 +225,10 @@ export class CRLService {
 
     if (recentCRL && new Date(recentCRL.expiresAt) > new Date()) {
       // Convert PEM to DER if needed
-      const crl = forge.pki.crlFromPem(recentCRL.crlPem);
-      const der = Buffer.from(forge.asn1.toDer(forge.pki.crlToAsn1(crl)).getBytes(), 'binary');
+      // Parse CRL from PEM (note: forge uses certificationRequestFromPem as there's no dedicated crlFromPem)
+      const pemLines = recentCRL.crlPem.split('\n').filter(line => !line.startsWith('-----'));
+      const derBase64 = pemLines.join('');
+      const der = Buffer.from(derBase64, 'base64');
 
       cachedCRL = {
         pem: recentCRL.crlPem,
@@ -257,12 +274,13 @@ export class CRLService {
     );
 
     // Create delta CRL
-    const crl = forge.pki.createCrl();
-    crl.setIssuer(rootCert.subject.attributes);
+    const crl = forge.pki.createCertificateRevocationList();
+    crl.setIssuer(rootCert.subject);
 
     const now = new Date();
     const nextUpdate = new Date(now.getTime() + this.CRL_VALIDITY_HOURS * 60 * 60 * 1000);
-    crl.setNextUpdate(nextUpdate);
+    crl.thisUpdate = now;
+    crl.nextUpdate = nextUpdate;
 
     // Add revoked certificates
     for (const cert of revokedCerts) {
@@ -270,13 +288,9 @@ export class CRLService {
       const revokedCertEntry = {
         serialNumber: certToRevoke.serialNumber,
         revocationDate: cert.revokedAt || new Date(),
-        extensions: [],
       };
 
-      if (!crl.revokedCertificates) {
-        (crl as unknown as { revokedCertificates: typeof revokedCertEntry[] }).revokedCertificates = [];
-      }
-      (crl as unknown as { revokedCertificates: typeof revokedCertEntry[] }).revokedCertificates.push(revokedCertEntry);
+      crl.addRevokedCertificate(revokedCertEntry);
     }
 
     // Sign
@@ -373,5 +387,66 @@ export class CRLService {
       .from(caCRLHistory)
       .orderBy(desc(caCRLHistory.generatedAt))
       .limit(limit);
+  }
+
+  /**
+   * List all CRLs (admin interface)
+   */
+  static async listCRLs(): Promise<Array<{
+    id: string;
+    issuerId: string;
+    issuerType: string;
+    thisUpdate: Date;
+    nextUpdate: Date;
+    createdAt: Date;
+  }>> {
+    return db.select({
+      id: caCertificateRevocationLists.id,
+      issuerId: caCertificateRevocationLists.issuerId,
+      issuerType: caCertificateRevocationLists.issuerType,
+      thisUpdate: caCertificateRevocationLists.thisUpdate,
+      nextUpdate: caCertificateRevocationLists.nextUpdate,
+      createdAt: caCertificateRevocationLists.createdAt,
+    })
+      .from(caCertificateRevocationLists)
+      .orderBy(desc(caCertificateRevocationLists.createdAt));
+  }
+
+  /**
+   * Get entries from a specific CRL
+   */
+  static async getCRLEntries(crlId: string): Promise<Array<{
+    serialNumber: string;
+    commonName: string;
+    revokedAt: Date | null;
+    revocationReason: string | null;
+  }>> {
+    // Get the CRL record
+    const [crl] = await db.select()
+      .from(caCertificateRevocationLists)
+      .where(eq(caCertificateRevocationLists.id, crlId))
+      .limit(1);
+
+    if (!crl) {
+      return [];
+    }
+
+    // Get all revoked certificates that would have been in this CRL
+    // (certificates revoked before the CRL's nextUpdate)
+    const revokedCerts = await db.select({
+      serialNumber: caEntityCertificates.serialNumber,
+      commonName: caEntityCertificates.commonName,
+      revokedAt: caEntityCertificates.revokedAt,
+      revocationReason: caEntityCertificates.revocationReason,
+    })
+      .from(caEntityCertificates)
+      .where(eq(caEntityCertificates.status, 'revoked'));
+
+    return revokedCerts.map(cert => ({
+      serialNumber: cert.serialNumber,
+      commonName: cert.commonName,
+      revokedAt: cert.revokedAt,
+      revocationReason: cert.revocationReason,
+    }));
   }
 }

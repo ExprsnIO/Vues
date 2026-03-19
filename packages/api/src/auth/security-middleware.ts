@@ -11,25 +11,132 @@ import { db } from '../db/index.js';
 import { organizationMembers, organizationBilling } from '../db/schema.js';
 import { eq, and, desc } from 'drizzle-orm';
 
+// ==================== TRUSTED PROXY CONFIGURATION ====================
+
+/**
+ * Configuration for trusted proxy handling
+ * SECURITY: Only trust proxy headers when behind a known reverse proxy
+ */
+interface TrustedProxyConfig {
+  enabled: boolean;
+  trustedIPs: string[]; // IPs/CIDRs of trusted proxies (e.g., ['127.0.0.1', '10.0.0.0/8'])
+}
+
+// Cache the trusted proxy configuration
+let trustedProxyConfig: TrustedProxyConfig | null = null;
+
+function getTrustedProxyConfig(): TrustedProxyConfig {
+  if (trustedProxyConfig !== null) {
+    return trustedProxyConfig;
+  }
+
+  const trustProxy = process.env.TRUST_PROXY;
+  const trustedIPs = process.env.TRUSTED_PROXY_IPS;
+
+  // Explicit configuration via environment
+  if (trustProxy === 'true' || trustProxy === '1') {
+    trustedProxyConfig = {
+      enabled: true,
+      trustedIPs: trustedIPs ? trustedIPs.split(',').map(ip => ip.trim()) : [],
+    };
+  } else if (trustProxy === 'false' || trustProxy === '0') {
+    trustedProxyConfig = { enabled: false, trustedIPs: [] };
+  } else {
+    // Auto-detect: trust proxy only in production with common cloud provider indicators
+    const isCloudEnvironment = !!(
+      process.env.KUBERNETES_SERVICE_HOST || // Kubernetes
+      process.env.FLY_APP_NAME ||             // Fly.io
+      process.env.RAILWAY_ENVIRONMENT ||      // Railway
+      process.env.RENDER_SERVICE_ID ||        // Render
+      process.env.HEROKU_APP_ID ||            // Heroku
+      process.env.VERCEL                      // Vercel
+    );
+
+    trustedProxyConfig = {
+      enabled: isCloudEnvironment,
+      trustedIPs: [],
+    };
+
+    if (isCloudEnvironment && process.env.NODE_ENV === 'production') {
+      console.log('[Security] Auto-detected cloud environment, trusting proxy headers');
+    }
+  }
+
+  return trustedProxyConfig;
+}
+
+/**
+ * Check if an IP matches any trusted proxy IP/CIDR
+ */
+function isIPTrusted(ip: string, trustedIPs: string[]): boolean {
+  if (trustedIPs.length === 0) {
+    // No specific IPs configured = trust all (when proxy trust is enabled)
+    return true;
+  }
+
+  // Simple IP matching (exact match)
+  // For production, consider using a proper CIDR matching library
+  return trustedIPs.some(trusted => {
+    if (trusted.includes('/')) {
+      // CIDR notation - simplified check for common cases
+      const [network, bits] = trusted.split('/');
+      if (!network || !bits) return false;
+
+      // For now, just match the network prefix for common /8, /16, /24
+      const bitsNum = parseInt(bits, 10);
+      if (bitsNum === 8) return ip.startsWith(network.split('.')[0] + '.');
+      if (bitsNum === 16) return ip.startsWith(network.split('.').slice(0, 2).join('.') + '.');
+      if (bitsNum === 24) return ip.startsWith(network.split('.').slice(0, 3).join('.') + '.');
+      return false;
+    }
+    return ip === trusted;
+  });
+}
+
 // ==================== IP-BASED RATE LIMITING ====================
 
 /**
  * Get client IP address from request
+ * SECURITY: Only trusts proxy headers when explicitly configured or in known cloud environments
  */
 function getClientIP(c: Context): string {
-  // Check common proxy headers
-  const forwarded = c.req.header('x-forwarded-for');
-  if (forwarded) {
-    // x-forwarded-for can contain multiple IPs, take the first (client)
-    return forwarded.split(',')[0].trim();
+  const proxyConfig = getTrustedProxyConfig();
+
+  // Only trust proxy headers if configured to do so
+  if (proxyConfig.enabled) {
+    const forwarded = c.req.header('x-forwarded-for');
+    if (forwarded) {
+      // x-forwarded-for can contain multiple IPs: client, proxy1, proxy2, ...
+      // Take the leftmost (client) IP
+      const clientIP = forwarded.split(',')[0]?.trim();
+      if (clientIP && clientIP !== 'unknown') {
+        return clientIP;
+      }
+    }
+
+    const realIp = c.req.header('x-real-ip');
+    if (realIp) {
+      return realIp;
+    }
+
+    // CF-Connecting-IP for Cloudflare
+    const cfIP = c.req.header('cf-connecting-ip');
+    if (cfIP) {
+      return cfIP;
+    }
+  } else if (process.env.NODE_ENV === 'development') {
+    // In development, still read headers but log a warning once
+    const forwarded = c.req.header('x-forwarded-for');
+    if (forwarded) {
+      console.warn(
+        '[Security] Proxy headers present but TRUST_PROXY not enabled. ' +
+        'Set TRUST_PROXY=true if behind a reverse proxy.'
+      );
+    }
   }
 
-  const realIp = c.req.header('x-real-ip');
-  if (realIp) {
-    return realIp;
-  }
-
-  // Fallback to connection info (may not be available in all environments)
+  // Fallback - in serverless/edge environments this may return 'unknown'
+  // but rate limiting will still work (all unknown IPs share limits)
   return 'unknown';
 }
 

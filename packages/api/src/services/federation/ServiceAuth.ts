@@ -159,8 +159,8 @@ export class ServiceAuth {
       certificateId,
       serviceId: cert.serviceId || undefined,
       subjectDid: cert.subjectDid || undefined,
-      commonName: certInfo.commonName,
-      organization: certInfo.organization,
+      commonName: certInfo.subject.commonName || certInfo.subject.CN || 'Unknown',
+      organization: certInfo.subject.organizationName || certInfo.subject.O,
       timestamp: timestampDate,
       nonce,
     };
@@ -310,7 +310,8 @@ export class ServiceAuth {
       chain.push(root.certificate);
     }
 
-    return verifyCertificateChain(cert.certificate, chain);
+    const result = verifyCertificateChain(cert.certificate, chain);
+    return result.valid;
   }
 
   /**

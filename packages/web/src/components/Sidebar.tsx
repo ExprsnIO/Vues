@@ -12,12 +12,23 @@ import {
   useActiveOrganization,
   useSwitchOrganization,
 } from '@/stores/organization-store';
+import { useMessagingStore } from '@/stores/messaging-store';
 // SettingsPanel removed - settings is now a full page at /settings
 
 const NAV_ITEMS = [
   { href: '/', label: 'For You', icon: HomeIcon },
   { href: '/following', label: 'Following', icon: FollowingIcon },
   { href: '/discover', label: 'Discover', icon: DiscoverIcon },
+];
+
+const CREATOR_NAV_ITEMS = [
+  { href: '/analytics', label: 'Analytics', icon: AnalyticsIcon },
+];
+
+const MODERATOR_NAV_ITEMS = [
+  { href: '/mod', label: 'Mod Queue', icon: ModQueueIcon },
+  { href: '/mod/reports', label: 'Reports', icon: ReportsIcon },
+  { href: '/mod/users', label: 'User Review', icon: ModUsersIcon },
 ];
 
 // Context for sidebar state
@@ -80,7 +91,7 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
 
 export function Sidebar() {
   const pathname = usePathname();
-  const { user, isLoading, signOut } = useAuth();
+  const { user, isLoading, signOut, isModerator } = useAuth();
   const { isOpen, close, openSettings } = useSidebar();
 
   // Fetch unread notification count
@@ -91,17 +102,21 @@ export function Sidebar() {
     refetchInterval: 30000, // Refresh every 30 seconds
   });
 
-  // Fetch unread message count from conversations
-  const { data: conversationsData } = useQuery({
-    queryKey: ['conversations'],
-    queryFn: () => api.getConversations({ limit: 50 }),
-    enabled: !!user,
-    refetchInterval: 30000, // Refresh every 30 seconds
+  // Fetch pending reports badge for mod queue (moderators only)
+  const { data: quickStats } = useQuery({
+    queryKey: ['mod-quick-stats'],
+    queryFn: () => api.getQuickStats(),
+    enabled: !!user && isModerator,
+    refetchInterval: 60000, // Refresh every minute
+    retry: false,
   });
 
+  // Read unread message count from the messaging store — MessagingProvider owns polling/WebSocket
+  const totalUnreadCount = useMessagingStore((state) => state.totalUnreadCount);
+  const openMessagingDrawer = useMessagingStore((state) => state.openDrawer);
+
   const unreadCount = notificationData?.count || 0;
-  const unreadMessageCount =
-    conversationsData?.conversations?.reduce((sum, c) => sum + (c.unreadCount || 0), 0) || 0;
+  const unreadMessageCount = totalUnreadCount;
 
   return (
     <>
@@ -189,17 +204,12 @@ export function Sidebar() {
 
           {/* Messages (only show when logged in) */}
           {user && (
-            <Link
-              href="/messages"
-              className={cn(
-                'flex items-center gap-3 px-4 py-3 rounded-lg transition-colors',
-                pathname.startsWith('/messages')
-                  ? 'bg-surface text-text-primary'
-                  : 'text-text-muted hover:bg-surface-hover hover:text-text-primary'
-              )}
+            <button
+              onClick={openMessagingDrawer}
+              className="w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-colors text-text-muted hover:bg-surface-hover hover:text-text-primary"
             >
               <div className="relative">
-                <MessagesIcon className="w-6 h-6" filled={pathname.startsWith('/messages')} />
+                <MessagesIcon className="w-6 h-6" filled={false} />
                 {unreadMessageCount > 0 && (
                   <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] bg-accent text-text-inverse text-xs font-bold rounded-full flex items-center justify-center px-1">
                     {unreadMessageCount > 99 ? '99+' : unreadMessageCount}
@@ -207,7 +217,7 @@ export function Sidebar() {
                 )}
               </div>
               <span className="font-medium">Messages</span>
-            </Link>
+            </button>
           )}
 
           {/* Bookmarks (only show when logged in) */}
@@ -225,7 +235,92 @@ export function Sidebar() {
               <span className="font-medium">Bookmarks</span>
             </Link>
           )}
+
+          {/* Creator tools (only show when logged in) */}
+          {user && (
+            <>
+              <div className="pt-2 pb-1">
+                <p className="px-4 text-[10px] font-semibold text-text-muted uppercase tracking-wider">
+                  Creator
+                </p>
+              </div>
+              {CREATOR_NAV_ITEMS.map((item) => {
+                const isActive = pathname.startsWith(item.href);
+                const Icon = item.icon;
+                return (
+                  <Link
+                    key={item.href}
+                    href={item.href}
+                    className={cn(
+                      'flex items-center gap-3 px-4 py-3 rounded-lg transition-colors',
+                      isActive
+                        ? 'bg-surface text-text-primary'
+                        : 'text-text-muted hover:bg-surface-hover hover:text-text-primary'
+                    )}
+                  >
+                    <Icon className="w-6 h-6" />
+                    <span className="font-medium">{item.label}</span>
+                  </Link>
+                );
+              })}
+            </>
+          )}
+
+          {/* Moderation tools (only show for moderators+) */}
+          {user && isModerator && (
+            <>
+              <div className="pt-2 pb-1">
+                <p className="px-4 text-[10px] font-semibold text-orange-500/80 uppercase tracking-wider">
+                  Moderation
+                </p>
+              </div>
+              {MODERATOR_NAV_ITEMS.map((item) => {
+                const isActive =
+                  item.href === '/mod'
+                    ? pathname === '/mod'
+                    : pathname.startsWith(item.href);
+                const Icon = item.icon;
+                const pendingBadge =
+                  item.href === '/mod' && quickStats?.pendingReports
+                    ? quickStats.pendingReports
+                    : 0;
+
+                return (
+                  <Link
+                    key={item.href}
+                    href={item.href}
+                    className={cn(
+                      'flex items-center gap-3 px-4 py-3 rounded-lg transition-colors',
+                      isActive
+                        ? 'bg-orange-500/10 text-orange-500'
+                        : 'text-text-muted hover:bg-surface-hover hover:text-text-primary'
+                    )}
+                  >
+                    <div className="relative">
+                      <Icon className="w-6 h-6" />
+                      {pendingBadge > 0 && (
+                        <span className="absolute -top-1 -right-1 min-w-[16px] h-[16px] bg-orange-500 text-white text-[10px] font-bold rounded-full flex items-center justify-center px-0.5">
+                          {pendingBadge > 99 ? '99+' : pendingBadge}
+                        </span>
+                      )}
+                    </div>
+                    <span className="font-medium">{item.label}</span>
+                  </Link>
+                );
+              })}
+            </>
+          )}
         </nav>
+
+        {/* Legal links */}
+        <div className="px-4 py-2 flex items-center gap-3 text-xs text-text-muted">
+          <Link href="/terms" className="hover:text-text-primary transition-colors">
+            Terms
+          </Link>
+          <Link href="/privacy" className="hover:text-text-primary transition-colors">
+            Privacy
+          </Link>
+        </div>
 
         {/* User section with Organization Switcher */}
         <div className="p-4 border-t border-border">
@@ -250,6 +345,9 @@ export function Sidebar() {
 // Mobile header with hamburger menu
 export function MobileHeader() {
   const { toggle } = useSidebar();
+  const { user } = useAuth();
+  const totalUnreadCount = useMessagingStore((state) => state.totalUnreadCount);
+  const openMessagingDrawer = useMessagingStore((state) => state.openDrawer);
 
   return (
     <header className="lg:hidden fixed top-0 left-0 right-0 h-14 bg-background-alt border-b border-border z-30 flex items-center px-4">
@@ -260,46 +358,121 @@ export function MobileHeader() {
       >
         <MenuIcon className="w-6 h-6" />
       </button>
-      <Link href="/" className="flex items-center gap-2 ml-2">
+      <Link href="/" className="flex items-center gap-2 ml-2 flex-1">
         <div className="w-7 h-7 bg-gradient-to-br from-accent to-accent-hover rounded-lg flex items-center justify-center">
           <span className="text-text-inverse font-bold text-sm">E</span>
         </div>
         <span className="text-lg font-bold text-text-primary">exprsn</span>
       </Link>
+      {user && (
+        <button
+          onClick={openMessagingDrawer}
+          className="relative p-2 text-text-muted hover:text-text-primary"
+          aria-label="Messages"
+        >
+          <MessagesIcon className="w-6 h-6" />
+          {totalUnreadCount > 0 && (
+            <span className="absolute top-1 right-1 min-w-[16px] h-[16px] bg-accent text-text-inverse text-[10px] font-bold rounded-full flex items-center justify-center px-1">
+              {totalUnreadCount > 99 ? '99+' : totalUnreadCount}
+            </span>
+          )}
+        </button>
+      )}
     </header>
   );
 }
 
-// Bottom navigation for mobile
+// Bottom navigation for mobile — 5-item Instagram-style layout:
+// For You | Discover | [+] Create | Messages | Profile
 export function MobileBottomNav() {
   const pathname = usePathname();
+  const { user } = useAuth();
+  const totalUnreadCount = useMessagingStore((state) => state.totalUnreadCount);
+  const openMessagingDrawer = useMessagingStore((state) => state.openDrawer);
+
+  const isHomeActive = pathname === '/';
+  const isDiscoverActive = pathname.startsWith('/discover');
 
   return (
     <nav className="lg:hidden fixed bottom-0 left-0 right-0 h-16 bg-background-alt border-t border-border z-30 flex items-center justify-around px-2">
-      {NAV_ITEMS.slice(0, 4).map((item) => {
-        const isActive =
-          pathname === item.href || (item.href !== '/' && pathname.startsWith(item.href));
-        const Icon = item.icon;
+      {/* For You */}
+      <Link
+        href="/"
+        className={cn(
+          'flex flex-col items-center gap-1 p-2',
+          isHomeActive ? 'text-text-primary' : 'text-text-muted'
+        )}
+      >
+        <HomeIcon className="w-6 h-6" filled={isHomeActive} />
+        <span className="text-xs">For You</span>
+      </Link>
 
-        return (
-          <Link
-            key={item.href}
-            href={item.href}
-            className={cn(
-              'flex flex-col items-center gap-1 p-2',
-              isActive ? 'text-text-primary' : 'text-text-muted'
-            )}
-          >
-            <Icon className="w-6 h-6" filled={isActive} />
-            <span className="text-xs">{item.label}</span>
-          </Link>
-        );
-      })}
-      <Link href="/upload" className="flex flex-col items-center gap-1 p-2 text-accent">
-        <div className="w-8 h-8 bg-gradient-to-r from-primary-500 to-primary-600 rounded-lg flex items-center justify-center">
+      {/* Discover */}
+      <Link
+        href="/discover"
+        className={cn(
+          'flex flex-col items-center gap-1 p-2',
+          isDiscoverActive ? 'text-text-primary' : 'text-text-muted'
+        )}
+      >
+        <DiscoverIcon className="w-6 h-6" filled={isDiscoverActive} />
+        <span className="text-xs">Discover</span>
+      </Link>
+
+      {/* Create */}
+      <Link href="/upload" className="flex flex-col items-center gap-1 p-2">
+        <div className="w-10 h-7 bg-gradient-to-r from-primary-500 to-primary-600 rounded-lg flex items-center justify-center">
           <PlusIcon className="w-5 h-5 text-white" />
         </div>
+        <span className="text-xs text-text-muted">Create</span>
       </Link>
+
+      {/* Messages */}
+      <button
+        onClick={openMessagingDrawer}
+        className="flex flex-col items-center gap-1 p-2 text-text-muted relative"
+        aria-label="Messages"
+      >
+        <div className="relative">
+          <MessagesIcon className="w-6 h-6" />
+          {totalUnreadCount > 0 && (
+            <span className="absolute -top-1 -right-1 min-w-[16px] h-[16px] bg-accent text-text-inverse text-[10px] font-bold rounded-full flex items-center justify-center px-0.5">
+              {totalUnreadCount > 99 ? '99+' : totalUnreadCount}
+            </span>
+          )}
+        </div>
+        <span className="text-xs">Messages</span>
+      </button>
+
+      {/* Profile */}
+      {user ? (
+        <Link
+          href={`/profile/${user.handle}`}
+          className={cn(
+            'flex flex-col items-center gap-1 p-2',
+            pathname.startsWith('/profile') ? 'text-text-primary' : 'text-text-muted'
+          )}
+        >
+          <div className="w-6 h-6 rounded-full bg-surface overflow-hidden border border-border">
+            {user.avatar ? (
+              <img src={user.avatar} alt={user.handle} className="w-full h-full object-cover" />
+            ) : (
+              <span className="w-full h-full flex items-center justify-center text-xs font-medium">
+                {user.handle[0]?.toUpperCase()}
+              </span>
+            )}
+          </div>
+          <span className="text-xs">Profile</span>
+        </Link>
+      ) : (
+        <Link
+          href="/login"
+          className="flex flex-col items-center gap-1 p-2 text-text-muted"
+        >
+          <UserCircleIcon className="w-6 h-6" />
+          <span className="text-xs">Profile</span>
+        </Link>
+      )}
     </nav>
   );
 }
@@ -860,6 +1033,78 @@ function UserCircleIcon({ className }: { className?: string }) {
         strokeLinecap="round"
         strokeLinejoin="round"
         d="M17.982 18.725A7.488 7.488 0 0012 15.75a7.488 7.488 0 00-5.982 2.975m11.963 0a9 9 0 10-11.963 0m11.963 0A8.966 8.966 0 0112 21a8.966 8.966 0 01-5.982-2.275M15 9.75a3 3 0 11-6 0 3 3 0 016 0z"
+      />
+    </svg>
+  );
+}
+
+function AnalyticsIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.5}
+      viewBox="0 0 24 24"
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z"
+      />
+    </svg>
+  );
+}
+
+function ModQueueIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.5}
+      viewBox="0 0 24 24"
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z"
+      />
+    </svg>
+  );
+}
+
+function ReportsIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.5}
+      viewBox="0 0 24 24"
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M3 3v1.5M3 21v-6m0 0l2.77-.693a9 9 0 016.208.682l.108.054a9 9 0 006.086.71l3.114-.732a48.524 48.524 0 01-.005-10.499l-3.11.732a9 9 0 01-6.085-.711l-.108-.054a9 9 0 00-6.208-.682L3 4.5M3 15V4.5"
+      />
+    </svg>
+  );
+}
+
+function ModUsersIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.5}
+      viewBox="0 0 24 24"
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z"
       />
     </svg>
   );

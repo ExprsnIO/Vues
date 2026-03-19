@@ -344,7 +344,7 @@ export default function DomainUsersPage() {
           </p>
         </div>
       ) : (
-        <div className="bg-surface border border-border rounded-lg overflow-hidden">
+        <div className="bg-surface border border-border rounded-lg overflow-x-auto">
           <table className="w-full">
             <thead className="bg-surface-hover">
               <tr>

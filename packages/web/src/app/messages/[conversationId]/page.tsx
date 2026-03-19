@@ -34,7 +34,7 @@ export default function ConversationPage() {
     queryKey: ['messages', conversationId],
     queryFn: () => api.getMessages(conversationId, { limit: 100 }),
     enabled: !!user && !!conversationId,
-    refetchInterval: 5000, // Poll every 5 seconds for new messages
+    refetchInterval: 5000,
   });
 
   // Mark as read when viewing
@@ -59,6 +59,44 @@ export default function ConversationPage() {
     },
     onError: () => {
       toast.error('Failed to send message');
+    },
+  });
+
+  // Edit message mutation
+  const editMessageMutation = useMutation({
+    mutationFn: ({ messageId, text }: { messageId: string; text: string }) =>
+      api.editMessage(messageId, text),
+    onSuccess: (result) => {
+      queryClient.setQueryData(['messages', conversationId], (old: any) => {
+        if (!old) return old;
+        return {
+          ...old,
+          messages: old.messages.map((m: MessageView) =>
+            m.id === result.message.id ? result.message : m
+          ),
+        };
+      });
+    },
+    onError: () => {
+      toast.error('Failed to edit message');
+    },
+  });
+
+  // Delete message mutation
+  const deleteMessageMutation = useMutation({
+    mutationFn: (messageId: string) => api.deleteMessage(conversationId, messageId),
+    onSuccess: (_, messageId) => {
+      queryClient.setQueryData(['messages', conversationId], (old: any) => {
+        if (!old) return old;
+        return {
+          ...old,
+          messages: old.messages.filter((m: MessageView) => m.id !== messageId),
+        };
+      });
+      toast.success('Message deleted');
+    },
+    onError: () => {
+      toast.error('Failed to delete message');
     },
   });
 
@@ -92,7 +130,6 @@ export default function ConversationPage() {
   } = useChat({
     conversationId,
     onNewMessage: (message) => {
-      // Add new message to cache
       queryClient.setQueryData(['messages', conversationId], (old: any) => {
         if (!old) return old;
         const exists = old.messages.some((m: MessageView) => m.id === message.id);
@@ -103,19 +140,8 @@ export default function ConversationPage() {
         };
       });
     },
-    onReactionUpdate: (data) => {
-      // Update message reactions in cache
-      queryClient.setQueryData(['messages', conversationId], (old: any) => {
-        if (!old) return old;
-        return {
-          ...old,
-          messages: old.messages.map((m: MessageView) => {
-            if (m.id !== data.messageId) return m;
-            // Update reactions (simplified - real implementation would merge)
-            return m;
-          }),
-        };
-      });
+    onReactionUpdate: () => {
+      queryClient.invalidateQueries({ queryKey: ['messages', conversationId] });
     },
   });
 
@@ -128,9 +154,9 @@ export default function ConversationPage() {
     if (users.length === 0) return null;
     if (users.length === 1) {
       const u = users[0].user;
-      return `${u.displayName || u.handle} is typing...`;
+      return `${u.displayName || u.handle} is typing`;
     }
-    return `${users.length} people are typing...`;
+    return `${users.length} people are typing`;
   }, [typingUsers]);
 
   // Get other member presence
@@ -159,7 +185,6 @@ export default function ConversationPage() {
     stopTyping();
     sendMessageMutation.mutate(text, {
       onSuccess: (result) => {
-        // Broadcast via WebSocket
         sendSocketMessage(result.message);
       },
     });
@@ -191,11 +216,8 @@ export default function ConversationPage() {
     return null;
   }
 
-  // Get the other participant
   const otherMember = conversation?.members.find((m) => m.did !== user?.did) || conversation?.members[0];
   const messages = messagesData?.messages || [];
-
-  // Group messages by date
   const groupedMessages = groupMessagesByDate(messages);
 
   return (
@@ -211,7 +233,7 @@ export default function ConversationPage() {
 
         {otherMember ? (
           <Link href={`/profile/${otherMember.handle}`} className="flex items-center gap-3 flex-1 min-w-0">
-            <div className="w-10 h-10 rounded-full bg-background overflow-hidden flex-shrink-0">
+            <div className="relative w-10 h-10 rounded-full bg-background overflow-hidden flex-shrink-0">
               {otherMember.avatar ? (
                 <img
                   src={otherMember.avatar}
@@ -223,17 +245,17 @@ export default function ConversationPage() {
                   {otherMember.handle[0]?.toUpperCase()}
                 </div>
               )}
+              {otherMemberPresence?.status === 'online' && (
+                <span className="absolute bottom-0 right-0 w-3 h-3 bg-green-500 border-2 border-surface rounded-full" />
+              )}
             </div>
             <div className="min-w-0">
               <div className="flex items-center gap-2">
                 <p className="font-medium text-text-primary truncate">
                   {otherMember.displayName || `@${otherMember.handle}`}
                 </p>
-                {otherMemberPresence?.status === 'online' && (
-                  <span className="w-2 h-2 rounded-full bg-green-500" title="Online" />
-                )}
               </div>
-              <p className="text-sm text-text-muted truncate">
+              <p className="text-xs text-text-muted truncate">
                 {otherMemberPresence?.status === 'online'
                   ? 'Active now'
                   : otherMemberPresence?.lastSeen
@@ -300,16 +322,14 @@ export default function ConversationPage() {
       <div className="flex-1 overflow-y-auto px-4 py-4">
         {messagesLoading ? (
           <div className="flex items-center justify-center py-20">
-            <div className="w-8 h-8 border-3 border-accent border-t-transparent rounded-full animate-spin" />
+            <div className="w-8 h-8 border-[3px] border-accent border-t-transparent rounded-full animate-spin" />
           </div>
         ) : messages.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-20 text-center">
             <div className="w-16 h-16 rounded-full bg-surface flex items-center justify-center mb-4">
               <MessageIcon className="w-8 h-8 text-text-muted" />
             </div>
-            <p className="text-text-muted">
-              No messages yet. Say hello!
-            </p>
+            <p className="text-text-muted">No messages yet. Say hello!</p>
           </div>
         ) : (
           <div className="space-y-4">
@@ -327,6 +347,12 @@ export default function ConversationPage() {
                       message={message}
                       isOwn={message.sender.did === user?.did}
                       onReaction={(emoji, action) => sendReaction(message.id, emoji, action)}
+                      onEdit={(messageId, text) => editMessageMutation.mutate({ messageId, text })}
+                      onDelete={(messageId) => {
+                        if (confirm('Delete this message?')) {
+                          deleteMessageMutation.mutate(messageId);
+                        }
+                      }}
                     />
                   ))}
                 </div>
@@ -341,11 +367,7 @@ export default function ConversationPage() {
       {typingDisplay && (
         <div className="px-4 py-2 bg-surface border-t border-border">
           <div className="flex items-center gap-2 text-sm text-text-muted">
-            <span className="flex gap-1">
-              <span className="w-2 h-2 bg-text-muted rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-              <span className="w-2 h-2 bg-text-muted rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-              <span className="w-2 h-2 bg-text-muted rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-            </span>
+            <TypingDots />
             <span>{typingDisplay}</span>
           </div>
         </div>
@@ -378,102 +400,332 @@ export default function ConversationPage() {
   );
 }
 
+// ----------------------------------------------------------------------------
+// Animated typing dots
+// ----------------------------------------------------------------------------
+
+function TypingDots() {
+  return (
+    <span className="flex items-center gap-0.5">
+      <span
+        className="w-1.5 h-1.5 bg-text-muted rounded-full animate-bounce"
+        style={{ animationDelay: '0ms', animationDuration: '900ms' }}
+      />
+      <span
+        className="w-1.5 h-1.5 bg-text-muted rounded-full animate-bounce"
+        style={{ animationDelay: '150ms', animationDuration: '900ms' }}
+      />
+      <span
+        className="w-1.5 h-1.5 bg-text-muted rounded-full animate-bounce"
+        style={{ animationDelay: '300ms', animationDuration: '900ms' }}
+      />
+    </span>
+  );
+}
+
+// ----------------------------------------------------------------------------
+// Message bubble with context menu (edit/delete/copy) and inline edit mode
+// ----------------------------------------------------------------------------
+
 const QUICK_REACTIONS = ['❤️', '😂', '😮', '😢', '👍', '👎'];
 
 interface MessageBubbleProps {
   message: MessageView;
   isOwn: boolean;
   onReaction: (emoji: string, action: 'add' | 'remove') => void;
+  onEdit: (messageId: string, text: string) => void;
+  onDelete: (messageId: string) => void;
 }
 
-function MessageBubble({ message, isOwn, onReaction }: MessageBubbleProps) {
+function MessageBubble({ message, isOwn, onReaction, onEdit, onDelete }: MessageBubbleProps) {
   const [showReactions, setShowReactions] = useState(false);
-  const [reactions] = useState<Array<{ emoji: string; count: number; userReacted: boolean }>>(
-    (message as any).reactions || []
+  const [showContextMenu, setShowContextMenu] = useState(false);
+  const [contextMenuPos, setContextMenuPos] = useState<{ x: number; y: number } | null>(null);
+  const [isEditing, setIsEditing] = useState(false);
+  const [editText, setEditText] = useState(message.text);
+  const editInputRef = useRef<HTMLTextAreaElement>(null);
+  const longPressRef = useRef<NodeJS.Timeout | null>(null);
+  const reactions = (message as any).reactions as Array<{
+    emoji: string;
+    count: number;
+    userReacted: boolean;
+  }> || [];
+
+  // Focus edit input when entering edit mode
+  useEffect(() => {
+    if (isEditing && editInputRef.current) {
+      editInputRef.current.focus();
+      editInputRef.current.setSelectionRange(editText.length, editText.length);
+    }
+  }, [isEditing]);
+
+  const openContextMenu = useCallback((x: number, y: number) => {
+    if (!isOwn) return;
+    setContextMenuPos({ x, y });
+    setShowContextMenu(true);
+  }, [isOwn]);
+
+  const handleContextMenu = useCallback(
+    (e: React.MouseEvent) => {
+      if (!isOwn) return;
+      e.preventDefault();
+      openContextMenu(e.clientX, e.clientY);
+    },
+    [isOwn, openContextMenu]
+  );
+
+  // Long-press for mobile
+  const handleTouchStart = useCallback(
+    (e: React.TouchEvent) => {
+      if (!isOwn) return;
+      const touch = e.touches[0];
+      longPressRef.current = setTimeout(() => {
+        openContextMenu(touch.clientX, touch.clientY);
+      }, 500);
+    },
+    [isOwn, openContextMenu]
+  );
+
+  const handleTouchEnd = useCallback(() => {
+    if (longPressRef.current) {
+      clearTimeout(longPressRef.current);
+      longPressRef.current = null;
+    }
+  }, []);
+
+  const handleCopy = useCallback(() => {
+    navigator.clipboard.writeText(message.text).then(() => {
+      toast.success('Copied');
+    });
+    setShowContextMenu(false);
+  }, [message.text]);
+
+  const handleEditStart = useCallback(() => {
+    setEditText(message.text);
+    setIsEditing(true);
+    setShowContextMenu(false);
+  }, [message.text]);
+
+  const handleEditSave = useCallback(() => {
+    const trimmed = editText.trim();
+    if (!trimmed || trimmed === message.text) {
+      setIsEditing(false);
+      return;
+    }
+    onEdit(message.id, trimmed);
+    setIsEditing(false);
+  }, [editText, message.id, message.text, onEdit]);
+
+  const handleEditKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        handleEditSave();
+      }
+      if (e.key === 'Escape') {
+        setIsEditing(false);
+        setEditText(message.text);
+      }
+    },
+    [handleEditSave, message.text]
   );
 
   return (
-    <div className={`flex ${isOwn ? 'justify-end' : 'justify-start'} group`}>
-      <div className="relative">
-        {/* Reaction picker trigger */}
-        <button
-          onClick={() => setShowReactions(!showReactions)}
-          className={`absolute top-1/2 -translate-y-1/2 ${
-            isOwn ? 'right-full mr-2' : 'left-full ml-2'
-          } p-1 rounded-full bg-surface border border-border opacity-0 group-hover:opacity-100 transition-opacity hover:bg-surface-hover`}
-        >
-          <span className="text-xs">😊</span>
-        </button>
-
-        {/* Reaction picker */}
-        {showReactions && (
-          <>
-            <div className="fixed inset-0 z-10" onClick={() => setShowReactions(false)} />
-            <div
-              className={`absolute z-20 bottom-full mb-2 ${
-                isOwn ? 'right-0' : 'left-0'
-              } bg-surface border border-border rounded-full px-2 py-1 flex gap-1 shadow-lg`}
+    <>
+      {/* Context menu overlay */}
+      {showContextMenu && contextMenuPos && (
+        <>
+          <div className="fixed inset-0 z-30" onClick={() => setShowContextMenu(false)} />
+          <div
+            className="fixed z-40 py-1 bg-surface border border-border rounded-lg shadow-xl min-w-[140px]"
+            style={{
+              top: contextMenuPos.y,
+              left: contextMenuPos.x,
+              transform: `translate(${contextMenuPos.x > window.innerWidth - 160 ? '-100%' : '0'}, ${
+                contextMenuPos.y > window.innerHeight - 140 ? '-100%' : '0'
+              })`,
+            }}
+          >
+            <button
+              onClick={handleCopy}
+              className="w-full px-4 py-2 text-left text-sm text-text-primary hover:bg-surface-hover flex items-center gap-2"
             >
-              {QUICK_REACTIONS.map((emoji) => (
+              <CopyIcon className="w-4 h-4" />
+              Copy
+            </button>
+            <button
+              onClick={handleEditStart}
+              className="w-full px-4 py-2 text-left text-sm text-text-primary hover:bg-surface-hover flex items-center gap-2"
+            >
+              <PencilIcon className="w-4 h-4" />
+              Edit
+            </button>
+            <button
+              onClick={() => {
+                onDelete(message.id);
+                setShowContextMenu(false);
+              }}
+              className="w-full px-4 py-2 text-left text-sm text-red-500 hover:bg-surface-hover flex items-center gap-2"
+            >
+              <TrashIcon className="w-4 h-4" />
+              Delete
+            </button>
+          </div>
+        </>
+      )}
+
+      <div
+        className={`flex ${isOwn ? 'justify-end' : 'justify-start'} group`}
+        onContextMenu={handleContextMenu}
+        onTouchStart={handleTouchStart}
+        onTouchEnd={handleTouchEnd}
+        onTouchCancel={handleTouchEnd}
+      >
+        <div className="relative max-w-[75%]">
+          {/* Reaction picker trigger (non-own messages too) */}
+          <button
+            onClick={() => setShowReactions(!showReactions)}
+            className={`absolute top-1/2 -translate-y-1/2 ${
+              isOwn ? 'right-full mr-2' : 'left-full ml-2'
+            } p-1 rounded-full bg-surface border border-border opacity-0 group-hover:opacity-100 transition-opacity hover:bg-surface-hover`}
+          >
+            <span className="text-xs">😊</span>
+          </button>
+
+          {/* Reaction picker */}
+          {showReactions && (
+            <>
+              <div className="fixed inset-0 z-10" onClick={() => setShowReactions(false)} />
+              <div
+                className={`absolute z-20 bottom-full mb-2 ${
+                  isOwn ? 'right-0' : 'left-0'
+                } bg-surface border border-border rounded-full px-2 py-1 flex gap-1 shadow-lg`}
+              >
+                {QUICK_REACTIONS.map((emoji) => (
+                  <button
+                    key={emoji}
+                    onClick={() => {
+                      onReaction(emoji, 'add');
+                      setShowReactions(false);
+                    }}
+                    className="p-1.5 hover:bg-surface-hover rounded-full transition-colors text-lg"
+                  >
+                    {emoji}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+
+          {/* Bubble */}
+          {isEditing ? (
+            // Inline edit mode
+            <div
+              className={`px-3 py-2 rounded-2xl ${
+                isOwn ? 'bg-accent/80 rounded-br-md' : 'bg-surface rounded-bl-md'
+              }`}
+            >
+              <textarea
+                ref={editInputRef}
+                value={editText}
+                onChange={(e) => setEditText(e.target.value)}
+                onKeyDown={handleEditKeyDown}
+                rows={1}
+                className={`w-full bg-transparent resize-none focus:outline-none whitespace-pre-wrap break-words ${
+                  isOwn ? 'text-text-inverse' : 'text-text-primary'
+                }`}
+                style={{ minWidth: '120px', minHeight: '24px' }}
+              />
+              <div className="flex items-center gap-2 mt-1.5">
                 <button
-                  key={emoji}
-                  onClick={() => {
-                    onReaction(emoji, 'add');
-                    setShowReactions(false);
-                  }}
-                  className="p-1.5 hover:bg-surface-hover rounded-full transition-colors text-lg"
+                  onClick={handleEditSave}
+                  className={`text-xs font-medium px-2 py-0.5 rounded ${
+                    isOwn
+                      ? 'bg-text-inverse/20 text-text-inverse hover:bg-text-inverse/30'
+                      : 'bg-accent text-text-inverse hover:bg-accent-hover'
+                  } transition-colors`}
                 >
-                  {emoji}
+                  Save
+                </button>
+                <button
+                  onClick={() => {
+                    setIsEditing(false);
+                    setEditText(message.text);
+                  }}
+                  className={`text-xs ${
+                    isOwn ? 'text-text-inverse/70 hover:text-text-inverse' : 'text-text-muted hover:text-text-primary'
+                  } transition-colors`}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div
+              className={`px-4 py-2.5 rounded-2xl ${
+                isOwn
+                  ? 'bg-accent text-text-inverse rounded-br-md'
+                  : 'bg-surface text-text-primary rounded-bl-md'
+              }`}
+            >
+              <p className="whitespace-pre-wrap break-words">{message.text}</p>
+              <div
+                className={`flex items-center gap-1.5 mt-1 ${
+                  isOwn ? 'justify-end' : 'justify-start'
+                }`}
+              >
+                <p
+                  className={`text-xs ${
+                    isOwn ? 'text-text-inverse/70' : 'text-text-muted'
+                  }`}
+                >
+                  {formatTime(new Date(message.createdAt))}
+                </p>
+                {message.editedAt && (
+                  <span
+                    className={`text-xs italic ${
+                      isOwn ? 'text-text-inverse/50' : 'text-text-muted'
+                    }`}
+                  >
+                    Edited
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Reactions display */}
+          {reactions.length > 0 && (
+            <div
+              className={`absolute -bottom-3 ${isOwn ? 'right-2' : 'left-2'} flex gap-0.5`}
+            >
+              {reactions.map((reaction) => (
+                <button
+                  key={reaction.emoji}
+                  onClick={() => onReaction(reaction.emoji, reaction.userReacted ? 'remove' : 'add')}
+                  className={`px-1.5 py-0.5 text-xs rounded-full border ${
+                    reaction.userReacted
+                      ? 'bg-accent/20 border-accent'
+                      : 'bg-surface border-border'
+                  } hover:bg-surface-hover transition-colors`}
+                >
+                  {reaction.emoji}
+                  {reaction.count > 1 && (
+                    <span className="ml-0.5 text-text-muted">{reaction.count}</span>
+                  )}
                 </button>
               ))}
             </div>
-          </>
-        )}
-
-        <div
-          className={`max-w-[75%] px-4 py-2.5 rounded-2xl ${
-            isOwn
-              ? 'bg-accent text-text-inverse rounded-br-md'
-              : 'bg-surface text-text-primary rounded-bl-md'
-          }`}
-        >
-          <p className="whitespace-pre-wrap break-words">{message.text}</p>
-          <p
-            className={`text-xs mt-1 ${
-              isOwn ? 'text-text-inverse/70' : 'text-text-muted'
-            }`}
-          >
-            {formatTime(new Date(message.createdAt))}
-          </p>
+          )}
         </div>
-
-        {/* Reactions display */}
-        {reactions.length > 0 && (
-          <div
-            className={`absolute -bottom-3 ${isOwn ? 'right-2' : 'left-2'} flex gap-0.5`}
-          >
-            {reactions.map((reaction) => (
-              <button
-                key={reaction.emoji}
-                onClick={() => onReaction(reaction.emoji, reaction.userReacted ? 'remove' : 'add')}
-                className={`px-1.5 py-0.5 text-xs rounded-full border ${
-                  reaction.userReacted
-                    ? 'bg-accent/20 border-accent'
-                    : 'bg-surface border-border'
-                } hover:bg-surface-hover transition-colors`}
-              >
-                {reaction.emoji}
-                {reaction.count > 1 && (
-                  <span className="ml-0.5 text-text-muted">{reaction.count}</span>
-                )}
-              </button>
-            ))}
-          </div>
-        )}
       </div>
-    </div>
+    </>
   );
 }
+
+// ----------------------------------------------------------------------------
+// Helpers
+// ----------------------------------------------------------------------------
 
 function groupMessagesByDate(messages: MessageView[]): Record<string, MessageView[]> {
   const groups: Record<string, MessageView[]> = {};
@@ -481,10 +733,7 @@ function groupMessagesByDate(messages: MessageView[]): Record<string, MessageVie
   messages.forEach((message) => {
     const date = new Date(message.createdAt);
     const dateKey = formatDateKey(date);
-
-    if (!groups[dateKey]) {
-      groups[dateKey] = [];
-    }
+    if (!groups[dateKey]) groups[dateKey] = [];
     groups[dateKey].push(message);
   });
 
@@ -496,17 +745,14 @@ function formatDateKey(date: Date): string {
   const yesterday = new Date(now);
   yesterday.setDate(yesterday.getDate() - 1);
 
-  if (date.toDateString() === now.toDateString()) {
-    return 'Today';
-  } else if (date.toDateString() === yesterday.toDateString()) {
-    return 'Yesterday';
-  } else {
-    return date.toLocaleDateString('en-US', {
-      month: 'short',
-      day: 'numeric',
-      year: date.getFullYear() !== now.getFullYear() ? 'numeric' : undefined,
-    });
-  }
+  if (date.toDateString() === now.toDateString()) return 'Today';
+  if (date.toDateString() === yesterday.toDateString()) return 'Yesterday';
+
+  return date.toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: date.getFullYear() !== now.getFullYear() ? 'numeric' : undefined,
+  });
 }
 
 function formatTime(date: Date): string {
@@ -570,6 +816,22 @@ function TrashIcon({ className }: { className?: string }) {
   return (
     <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
       <path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
+    </svg>
+  );
+}
+
+function PencilIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L6.832 19.82a4.5 4.5 0 01-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 011.13-1.897L16.863 4.487zm0 0L19.5 7.125" />
+    </svg>
+  );
+}
+
+function CopyIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M15.666 3.888A2.25 2.25 0 0013.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 01-.75.75H9a.75.75 0 01-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 01-2.25 2.25H6.75A2.25 2.25 0 014.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 011.927-.184" />
     </svg>
   );
 }

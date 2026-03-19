@@ -4,7 +4,7 @@ import { useParams } from 'next/navigation';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import Link from 'next/link';
 import { Sidebar } from '@/components/Sidebar';
-import { api, type OrganizationPublicProfileView, type VideoView } from '@/lib/api';
+import { api, API_BASE, type OrganizationPublicProfileView, type VideoView } from '@/lib/api';
 import { useAuth } from '@/lib/auth-context';
 import { cn } from '@/lib/utils';
 import { useState } from 'react';
@@ -30,6 +30,19 @@ export default function OrganizationProfilePage() {
     queryKey: ['org-videos', data?.organization?.id],
     queryFn: () => api.getOrgVideos(data!.organization.id),
     enabled: !!data?.organization?.id,
+  });
+
+  // Hierarchy queries — only fire for authenticated users (auth-required endpoints)
+  const { data: ancestorsData } = useQuery({
+    queryKey: ['org-ancestors', data?.organization?.id],
+    queryFn: () => api.getOrganizationAncestors(data!.organization.id),
+    enabled: !!user && !!data?.organization?.id,
+  });
+
+  const { data: childrenData } = useQuery({
+    queryKey: ['org-children', data?.organization?.id],
+    queryFn: () => api.getOrganizationChildren(data!.organization.id),
+    enabled: !!user && !!data?.organization?.id,
   });
 
   // Follow mutation
@@ -129,6 +142,30 @@ export default function OrganizationProfilePage() {
               <div className="mb-8">
                 <div className="flex items-start justify-between gap-4 flex-wrap">
                   <div>
+                    {/* Parent breadcrumb — only shown to authenticated users when ancestors exist */}
+                    {user && ancestorsData && ancestorsData.ancestors.length > 0 && (
+                      <nav className="flex items-center gap-1 mb-2 flex-wrap">
+                        {ancestorsData.ancestors.map((ancestor, index) => (
+                          <span key={ancestor.id} className="flex items-center gap-1">
+                            {index > 0 && (
+                              <svg className="w-3 h-3 text-text-muted flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                              </svg>
+                            )}
+                            <Link
+                              href={`/o/${ancestor.name}`}
+                              className="text-xs text-text-muted hover:text-accent transition-colors"
+                            >
+                              {ancestor.name}
+                            </Link>
+                          </span>
+                        ))}
+                        <svg className="w-3 h-3 text-text-muted flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                        </svg>
+                        <span className="text-xs text-text-muted font-medium">{org.displayName || org.name}</span>
+                      </nav>
+                    )}
                     <div className="flex items-center gap-3 mb-2">
                       <h1 className="text-2xl font-bold text-text-primary">
                         {org.displayName || org.name}
@@ -284,7 +321,10 @@ export default function OrganizationProfilePage() {
                 <VideosTab videos={videos} isLoading={videosLoading} />
               )}
               {activeTab === 'about' && (
-                <AboutTab organization={org} />
+                <AboutTab
+                  organization={org}
+                  childOrgs={user ? (childrenData?.organizations ?? null) : null}
+                />
               )}
               {activeTab === 'members' && (
                 <MembersTab organizationId={org.id} />
@@ -349,7 +389,13 @@ function VideosTab({ videos, isLoading }: { videos: VideoView[]; isLoading: bool
   );
 }
 
-function AboutTab({ organization }: { organization: OrganizationPublicProfileView }) {
+function AboutTab({
+  organization,
+  childOrgs,
+}: {
+  organization: OrganizationPublicProfileView;
+  childOrgs: import('@/lib/api').OrganizationView[] | null;
+}) {
   return (
     <div className="space-y-6 max-w-2xl">
       {organization.bio && (
@@ -419,6 +465,35 @@ function AboutTab({ organization }: { organization: OrganizationPublicProfileVie
                 @{organization.socialLinks.instagram.replace('@', '')}
               </a>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Teams & Sub-organizations — shown only to authenticated users when children exist */}
+      {childOrgs !== null && childOrgs.length > 0 && (
+        <div>
+          <h3 className="text-sm font-medium text-text-muted mb-3">
+            Teams &amp; Sub-organizations
+          </h3>
+          <div className="flex gap-3 overflow-x-auto pb-2 -mx-1 px-1">
+            {childOrgs.map((child) => (
+              <Link
+                key={child.id}
+                href={`/o/${child.name}`}
+                className="flex-shrink-0 flex flex-col items-center gap-2 p-3 bg-surface rounded-xl border border-border hover:border-accent hover:bg-accent/5 transition-all w-36"
+              >
+                <div className="w-12 h-12 rounded-xl bg-surface-hover flex items-center justify-center overflow-hidden">
+                  <span className="text-text-primary font-semibold text-lg">
+                    {child.name[0]?.toUpperCase()}
+                  </span>
+                </div>
+                <div className="text-center min-w-0 w-full">
+                  <p className="text-xs font-medium text-text-primary truncate">{child.name}</p>
+                  <p className="text-xs text-text-muted capitalize">{child.type}</p>
+                  <p className="text-xs text-text-muted">{formatCount(child.memberCount)} members</p>
+                </div>
+              </Link>
+            ))}
           </div>
         </div>
       )}
@@ -527,7 +602,7 @@ function VideoThumbnail({ video }: { video: VideoView }) {
         />
       ) : videoUrl ? (
         <video
-          src={videoUrl.startsWith('/') ? `http://localhost:3002${videoUrl}` : videoUrl}
+          src={videoUrl.startsWith('/') ? `${API_BASE}${videoUrl}` : videoUrl}
           className="w-full h-full object-cover"
           muted
           preload="metadata"

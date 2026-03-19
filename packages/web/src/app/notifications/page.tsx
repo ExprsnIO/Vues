@@ -4,10 +4,13 @@ import { useEffect } from 'react';
 import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useInView } from 'react-intersection-observer';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { Sidebar } from '@/components/Sidebar';
-import { api, NotificationView } from '@/lib/api';
+import { api, type GroupedNotificationView } from '@/lib/api';
+import { NotificationsSkeleton } from '@/components/skeletons';
 import { useAuth } from '@/lib/auth-context';
 import { formatDistanceToNow } from '@/lib/utils';
+import { useMessagingStore } from '@/stores/messaging-store';
 
 export default function NotificationsPage() {
   const { user, isLoading: authLoading } = useAuth();
@@ -20,8 +23,9 @@ export default function NotificationsPage() {
     isFetchingNextPage,
     isLoading,
   } = useInfiniteQuery({
-    queryKey: ['notifications'],
-    queryFn: ({ pageParam }) => api.listNotifications({ cursor: pageParam }),
+    queryKey: ['notifications-grouped'],
+    queryFn: ({ pageParam }) =>
+      api.getGroupedNotifications(pageParam, 30),
     getNextPageParam: (lastPage) => lastPage.cursor,
     initialPageParam: undefined as string | undefined,
     enabled: !!user,
@@ -39,6 +43,7 @@ export default function NotificationsPage() {
     if (user && !authLoading) {
       seenMutation.mutate();
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user, authLoading]);
 
   // Infinite scroll
@@ -101,17 +106,7 @@ export default function NotificationsPage() {
           </h1>
 
           {isLoading ? (
-            <div className="space-y-4">
-              {[...Array(5)].map((_, i) => (
-                <div key={i} className="flex items-start gap-3 p-4 animate-pulse">
-                  <div className="w-10 h-10 rounded-full bg-surface" />
-                  <div className="flex-1">
-                    <div className="h-4 w-3/4 bg-surface rounded mb-2" />
-                    <div className="h-3 w-1/4 bg-surface rounded" />
-                  </div>
-                </div>
-              ))}
-            </div>
+            <NotificationsSkeleton />
           ) : notifications.length === 0 ? (
             <div className="text-center py-16">
               <NotificationIcon className="w-12 h-12 text-text-muted mx-auto mb-4" />
@@ -123,8 +118,8 @@ export default function NotificationsPage() {
           ) : (
             <div className="space-y-1">
               {notifications.map((notification) => (
-                <NotificationItem
-                  key={notification.uri}
+                <GroupedNotificationItem
+                  key={notification.id}
                   notification={notification}
                 />
               ))}
@@ -145,104 +140,251 @@ export default function NotificationsPage() {
   );
 }
 
-function NotificationItem({ notification }: { notification: NotificationView }) {
-  const { reason, author, record, isRead, indexedAt } = notification;
+// =============================================================================
+// Grouped notification item
+// =============================================================================
 
-  const getNotificationContent = () => {
-    switch (reason) {
-      case 'like':
-        return {
-          icon: <HeartIcon className="w-5 h-5 text-red-500" />,
-          text: 'liked your video',
-        };
-      case 'follow':
-        return {
-          icon: <FollowIcon className="w-5 h-5 text-accent" />,
-          text: 'started following you',
-        };
-      case 'reply':
-        return {
-          icon: <CommentIcon className="w-5 h-5 text-blue-500" />,
-          text: 'replied to your comment',
-        };
-      case 'mention':
-        return {
-          icon: <MentionIcon className="w-5 h-5 text-purple-500" />,
-          text: 'mentioned you in a comment',
-        };
-      case 'repost':
-        return {
-          icon: <RepostIcon className="w-5 h-5 text-green-500" />,
-          text: 'reposted your video',
-        };
-      default:
-        return {
-          icon: <NotificationIcon className="w-5 h-5 text-text-muted" />,
-          text: 'interacted with your content',
-        };
+function GroupedNotificationItem({
+  notification,
+}: {
+  notification: GroupedNotificationView;
+}) {
+  const router = useRouter();
+  const { openConversation } = useMessagingStore();
+  const { reason, actors, actorCount, subjectPreview, subject, isRead, latestAt, isGrouped } =
+    notification;
+
+  const isMessageNotification = reason === 'message' || reason === 'dm';
+
+  // Build human-readable actor label, e.g. "Alice, Bob, and 13 others"
+  const actorLabel = buildActorLabel(actors, actorCount);
+
+  const content = getNotificationContent(reason, actorLabel);
+
+  const handleClick = () => {
+    if (isMessageNotification) {
+      // For single message notifications, subject doubles as conversationId
+      if (subject) {
+        openConversation(subject);
+      }
+      return;
     }
+    const target = subject
+      ? `/video/${encodeURIComponent(subject)}`
+      : `/profile/${actors[0]?.handle ?? ''}`;
+    router.push(target);
   };
 
-  const content = getNotificationContent();
-  const targetLink = record?.uri
-    ? `/video/${encodeURIComponent(record.uri)}`
-    : `/profile/${author.handle}`;
+  const itemClasses = `flex items-start gap-3 p-4 rounded-lg transition-colors cursor-pointer w-full text-left ${
+    isRead ? 'hover:bg-surface' : 'bg-accent/5 hover:bg-accent/10'
+  }`;
 
-  return (
-    <Link
-      href={targetLink}
-      className={`flex items-start gap-3 p-4 rounded-lg transition-colors ${
-        isRead
-          ? 'hover:bg-surface'
-          : 'bg-accent/5 hover:bg-accent/10'
-      }`}
-    >
-      {/* Author avatar */}
-      <div className="relative flex-shrink-0">
-        <div className="w-10 h-10 rounded-full bg-surface overflow-hidden">
-          {author.avatar ? (
-            <img
-              src={author.avatar}
-              alt={author.handle}
-              className="w-full h-full object-cover"
-            />
-          ) : (
-            <div className="w-full h-full flex items-center justify-center text-text-primary font-semibold">
-              {author.handle[0]?.toUpperCase()}
-            </div>
-          )}
-        </div>
-        {/* Notification type icon */}
+  const innerContent = (
+    <>
+      {/* Avatar stack or single avatar */}
+      <div className="relative flex-shrink-0 w-12 h-10">
+        {isGrouped ? (
+          <StackedAvatars actors={actors} />
+        ) : (
+          <SingleAvatar actor={actors[0]} />
+        )}
+        {/* Notification type icon badge */}
         <div className="absolute -bottom-1 -right-1 w-5 h-5 bg-background rounded-full flex items-center justify-center">
           {content.icon}
         </div>
       </div>
 
-      {/* Content */}
+      {/* Text content */}
       <div className="flex-1 min-w-0">
         <p className="text-text-primary text-sm">
-          <span className="font-semibold">
-            {author.displayName || `@${author.handle}`}
-          </span>{' '}
+          <span className="font-semibold">{actorLabel}</span>{' '}
           {content.text}
         </p>
-        {record?.text && (
-          <p className="text-text-muted text-sm mt-1 line-clamp-2">
-            &quot;{record.text}&quot;
-          </p>
-        )}
         <p className="text-text-muted text-xs mt-1">
-          {formatDistanceToNow(new Date(indexedAt))}
+          {formatDistanceToNow(new Date(latestAt))}
         </p>
       </div>
 
-      {/* Unread indicator */}
+      {/* Video thumbnail for like/comment/repost notifications */}
+      {subjectPreview?.thumbnailUrl && (
+        <div className="flex-shrink-0 w-12 h-12 rounded overflow-hidden bg-surface ml-1">
+          <img
+            src={subjectPreview.thumbnailUrl}
+            alt={subjectPreview.caption ?? 'video thumbnail'}
+            className="w-full h-full object-cover"
+          />
+        </div>
+      )}
+
+      {/* Unread dot */}
       {!isRead && (
         <div className="w-2 h-2 bg-accent rounded-full flex-shrink-0 mt-2" />
       )}
+    </>
+  );
+
+  if (isMessageNotification) {
+    return (
+      <button onClick={handleClick} className={itemClasses}>
+        {innerContent}
+      </button>
+    );
+  }
+
+  const targetLink = subject
+    ? `/video/${encodeURIComponent(subject)}`
+    : `/profile/${actors[0]?.handle ?? ''}`;
+
+  return (
+    <Link href={targetLink} className={itemClasses}>
+      {innerContent}
     </Link>
   );
 }
+
+// =============================================================================
+// Stacked avatars (up to 3)
+// =============================================================================
+
+function StackedAvatars({
+  actors,
+}: {
+  actors: GroupedNotificationView['actors'];
+}) {
+  // Show at most 3 avatars, each offset slightly to the right
+  const visible = actors.slice(0, 3);
+  const size = 32; // px
+  const overlap = 10; // px
+
+  return (
+    <div
+      className="relative"
+      style={{ width: size + (visible.length - 1) * (size - overlap), height: size }}
+    >
+      {visible.map((actor, i) => (
+        <div
+          key={actor.did}
+          className="absolute top-0 rounded-full bg-surface border-2 border-background overflow-hidden"
+          style={{
+            width: size,
+            height: size,
+            left: i * (size - overlap),
+            zIndex: visible.length - i,
+          }}
+        >
+          {actor.avatar ? (
+            <img
+              src={actor.avatar}
+              alt={actor.handle}
+              className="w-full h-full object-cover"
+            />
+          ) : (
+            <div className="w-full h-full flex items-center justify-center text-text-primary text-xs font-semibold">
+              {actor.handle[0]?.toUpperCase()}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SingleAvatar({
+  actor,
+}: {
+  actor: GroupedNotificationView['actors'][number] | undefined;
+}) {
+  if (!actor) return <div className="w-10 h-10 rounded-full bg-surface" />;
+
+  return (
+    <div className="w-10 h-10 rounded-full bg-surface overflow-hidden">
+      {actor.avatar ? (
+        <img src={actor.avatar} alt={actor.handle} className="w-full h-full object-cover" />
+      ) : (
+        <div className="w-full h-full flex items-center justify-center text-text-primary font-semibold">
+          {actor.handle[0]?.toUpperCase()}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// =============================================================================
+// Helpers
+// =============================================================================
+
+function buildActorLabel(
+  actors: GroupedNotificationView['actors'],
+  total: number
+): string {
+  if (actors.length === 0) return 'Someone';
+
+  const names = actors.map((a) => a.displayName || `@${a.handle}`);
+  const remaining = total - actors.length;
+
+  if (remaining <= 0) {
+    if (names.length === 1) return names[0]!;
+    if (names.length === 2) return `${names[0]} and ${names[1]}`;
+    return `${names.slice(0, -1).join(', ')}, and ${names[names.length - 1]}`;
+  }
+
+  // There are more actors than the 3 we loaded
+  const listedNames = names.join(', ');
+  return `${listedNames}, and ${remaining} other${remaining === 1 ? '' : 's'}`;
+}
+
+function getNotificationContent(
+  reason: string,
+  actorLabel: string
+): { icon: React.ReactNode; text: string } {
+  switch (reason) {
+    case 'like':
+      return {
+        icon: <HeartIcon className="w-5 h-5 text-red-500" />,
+        text: 'liked your video',
+      };
+    case 'follow':
+      return {
+        icon: <FollowIcon className="w-5 h-5 text-accent" />,
+        text: 'started following you',
+      };
+    case 'comment':
+      return {
+        icon: <CommentIcon className="w-5 h-5 text-blue-500" />,
+        text: 'commented on your video',
+      };
+    case 'reply':
+      return {
+        icon: <CommentIcon className="w-5 h-5 text-blue-500" />,
+        text: 'replied to your comment',
+      };
+    case 'mention':
+      return {
+        icon: <MentionIcon className="w-5 h-5 text-purple-500" />,
+        text: 'mentioned you',
+      };
+    case 'repost':
+      return {
+        icon: <RepostIcon className="w-5 h-5 text-green-500" />,
+        text: 'reposted your video',
+      };
+    case 'message':
+    case 'dm':
+      return {
+        icon: <DirectMessageIcon className="w-5 h-5 text-accent" />,
+        text: 'sent you a message',
+      };
+    default:
+      return {
+        icon: <NotificationIcon className="w-5 h-5 text-text-muted" />,
+        text: 'interacted with your content',
+      };
+  }
+}
+
+// =============================================================================
+// Icons
+// =============================================================================
 
 function NotificationIcon({ className }: { className?: string }) {
   return (
@@ -298,6 +440,14 @@ function RepostIcon({ className }: { className?: string }) {
   return (
     <svg className={className} fill="currentColor" viewBox="0 0 24 24">
       <path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z" />
+    </svg>
+  );
+}
+
+function DirectMessageIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M20.25 8.511c.884.284 1.5 1.128 1.5 2.097v4.286c0 1.136-.847 2.1-1.98 2.193-.34.027-.68.052-1.02.072v3.091l-3-3c-1.354 0-2.694-.055-4.02-.163a2.115 2.115 0 01-.825-.242m9.345-8.334a2.126 2.126 0 00-.476-.095 48.64 48.64 0 00-8.048 0c-1.131.094-1.976 1.057-1.976 2.192v4.286c0 .837.46 1.58 1.155 1.951m9.345-8.334V6.637c0-1.621-1.152-3.026-2.76-3.235A48.455 48.455 0 0011.25 3c-2.115 0-4.198.137-6.24.402-1.608.209-2.76 1.614-2.76 3.235v6.226c0 1.621 1.152 3.026 2.76 3.235.577.075 1.157.14 1.74.194V21l4.155-4.155" />
     </svg>
   );
 }

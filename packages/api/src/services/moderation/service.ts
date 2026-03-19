@@ -35,8 +35,10 @@ import type {
   ModerationActionType,
   AIProvider,
 } from './types.js';
+import { getWorkflowEngine, type WorkflowContext } from './WorkflowEngine.js';
 
 class ModerationService {
+  private workflowEngine = getWorkflowEngine();
   /**
    * Moderate content
    */
@@ -153,6 +155,23 @@ class ModerationService {
       isAutomated: true,
       reason: aiResult.explanation || `Risk score: ${overallRisk}`,
     });
+
+    // Execute workflow rules for content submission
+    this.executeWorkflows({
+      trigger: 'content_submitted',
+      contentId: moderationItem.id,
+      contentType,
+      authorDid: userId,
+      riskScore: overallRisk,
+      riskLevel,
+      aiScores: {
+        toxicity: aiResult.toxicityScore,
+        nsfw: aiResult.nsfwScore,
+        spam: aiResult.spamScore,
+        violence: aiResult.violenceScore,
+        hatespeech: aiResult.hateSpeechScore,
+      },
+    }).catch(err => console.error('[ModerationService] Workflow execution failed:', err));
 
     return this.formatResult(moderationItem);
   }
@@ -875,6 +894,146 @@ class ModerationService {
     }
 
     return { appeal, userAction };
+  }
+
+  // ============================================
+  // Workflow Integration
+  // ============================================
+
+  /**
+   * Execute workflow rules for a given context
+   */
+  private async executeWorkflows(context: WorkflowContext): Promise<void> {
+    try {
+      const results = await this.workflowEngine.execute(context);
+
+      for (const result of results) {
+        if (result.triggered) {
+          console.log(
+            `[ModerationService] Workflow "${result.ruleName}" executed:`,
+            `${result.actionsExecuted.length} actions,`,
+            `${result.errors.length} errors,`,
+            `${result.duration}ms`
+          );
+        }
+      }
+    } catch (error) {
+      console.error('[ModerationService] Workflow execution error:', error);
+    }
+  }
+
+  /**
+   * Handle a new report submission - triggers workflow
+   */
+  async onReportSubmitted(params: {
+    reportId: string;
+    contentUri: string;
+    contentType: string;
+    reporterDid: string;
+    reason: string;
+    authorDid?: string;
+  }): Promise<void> {
+    // Count existing reports for this content
+    const [reportCountResult] = await db
+      .select({ count: sql<number>`COUNT(*)::int` })
+      .from(moderationReports)
+      .where(eq(moderationReports.contentId, params.contentUri));
+
+    const reportCount = reportCountResult?.count || 1;
+
+    // Get user's prior offenses if we know the author
+    let userPriorOffenses = 0;
+    if (params.authorDid) {
+      const [offenseResult] = await db
+        .select({ count: sql<number>`COUNT(*)::int` })
+        .from(moderationUserActions)
+        .where(eq(moderationUserActions.userId, params.authorDid));
+      userPriorOffenses = offenseResult?.count || 0;
+    }
+
+    // Execute workflow
+    await this.executeWorkflows({
+      trigger: 'report_received',
+      contentId: params.contentUri,
+      contentType: params.contentType,
+      reportId: params.reportId,
+      reporterDid: params.reporterDid,
+      authorDid: params.authorDid,
+      reportCount,
+      userPriorOffenses,
+      metadata: {
+        reason: params.reason,
+      },
+    });
+
+    // Check if report count exceeds threshold
+    if (reportCount >= 5) {
+      await this.executeWorkflows({
+        trigger: 'threshold_exceeded',
+        contentId: params.contentUri,
+        contentType: params.contentType,
+        reportCount,
+        authorDid: params.authorDid,
+        metadata: {
+          thresholdType: 'report_count',
+          threshold: 5,
+        },
+      });
+    }
+  }
+
+  /**
+   * Handle AI review completion - triggers workflow
+   */
+  async onAIReviewComplete(params: {
+    contentId: string;
+    contentType: string;
+    authorDid?: string;
+    riskScore: number;
+    aiScores: {
+      toxicity?: number;
+      nsfw?: number;
+      spam?: number;
+      violence?: number;
+      hatespeech?: number;
+    };
+  }): Promise<void> {
+    await this.executeWorkflows({
+      trigger: 'ai_review_complete',
+      contentId: params.contentId,
+      contentType: params.contentType,
+      authorDid: params.authorDid,
+      riskScore: params.riskScore,
+      riskLevel: getRiskLevel(params.riskScore),
+      aiScores: params.aiScores,
+    });
+  }
+
+  /**
+   * Handle appeal submission - triggers workflow
+   */
+  async onAppealSubmitted(params: {
+    appealId: string;
+    userId: string;
+    contentId?: string;
+    actionId?: string;
+  }): Promise<void> {
+    await this.executeWorkflows({
+      trigger: 'appeal_submitted',
+      contentId: params.contentId,
+      authorDid: params.userId,
+      metadata: {
+        appealId: params.appealId,
+        actionId: params.actionId,
+      },
+    });
+  }
+
+  /**
+   * Get the workflow engine for external access
+   */
+  getWorkflowEngine() {
+    return this.workflowEngine;
   }
 }
 

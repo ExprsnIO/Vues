@@ -36,7 +36,7 @@ services:
     environment:
       - discovery.type=single-node
       - plugins.security.disabled=true
-      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=Admin_123!
+      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=Exprsn@Dev2026!
       - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"
     ports:
       - "9200:9200"
@@ -224,9 +224,30 @@ services:
       timeout: 5s
       retries: 3
 
+  # RabbitMQ - Message queue (optional, use 'rabbitmq' profile)
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: exprsn-rabbitmq
+    profiles:
+      - rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    ports:
+      - "5672:5672"   # AMQP protocol
+      - "15672:15672" # Management UI
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_running"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
 volumes:
   postgres_data:
   redis_data:
   opensearch_data:
   minio_data:
   render_output:
+  rabbitmq_data:

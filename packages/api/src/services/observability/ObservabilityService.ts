@@ -685,7 +685,7 @@ export class ObservabilityService {
     const traceparent = headers['traceparent'];
     if (traceparent) {
       const parts = traceparent.split('-');
-      if (parts.length >= 3) {
+      if (parts.length >= 3 && parts[1] && parts[2]) {
         return {
           traceId: parts[1],
           spanId: parts[2],
@@ -697,7 +697,7 @@ export class ObservabilityService {
     // Legacy format
     const traceId = headers['x-trace-id'];
     const spanId = headers['x-span-id'];
-    if (traceId && spanId) {
+    if (traceId && spanId && typeof traceId === 'string' && typeof spanId === 'string') {
       return { traceId, spanId, parentSpanId: spanId };
     }
 

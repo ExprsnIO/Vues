@@ -37,8 +37,7 @@ export function CreateRoleModal({ domainId, isOpen, onClose, onSuccess }: Create
 
   const createMutation = useMutation({
     mutationFn: () =>
-      api.adminDomainRolesCreate({
-        domainId,
+      api.adminDomainRolesCreate(domainId, {
         name,
         displayName,
         description: description || undefined,

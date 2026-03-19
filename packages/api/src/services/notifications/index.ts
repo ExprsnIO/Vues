@@ -74,7 +74,7 @@ export class NotificationService {
         })
         .where(eq(pushTokens.token, token));
 
-      return { id: existing[0].id };
+      return { id: existing[0]!.id };
     }
 
     // Insert new token

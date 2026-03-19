@@ -3,6 +3,7 @@
 import { useRef, useEffect, useState, useCallback, forwardRef, useImperativeHandle } from 'react';
 import Hls from 'hls.js';
 import { cn } from '@/lib/utils';
+import { useAccessibility } from '@/stores/settings-store';
 
 export interface VideoPlayerProps {
   src: string;
@@ -80,6 +81,80 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
   const [isPiPSupported, setIsPiPSupported] = useState(false);
   const [isPiPActive, setIsPiPActive] = useState(false);
 
+  const { reducedMotion } = useAccessibility();
+
+  // Detect OS-level reduced motion preference as a fallback
+  const prefersReducedMotion =
+    reducedMotion ||
+    (typeof window !== 'undefined' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+
+  // Keyboard controls — active whenever the player container or the window
+  // receives a keydown that isn't aimed at a text input.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const video = videoRef.current;
+      if (!video) return;
+
+      // Don't intercept when focus is inside a form control
+      const target = e.target as HTMLElement;
+      if (
+        target.tagName === 'INPUT' ||
+        target.tagName === 'TEXTAREA' ||
+        target.isContentEditable
+      ) {
+        return;
+      }
+
+      switch (e.key) {
+        case ' ':
+        case 'k':
+          e.preventDefault();
+          video.paused ? video.play().catch(() => {}) : video.pause();
+          break;
+        case 'ArrowLeft':
+          e.preventDefault();
+          video.currentTime = Math.max(0, video.currentTime - 5);
+          break;
+        case 'ArrowRight':
+          e.preventDefault();
+          video.currentTime = Math.min(video.duration, video.currentTime + 5);
+          break;
+        case 'ArrowUp':
+          e.preventDefault();
+          video.volume = Math.min(1, video.volume + 0.1);
+          setVolume(Math.min(1, video.volume));
+          break;
+        case 'ArrowDown':
+          e.preventDefault();
+          video.volume = Math.max(0, video.volume - 0.1);
+          setVolume(Math.max(0, video.volume));
+          break;
+        case 'm':
+        case 'M':
+          video.muted = !video.muted;
+          setIsMuted(video.muted);
+          break;
+        case 'f':
+        case 'F':
+          if (document.fullscreenElement) {
+            document.exitFullscreen();
+          } else {
+            video.parentElement?.requestFullscreen();
+          }
+          break;
+        case 'Escape':
+          if (document.fullscreenElement) {
+            document.exitFullscreen();
+          }
+          break;
+      }
+    };
+
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, []);
+
   // Load saved preferences
   useEffect(() => {
     const savedVolume = localStorage.getItem('exprsn-video-volume');
@@ -136,7 +211,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
     if (!video || !src) return;
 
     const attemptPlay = () => {
-      if (autoPlay && video.paused) {
+      if (autoPlay && !prefersReducedMotion && video.paused) {
         video.play().catch((err) => {
           console.log('Autoplay failed:', err.message);
         });
@@ -173,6 +248,29 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
         hls.on(Hls.Events.ERROR, (_event, data) => {
           if (data.fatal) {
             console.error('HLS fatal error:', data.type, data.details);
+            switch (data.type) {
+              case Hls.ErrorTypes.NETWORK_ERROR:
+                // Try to recover from network errors
+                console.log('Attempting HLS recovery from network error...');
+                hls.startLoad();
+                break;
+              case Hls.ErrorTypes.MEDIA_ERROR:
+                // Try to recover from media errors
+                console.log('Attempting HLS recovery from media error...');
+                hls.recoverMediaError();
+                break;
+              default:
+                // Fatal error, fall back to MP4 if cdnUrl available
+                console.log('Unrecoverable HLS error, attempting MP4 fallback');
+                hls.destroy();
+                hlsRef.current = null;
+                if (video) {
+                  const cdnUrl = src.replace(/\/playlist\.m3u8$/, '.mp4').replace(/\/master\.m3u8$/, '.mp4');
+                  video.src = cdnUrl;
+                  video.load();
+                }
+                break;
+            }
           }
         });
 
@@ -467,11 +565,14 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
       <video
         ref={videoRef}
         className="h-full w-full object-contain"
+        aria-label={src ? 'Video player' : 'Video player loading'}
+        role="application"
+        tabIndex={0}
         poster={poster}
         playsInline
         loop={loop}
         muted={isMuted}
-        autoPlay={autoPlay}
+        autoPlay={autoPlay && !prefersReducedMotion}
         preload={autoPlay ? 'auto' : 'metadata'}
       />
 
@@ -545,6 +646,39 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
             )}
           </div>
 
+          {/* Keyboard shortcut hints */}
+          <div className="absolute bottom-2 right-2 group/shortcuts">
+            <button
+              className="w-6 h-6 rounded-full bg-black/40 text-white text-xs flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+              aria-label="Keyboard shortcuts"
+              onClick={(e) => e.stopPropagation()}
+            >
+              ?
+            </button>
+            <div className="absolute bottom-8 right-0 hidden group-hover/shortcuts:block bg-black/80 text-white text-xs rounded-lg p-3 w-48 space-y-1 pointer-events-none z-10">
+              <div className="flex justify-between gap-2">
+                <span>Play / Pause</span>
+                <kbd className="font-mono bg-white/20 px-1 rounded">Space</kbd>
+              </div>
+              <div className="flex justify-between gap-2">
+                <span>Seek ±5s</span>
+                <kbd className="font-mono bg-white/20 px-1 rounded">← →</kbd>
+              </div>
+              <div className="flex justify-between gap-2">
+                <span>Volume</span>
+                <kbd className="font-mono bg-white/20 px-1 rounded">↑ ↓</kbd>
+              </div>
+              <div className="flex justify-between gap-2">
+                <span>Mute</span>
+                <kbd className="font-mono bg-white/20 px-1 rounded">M</kbd>
+              </div>
+              <div className="flex justify-between gap-2">
+                <span>Fullscreen</span>
+                <kbd className="font-mono bg-white/20 px-1 rounded">F</kbd>
+              </div>
+            </div>
+          </div>
+
           {/* Controls row */}
           <div className="flex items-center justify-between">
             {/* Left side: Play/Pause and Time */}
@@ -554,6 +688,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
                   e.stopPropagation();
                   togglePlay();
                 }}
+                aria-label={isPlaying ? 'Pause' : 'Play'}
                 className="p-1 hover:bg-white/20 rounded transition-colors"
               >
                 {isPlaying ? (
@@ -576,6 +711,8 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
                     e.stopPropagation();
                     setShowSpeedMenu(!showSpeedMenu);
                   }}
+                  aria-label={`Playback speed: ${playbackSpeed}x`}
+                  aria-expanded={showSpeedMenu}
                   className="p-1.5 hover:bg-white/20 rounded transition-colors flex items-center gap-1"
                 >
                   <span className="text-white text-xs font-medium min-w-[32px]">
@@ -613,6 +750,8 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
                       e.stopPropagation();
                       setShowQualityMenu(!showQualityMenu);
                     }}
+                    aria-label={`Video quality: ${currentQuality === -1 ? 'Auto' : qualityLevels[currentQuality]?.label || 'Auto'}`}
+                    aria-expanded={showQualityMenu}
                     className="p-1.5 hover:bg-white/20 rounded transition-colors flex items-center gap-1"
                   >
                     <SettingsIcon className="w-4 h-4 text-white" />
@@ -681,6 +820,8 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
                     e.stopPropagation();
                     setShowVolumeSlider(!showVolumeSlider);
                   }}
+                  aria-label={isMuted || volume === 0 ? 'Unmute' : 'Mute'}
+                  aria-pressed={isMuted || volume === 0}
                   className="p-1.5 hover:bg-white/20 rounded transition-colors"
                 >
                   {isMuted || volume === 0 ? (
@@ -702,6 +843,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
                         max="1"
                         step="0.01"
                         value={volume}
+                        aria-label={`Volume: ${Math.round(volume * 100)}%`}
                         onChange={(e) => {
                           e.stopPropagation();
                           handleVolumeChange(parseFloat(e.target.value));
@@ -730,6 +872,8 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
                     e.stopPropagation();
                     togglePiP();
                   }}
+                  aria-label={isPiPActive ? 'Exit picture-in-picture' : 'Enter picture-in-picture'}
+                  aria-pressed={isPiPActive}
                   className={cn(
                     'p-1.5 hover:bg-white/20 rounded transition-colors',
                     isPiPActive && 'bg-white/20'
@@ -750,6 +894,8 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
             e.stopPropagation();
             toggleMute();
           }}
+          aria-label={isMuted ? 'Unmute' : 'Mute'}
+          aria-pressed={isMuted}
           className="absolute bottom-4 right-4 p-2 bg-black/50 rounded-full hover:bg-black/70 transition-colors"
         >
           {isMuted ? (

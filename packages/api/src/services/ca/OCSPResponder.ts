@@ -12,8 +12,17 @@ import {
 } from '../../db/schema.js';
 import { eq } from 'drizzle-orm';
 import { CAAuditService } from './CAAuditService.js';
+import { redis } from '../../cache/redis.js';
 
 const CA_ENCRYPTION_KEY = process.env.CA_ENCRYPTION_KEY || 'development-key-change-in-production';
+
+// Cache configuration
+const OCSP_CACHE_PREFIX = 'ocsp:status:';
+const OCSP_CACHE_TTL_SECONDS = 24 * 60 * 60; // 24 hours (matches RESPONSE_VALIDITY_HOURS)
+
+// Cache statistics
+let cacheHits = 0;
+let cacheMisses = 0;
 
 // Helper to decrypt stored private keys
 function decryptPrivateKey(encryptedKey: string, password: string): string {
@@ -80,6 +89,22 @@ const REVOCATION_REASONS: Record<string, number> = {
   aACompromise: 10,
 };
 
+// OCSP request logging table (in-memory for now, could be persisted to DB)
+let ocspRequestLog: Array<{
+  id: string;
+  serialNumber: string;
+  status: OCSPCertStatus;
+  requestedAt: Date;
+  responseTime: number;
+  clientIp?: string;
+}> = [];
+
+// OCSP responder enabled state
+let ocspEnabled = true;
+
+// Max log entries to keep
+const MAX_LOG_ENTRIES = 10000;
+
 export class OCSPResponder {
   private static RESPONSE_VALIDITY_HOURS = 24;
 
@@ -88,7 +113,7 @@ export class OCSPResponder {
    */
   static parseOCSPRequest(derBuffer: Buffer): OCSPRequest {
     try {
-      const asn1 = forge.asn1.fromDer(forge.util.createBuffer(derBuffer));
+      const asn1 = forge.asn1.fromDer(forge.util.createBuffer(derBuffer.toString('binary')));
 
       const requestList: OCSPRequest['requestList'] = [];
       let nonce: string | undefined;
@@ -164,6 +189,31 @@ export class OCSPResponder {
 
     // Normalize serial number (remove leading zeros, uppercase)
     const normalizedSerial = serialNumber.replace(/^0+/, '').toUpperCase();
+    const cacheKey = `${OCSP_CACHE_PREFIX}${normalizedSerial}`;
+
+    // Check cache first
+    try {
+      const cached = await redis.get(cacheKey);
+      if (cached) {
+        cacheHits++;
+        const cachedStatus = JSON.parse(cached) as {
+          status: OCSPCertStatus;
+          revocationTime?: string;
+          revocationReason?: string;
+        };
+        return {
+          serialNumber,
+          status: cachedStatus.status,
+          thisUpdate,
+          nextUpdate,
+          revocationTime: cachedStatus.revocationTime ? new Date(cachedStatus.revocationTime) : undefined,
+          revocationReason: cachedStatus.revocationReason,
+        };
+      }
+    } catch {
+      // Cache miss or error, continue to database lookup
+    }
+    cacheMisses++;
 
     // Check entity certificates
     const [entityCert] = await db.select()
@@ -173,7 +223,7 @@ export class OCSPResponder {
 
     if (entityCert) {
       if (entityCert.status === 'revoked') {
-        return {
+        const result: OCSPSingleResponse = {
           serialNumber,
           status: 'revoked',
           thisUpdate,
@@ -181,11 +231,13 @@ export class OCSPResponder {
           revocationTime: entityCert.revokedAt || undefined,
           revocationReason: entityCert.revocationReason || 'unspecified',
         };
+        await this.cacheResponse(cacheKey, result);
+        return result;
       }
 
       // Check if expired
       if (new Date(entityCert.notAfter) < new Date()) {
-        return {
+        const result: OCSPSingleResponse = {
           serialNumber,
           status: 'revoked',
           thisUpdate,
@@ -193,14 +245,18 @@ export class OCSPResponder {
           revocationTime: entityCert.notAfter,
           revocationReason: 'expired',
         };
+        await this.cacheResponse(cacheKey, result);
+        return result;
       }
 
-      return {
+      const result: OCSPSingleResponse = {
         serialNumber,
         status: 'good',
         thisUpdate,
         nextUpdate,
       };
+      await this.cacheResponse(cacheKey, result);
+      return result;
     }
 
     // Check intermediate certificates
@@ -211,19 +267,23 @@ export class OCSPResponder {
 
     if (intermediateCert) {
       if (intermediateCert.status === 'revoked') {
-        return {
+        const result: OCSPSingleResponse = {
           serialNumber,
           status: 'revoked',
           thisUpdate,
           nextUpdate,
         };
+        await this.cacheResponse(cacheKey, result);
+        return result;
       }
-      return {
+      const result: OCSPSingleResponse = {
         serialNumber,
         status: 'good',
         thisUpdate,
         nextUpdate,
       };
+      await this.cacheResponse(cacheKey, result);
+      return result;
     }
 
     // Check root certificates
@@ -234,27 +294,55 @@ export class OCSPResponder {
 
     if (rootCert) {
       if (rootCert.status === 'revoked') {
-        return {
+        const result: OCSPSingleResponse = {
           serialNumber,
           status: 'revoked',
           thisUpdate,
           nextUpdate,
         };
+        await this.cacheResponse(cacheKey, result);
+        return result;
       }
-      return {
+      const result: OCSPSingleResponse = {
         serialNumber,
         status: 'good',
         thisUpdate,
         nextUpdate,
       };
+      await this.cacheResponse(cacheKey, result);
+      return result;
     }
 
-    return {
+    // Unknown certificate - cache with shorter TTL to allow re-checking
+    const result: OCSPSingleResponse = {
       serialNumber,
       status: 'unknown',
       thisUpdate,
       nextUpdate,
     };
+    // Cache unknown status for 1 hour only
+    await this.cacheResponse(cacheKey, result, 60 * 60);
+    return result;
+  }
+
+  /**
+   * Cache an OCSP response
+   */
+  private static async cacheResponse(
+    cacheKey: string,
+    response: OCSPSingleResponse,
+    ttlSeconds: number = OCSP_CACHE_TTL_SECONDS
+  ): Promise<void> {
+    try {
+      const cacheData = {
+        status: response.status,
+        revocationTime: response.revocationTime?.toISOString(),
+        revocationReason: response.revocationReason,
+      };
+      await redis.setex(cacheKey, ttlSeconds, JSON.stringify(cacheData));
+    } catch {
+      // Cache write failed, continue without caching
+    }
   }
 
   /**
@@ -534,6 +622,177 @@ export class OCSPResponder {
       nextUpdate: result.nextUpdate.toISOString(),
       revocationTime: result.revocationTime?.toISOString(),
       revocationReason: result.revocationReason,
+    };
+  }
+
+  /**
+   * Get OCSP responder status (admin interface)
+   */
+  static async getStatus(): Promise<{
+    enabled: boolean;
+    totalRequests: number;
+    requestsToday: number;
+    requestsThisHour: number;
+    cacheHitRate: number;
+    cacheHits: number;
+    cacheMisses: number;
+    averageResponseTime: number;
+    uptime: string;
+  }> {
+    const now = new Date();
+    const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const startOfHour = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours());
+
+    const requestsToday = ocspRequestLog.filter(r => r.requestedAt >= startOfDay).length;
+    const requestsThisHour = ocspRequestLog.filter(r => r.requestedAt >= startOfHour).length;
+
+    const avgResponseTime = ocspRequestLog.length > 0
+      ? ocspRequestLog.reduce((sum, r) => sum + r.responseTime, 0) / ocspRequestLog.length
+      : 0;
+
+    // Calculate cache hit rate
+    const totalCacheRequests = cacheHits + cacheMisses;
+    const hitRate = totalCacheRequests > 0
+      ? Math.round((cacheHits / totalCacheRequests) * 100)
+      : 0;
+
+    return {
+      enabled: ocspEnabled,
+      totalRequests: ocspRequestLog.length,
+      requestsToday,
+      requestsThisHour,
+      cacheHitRate: hitRate,
+      cacheHits,
+      cacheMisses,
+      averageResponseTime: Math.round(avgResponseTime),
+      uptime: `${Math.floor(process.uptime() / 3600)}h ${Math.floor((process.uptime() % 3600) / 60)}m`,
+    };
+  }
+
+  /**
+   * Get OCSP request log with pagination (admin interface)
+   */
+  static async getRequestLog(limit: number = 50, offset: number = 0): Promise<Array<{
+    id: string;
+    serialNumber: string;
+    status: OCSPCertStatus;
+    requestedAt: string;
+    responseTime: number;
+    clientIp?: string;
+  }>> {
+    // Sort by most recent first
+    const sorted = [...ocspRequestLog].sort(
+      (a, b) => b.requestedAt.getTime() - a.requestedAt.getTime()
+    );
+
+    return sorted.slice(offset, offset + limit).map(r => ({
+      id: r.id,
+      serialNumber: r.serialNumber,
+      status: r.status,
+      requestedAt: r.requestedAt.toISOString(),
+      responseTime: r.responseTime,
+      clientIp: r.clientIp,
+    }));
+  }
+
+  /**
+   * Enable or disable the OCSP responder (admin interface)
+   */
+  static async setEnabled(enabled: boolean): Promise<void> {
+    ocspEnabled = enabled;
+
+    // Log the change
+    await CAAuditService.log({
+      eventType: 'ca.config_changed',
+      eventCategory: 'ca',
+      performedBy: 'admin',
+      severity: 'warning',
+      success: true,
+      details: {
+        setting: 'ocsp_enabled',
+        value: ocspEnabled,
+      },
+    });
+  }
+
+  /**
+   * Check if OCSP responder is enabled
+   */
+  static isEnabled(): boolean {
+    return ocspEnabled;
+  }
+
+  /**
+   * Log an OCSP request (for analytics)
+   */
+  static logRequest(
+    serialNumber: string,
+    status: OCSPCertStatus,
+    responseTime: number,
+    clientIp?: string
+  ): void {
+    const entry = {
+      id: `ocsp_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
+      serialNumber,
+      status,
+      requestedAt: new Date(),
+      responseTime,
+      clientIp,
+    };
+
+    ocspRequestLog.push(entry);
+
+    // Trim log if it exceeds max size
+    if (ocspRequestLog.length > MAX_LOG_ENTRIES) {
+      ocspRequestLog = ocspRequestLog.slice(-MAX_LOG_ENTRIES);
+    }
+  }
+
+  /**
+   * Invalidate cache for a specific certificate (call when certificate status changes)
+   */
+  static async invalidateCertificateCache(serialNumber: string): Promise<void> {
+    const normalizedSerial = serialNumber.replace(/^0+/, '').toUpperCase();
+    const cacheKey = `${OCSP_CACHE_PREFIX}${normalizedSerial}`;
+    try {
+      await redis.del(cacheKey);
+    } catch {
+      // Cache deletion failed, continue
+    }
+  }
+
+  /**
+   * Clear all OCSP response cache
+   */
+  static async clearCache(): Promise<number> {
+    try {
+      const keys = await redis.keys(`${OCSP_CACHE_PREFIX}*`);
+      if (keys.length > 0) {
+        await redis.del(...keys);
+      }
+      return keys.length;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * Reset cache statistics
+   */
+  static resetCacheStats(): void {
+    cacheHits = 0;
+    cacheMisses = 0;
+  }
+
+  /**
+   * Get cache statistics
+   */
+  static getCacheStats(): { hits: number; misses: number; hitRate: number } {
+    const total = cacheHits + cacheMisses;
+    return {
+      hits: cacheHits,
+      misses: cacheMisses,
+      hitRate: total > 0 ? Math.round((cacheHits / total) * 100) : 0,
     };
   }
 }

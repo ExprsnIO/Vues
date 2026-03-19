@@ -11,6 +11,7 @@ import { Redis } from 'ioredis';
 import { db, users, sessions } from '../db/index.js';
 import { eq } from 'drizzle-orm';
 import { getOAuthClient } from '../auth/oauth-client.js';
+import { hashSessionToken } from '../utils/session-tokens.js';
 
 // Types
 interface User {
@@ -143,8 +144,10 @@ export function initializeEditorCollab(io: SocketIOServer): void {
 
       // Check for local session token (prefixed with exp_)
       if (token.startsWith('exp_')) {
+        // Hash the token to look it up (tokens are stored as hashes)
+        const tokenHash = hashSessionToken(token);
         const session = await db.query.sessions.findFirst({
-          where: eq(sessions.accessJwt, token),
+          where: eq(sessions.accessJwt, tokenHash),
         });
 
         if (!session || session.expiresAt < new Date()) {

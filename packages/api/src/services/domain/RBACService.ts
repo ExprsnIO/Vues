@@ -29,7 +29,6 @@ export interface Role {
   description?: string;
   permissions: string[];
   isSystem: boolean;
-  parentRoleId?: string;
   priority: number;
   createdAt: Date;
   updatedAt: Date;
@@ -40,12 +39,10 @@ export interface Role {
  */
 export interface UserRole {
   id: string;
-  userId: string;
+  domainUserId: string;
   roleId: string;
-  domainId: string;
-  grantedBy?: string;
-  grantedAt: Date;
-  expiresAt?: Date;
+  assignedBy?: string;
+  createdAt: Date;
 }
 
 /**
@@ -57,7 +54,8 @@ export interface Group {
   name: string;
   description?: string;
   memberCount: number;
-  roles: string[];
+  permissions: string[];
+  isDefault: boolean;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -67,10 +65,10 @@ export interface Group {
  */
 export interface GroupMembership {
   id: string;
-  userId: string;
+  userDid: string;
   groupId: string;
   addedBy?: string;
-  addedAt: Date;
+  createdAt: Date;
 }
 
 // Built-in permissions
@@ -211,7 +209,8 @@ export class RBACService {
    * Get permission categories
    */
   getPermissionCategories(): string[] {
-    return [...new Set(PERMISSIONS.map((p) => p.category))];
+    const categories = new Set(PERMISSIONS.map((p) => p.category));
+    return Array.from(categories);
   }
 
   /**
@@ -265,19 +264,25 @@ export class RBACService {
         continue;
       }
 
+      const values: any = {
+        id: nanoid(),
+        domainId,
+        name: systemRole.name,
+        displayName: systemRole.name,
+        permissions: systemRole.permissions,
+        isSystem: true,
+        priority: systemRole.priority,
+        createdAt: now,
+        updatedAt: now,
+      };
+
+      if (systemRole.description) {
+        values.description = systemRole.description;
+      }
+
       const [inserted] = await this.db
         .insert(schema.domainRoles)
-        .values({
-          id: nanoid(),
-          domainId,
-          name: systemRole.name,
-          description: systemRole.description,
-          permissions: systemRole.permissions,
-          isSystem: true,
-          priority: systemRole.priority,
-          createdAt: now,
-          updatedAt: now,
-        })
+        .values(values)
         .returning();
 
       if (inserted) {
@@ -320,26 +325,30 @@ export class RBACService {
       name: string;
       description?: string;
       permissions: string[];
-      parentRoleId?: string;
       priority?: number;
     }
   ): Promise<Role> {
     const now = new Date();
 
+    const values: any = {
+      id: nanoid(),
+      domainId,
+      name: role.name,
+      displayName: role.name,
+      permissions: role.permissions,
+      isSystem: false,
+      priority: role.priority || 0,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    if (role.description) {
+      values.description = role.description;
+    }
+
     const [inserted] = await this.db
       .insert(schema.domainRoles)
-      .values({
-        id: nanoid(),
-        domainId,
-        name: role.name,
-        description: role.description,
-        permissions: role.permissions,
-        isSystem: false,
-        parentRoleId: role.parentRoleId,
-        priority: role.priority || 0,
-        createdAt: now,
-        updatedAt: now,
-      })
+      .values(values)
       .returning();
 
     return this.toRole(inserted!);
@@ -362,12 +371,27 @@ export class RBACService {
       return null; // Can't update system roles
     }
 
+    const updateValues: any = {
+      updatedAt: new Date(),
+    };
+
+    if (updates.name !== undefined) {
+      updateValues.name = updates.name;
+      updateValues.displayName = updates.name;
+    }
+    if (updates.description !== undefined) {
+      updateValues.description = updates.description;
+    }
+    if (updates.permissions !== undefined) {
+      updateValues.permissions = updates.permissions;
+    }
+    if (updates.priority !== undefined) {
+      updateValues.priority = updates.priority;
+    }
+
     const [updated] = await this.db
       .update(schema.domainRoles)
-      .set({
-        ...updates,
-        updatedAt: new Date(),
-      })
+      .set(updateValues)
       .where(eq(schema.domainRoles.id, roleId))
       .returning();
 
@@ -409,49 +433,40 @@ export class RBACService {
    * Assign role to user
    */
   async assignRole(
-    userId: string,
+    domainUserId: string,
     roleId: string,
-    domainId: string,
-    grantedBy?: string,
-    expiresAt?: Date
+    assignedBy?: string
   ): Promise<UserRole> {
     // Check if already assigned
     const existing = await this.db.query.domainUserRoles.findFirst({
       where: and(
-        eq(schema.domainUserRoles.userId, userId),
-        eq(schema.domainUserRoles.roleId, roleId),
-        eq(schema.domainUserRoles.domainId, domainId)
+        eq(schema.domainUserRoles.domainUserId, domainUserId),
+        eq(schema.domainUserRoles.roleId, roleId)
       ),
     });
 
     if (existing) {
-      // Update expiration if different
-      if (expiresAt !== existing.expiresAt) {
-        const [updated] = await this.db
-          .update(schema.domainUserRoles)
-          .set({ expiresAt })
-          .where(eq(schema.domainUserRoles.id, existing.id))
-          .returning();
-        return this.toUserRole(updated!);
-      }
       return this.toUserRole(existing);
+    }
+
+    const values: any = {
+      id: nanoid(),
+      domainUserId,
+      roleId,
+      createdAt: new Date(),
+    };
+
+    if (assignedBy) {
+      values.assignedBy = assignedBy;
     }
 
     const [inserted] = await this.db
       .insert(schema.domainUserRoles)
-      .values({
-        id: nanoid(),
-        userId,
-        roleId,
-        domainId,
-        grantedBy,
-        grantedAt: new Date(),
-        expiresAt,
-      })
+      .values(values)
       .returning();
 
     // Invalidate cache
-    this.permissionCache.delete(`${userId}:${domainId}`);
+    this.permissionCache.delete(domainUserId);
 
     return this.toUserRole(inserted!);
   }
@@ -459,20 +474,19 @@ export class RBACService {
   /**
    * Remove role from user
    */
-  async removeRole(userId: string, roleId: string, domainId: string): Promise<boolean> {
+  async removeRole(domainUserId: string, roleId: string): Promise<boolean> {
     const result = await this.db
       .delete(schema.domainUserRoles)
       .where(
         and(
-          eq(schema.domainUserRoles.userId, userId),
-          eq(schema.domainUserRoles.roleId, roleId),
-          eq(schema.domainUserRoles.domainId, domainId)
+          eq(schema.domainUserRoles.domainUserId, domainUserId),
+          eq(schema.domainUserRoles.roleId, roleId)
         )
       )
       .returning();
 
     // Invalidate cache
-    this.permissionCache.delete(`${userId}:${domainId}`);
+    this.permissionCache.delete(domainUserId);
 
     return result.length > 0;
   }
@@ -480,26 +494,16 @@ export class RBACService {
   /**
    * Get user's roles in a domain
    */
-  async getUserRoles(userId: string, domainId: string): Promise<Role[]> {
-    const now = new Date();
-
+  async getUserRoles(domainUserId: string): Promise<Role[]> {
     const assignments = await this.db.query.domainUserRoles.findMany({
-      where: and(
-        eq(schema.domainUserRoles.userId, userId),
-        eq(schema.domainUserRoles.domainId, domainId)
-      ),
+      where: eq(schema.domainUserRoles.domainUserId, domainUserId),
     });
 
-    // Filter out expired assignments
-    const validAssignments = assignments.filter(
-      (a) => !a.expiresAt || a.expiresAt > now
-    );
-
-    if (validAssignments.length === 0) {
+    if (assignments.length === 0) {
       return [];
     }
 
-    const roleIds = validAssignments.map((a) => a.roleId);
+    const roleIds = assignments.map((a) => a.roleId);
     const roles = await this.db.query.domainRoles.findMany({
       where: inArray(schema.domainRoles.id, roleIds),
     });
@@ -510,19 +514,27 @@ export class RBACService {
   /**
    * Get effective permissions for a user in a domain
    */
-  async getUserPermissions(userId: string, domainId: string): Promise<string[]> {
-    const cacheKey = `${userId}:${domainId}`;
-    const cached = this.permissionCache.get(cacheKey);
+  async getUserPermissions(domainUserId: string): Promise<string[]> {
+    const cached = this.permissionCache.get(domainUserId);
     if (cached) {
       return Array.from(cached);
     }
 
+    // Get domain user to find userDid and domainId
+    const domainUser = await this.db.query.domainUsers.findFirst({
+      where: eq(schema.domainUsers.id, domainUserId),
+    });
+
+    if (!domainUser) {
+      return [];
+    }
+
     // Get direct roles
-    const roles = await this.getUserRoles(userId, domainId);
+    const roles = await this.getUserRoles(domainUserId);
 
     // Get group roles
     const groupMemberships = await this.db.query.domainGroupMembers.findMany({
-      where: eq(schema.domainGroupMembers.userId, userId),
+      where: eq(schema.domainGroupMembers.userDid, domainUser.userDid),
     });
 
     if (groupMemberships.length > 0) {
@@ -530,18 +542,23 @@ export class RBACService {
       const groups = await this.db.query.domainGroups.findMany({
         where: and(
           inArray(schema.domainGroups.id, groupIds),
-          eq(schema.domainGroups.domainId, domainId)
+          eq(schema.domainGroups.domainId, domainUser.domainId)
         ),
       });
 
+      // Groups have direct permissions, not role IDs
       for (const group of groups) {
-        const groupRoleIds = (group.roleIds as string[]) || [];
-        if (groupRoleIds.length > 0) {
-          const groupRoles = await this.db.query.domainRoles.findMany({
-            where: inArray(schema.domainRoles.id, groupRoleIds),
-          });
-          roles.push(...groupRoles.map((r) => this.toRole(r)));
-        }
+        const groupPermissions = (group.permissions as string[]) || [];
+        roles.push({
+          id: `group-${group.id}`,
+          domainId: group.domainId,
+          name: group.name,
+          permissions: groupPermissions,
+          isSystem: false,
+          priority: 0,
+          createdAt: group.createdAt,
+          updatedAt: group.updatedAt,
+        });
       }
     }
 
@@ -553,7 +570,7 @@ export class RBACService {
     }
 
     // Cache result
-    this.permissionCache.set(cacheKey, allPermissions);
+    this.permissionCache.set(domainUserId, allPermissions);
 
     return Array.from(allPermissions);
   }
@@ -562,11 +579,10 @@ export class RBACService {
    * Check if user has permission
    */
   async hasPermission(
-    userId: string,
-    domainId: string,
+    domainUserId: string,
     permission: string
   ): Promise<boolean> {
-    const permissions = await this.getUserPermissions(userId, domainId);
+    const permissions = await this.getUserPermissions(domainUserId);
     return permissions.includes(permission);
   }
 
@@ -574,11 +590,10 @@ export class RBACService {
    * Check if user has any of the permissions
    */
   async hasAnyPermission(
-    userId: string,
-    domainId: string,
+    domainUserId: string,
     permissions: string[]
   ): Promise<boolean> {
-    const userPermissions = await this.getUserPermissions(userId, domainId);
+    const userPermissions = await this.getUserPermissions(domainUserId);
     return permissions.some((p) => userPermissions.includes(p));
   }
 
@@ -586,11 +601,10 @@ export class RBACService {
    * Check if user has all permissions
    */
   async hasAllPermissions(
-    userId: string,
-    domainId: string,
+    domainUserId: string,
     permissions: string[]
   ): Promise<boolean> {
-    const userPermissions = await this.getUserPermissions(userId, domainId);
+    const userPermissions = await this.getUserPermissions(domainUserId);
     return permissions.every((p) => userPermissions.includes(p));
   }
 
@@ -606,23 +620,30 @@ export class RBACService {
     group: {
       name: string;
       description?: string;
-      roles?: string[];
+      permissions?: string[];
+      isDefault?: boolean;
     }
   ): Promise<Group> {
     const now = new Date();
 
+    const values: any = {
+      id: nanoid(),
+      domainId,
+      name: group.name,
+      permissions: group.permissions || [],
+      isDefault: group.isDefault || false,
+      memberCount: 0,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    if (group.description) {
+      values.description = group.description;
+    }
+
     const [inserted] = await this.db
       .insert(schema.domainGroups)
-      .values({
-        id: nanoid(),
-        domainId,
-        name: group.name,
-        description: group.description,
-        roleIds: group.roles || [],
-        memberCount: 0,
-        createdAt: now,
-        updatedAt: now,
-      })
+      .values(values)
       .returning();
 
     return this.toGroup(inserted!);
@@ -658,17 +679,26 @@ export class RBACService {
     updates: {
       name?: string;
       description?: string;
-      roles?: string[];
+      permissions?: string[];
     }
   ): Promise<Group | null> {
+    const updateValues: any = {
+      updatedAt: new Date(),
+    };
+
+    if (updates.name !== undefined) {
+      updateValues.name = updates.name;
+    }
+    if (updates.description !== undefined) {
+      updateValues.description = updates.description;
+    }
+    if (updates.permissions !== undefined) {
+      updateValues.permissions = updates.permissions;
+    }
+
     const [updated] = await this.db
       .update(schema.domainGroups)
-      .set({
-        name: updates.name,
-        description: updates.description,
-        roleIds: updates.roles,
-        updatedAt: new Date(),
-      })
+      .set(updateValues)
       .where(eq(schema.domainGroups.id, groupId))
       .returning();
 
@@ -703,13 +733,13 @@ export class RBACService {
    */
   async addGroupMember(
     groupId: string,
-    userId: string,
+    userDid: string,
     addedBy?: string
   ): Promise<GroupMembership> {
     const existing = await this.db.query.domainGroupMembers.findFirst({
       where: and(
         eq(schema.domainGroupMembers.groupId, groupId),
-        eq(schema.domainGroupMembers.userId, userId)
+        eq(schema.domainGroupMembers.userDid, userDid)
       ),
     });
 
@@ -717,29 +747,39 @@ export class RBACService {
       return this.toGroupMembership(existing);
     }
 
+    const values: any = {
+      id: nanoid(),
+      groupId,
+      userDid,
+      createdAt: new Date(),
+    };
+
+    if (addedBy) {
+      values.addedBy = addedBy;
+    }
+
     const [inserted] = await this.db
       .insert(schema.domainGroupMembers)
-      .values({
-        id: nanoid(),
-        groupId,
-        userId,
-        addedBy,
-        addedAt: new Date(),
-      })
+      .values(values)
       .returning();
 
     // Update member count
-    await this.db
-      .update(schema.domainGroups)
-      .set({
-        memberCount: sql`${schema.domainGroups.memberCount} + 1`,
-      })
-      .where(eq(schema.domainGroups.id, groupId));
+    await this.db.execute(
+      sql`UPDATE domain_groups SET member_count = member_count + 1 WHERE id = ${groupId}`
+    );
 
-    // Invalidate cache for user
+    // Invalidate cache for user - need to find domainUserId
     const group = await this.getGroup(groupId);
     if (group) {
-      this.permissionCache.delete(`${userId}:${group.domainId}`);
+      const domainUser = await this.db.query.domainUsers.findFirst({
+        where: and(
+          eq(schema.domainUsers.domainId, group.domainId),
+          eq(schema.domainUsers.userDid, userDid)
+        ),
+      });
+      if (domainUser) {
+        this.permissionCache.delete(domainUser.id);
+      }
     }
 
     return this.toGroupMembership(inserted!);
@@ -748,30 +788,35 @@ export class RBACService {
   /**
    * Remove user from group
    */
-  async removeGroupMember(groupId: string, userId: string): Promise<boolean> {
+  async removeGroupMember(groupId: string, userDid: string): Promise<boolean> {
     const result = await this.db
       .delete(schema.domainGroupMembers)
       .where(
         and(
           eq(schema.domainGroupMembers.groupId, groupId),
-          eq(schema.domainGroupMembers.userId, userId)
+          eq(schema.domainGroupMembers.userDid, userDid)
         )
       )
       .returning();
 
     if (result.length > 0) {
       // Update member count
-      await this.db
-        .update(schema.domainGroups)
-        .set({
-          memberCount: sql`GREATEST(${schema.domainGroups.memberCount} - 1, 0)`,
-        })
-        .where(eq(schema.domainGroups.id, groupId));
+      await this.db.execute(
+        sql`UPDATE domain_groups SET member_count = GREATEST(member_count - 1, 0) WHERE id = ${groupId}`
+      );
 
       // Invalidate cache
       const group = await this.getGroup(groupId);
       if (group) {
-        this.permissionCache.delete(`${userId}:${group.domainId}`);
+        const domainUser = await this.db.query.domainUsers.findFirst({
+          where: and(
+            eq(schema.domainUsers.domainId, group.domainId),
+            eq(schema.domainUsers.userDid, userDid)
+          ),
+        });
+        if (domainUser) {
+          this.permissionCache.delete(domainUser.id);
+        }
       }
     }
 
@@ -801,7 +846,6 @@ export class RBACService {
       description: r.description || undefined,
       permissions: (r.permissions as string[]) || [],
       isSystem: r.isSystem ?? false,
-      parentRoleId: r.parentRoleId || undefined,
       priority: r.priority || 0,
       createdAt: r.createdAt,
       updatedAt: r.updatedAt,
@@ -811,12 +855,10 @@ export class RBACService {
   private toUserRole(r: typeof schema.domainUserRoles.$inferSelect): UserRole {
     return {
       id: r.id,
-      userId: r.userId,
+      domainUserId: r.domainUserId,
       roleId: r.roleId,
-      domainId: r.domainId,
-      grantedBy: r.grantedBy || undefined,
-      grantedAt: r.grantedAt,
-      expiresAt: r.expiresAt || undefined,
+      assignedBy: r.assignedBy || undefined,
+      createdAt: r.createdAt,
     };
   }
 
@@ -827,7 +869,8 @@ export class RBACService {
       name: g.name,
       description: g.description || undefined,
       memberCount: g.memberCount || 0,
-      roles: (g.roleIds as string[]) || [],
+      permissions: (g.permissions as string[]) || [],
+      isDefault: g.isDefault ?? false,
       createdAt: g.createdAt,
       updatedAt: g.updatedAt,
     };
@@ -836,10 +879,10 @@ export class RBACService {
   private toGroupMembership(m: typeof schema.domainGroupMembers.$inferSelect): GroupMembership {
     return {
       id: m.id,
-      userId: m.userId,
+      userDid: m.userDid,
       groupId: m.groupId,
       addedBy: m.addedBy || undefined,
-      addedAt: m.addedAt,
+      createdAt: m.createdAt,
     };
   }
 

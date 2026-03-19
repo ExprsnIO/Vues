@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import Link from 'next/link';
 import toast from 'react-hot-toast';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3002';
@@ -134,6 +135,22 @@ export default function FederationAdminPage() {
             Add Relay
           </button>
         </div>
+      </div>
+
+      {/* Relay Management Banner */}
+      <div className="bg-blue-500/10 border border-blue-500/20 rounded-xl p-4 flex items-center justify-between">
+        <div>
+          <p className="text-blue-400 font-medium text-sm">Outbound Firehose</p>
+          <p className="text-gray-400 text-sm">
+            Manage protocol endpoints, subscribers, and real-time stats for the local firehose.
+          </p>
+        </div>
+        <Link
+          href="/admin/relay"
+          className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors text-sm whitespace-nowrap"
+        >
+          Relay & Firehose
+        </Link>
       </div>
 
       {/* Consumer Status */}

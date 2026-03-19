@@ -14,7 +14,7 @@ import {
   organizations,
   organizationMembers,
 } from '../db/schema.js';
-import { eq, and, desc, sql, gte, inArray } from 'drizzle-orm';
+import { eq, and, desc, sql, gte, inArray, lt } from 'drizzle-orm';
 import { authMiddleware } from '../auth/middleware.js';
 import { PaymentGatewayFactory } from '../services/payments/index.js';
 import type { PaymentProvider } from '@exprsn/shared/types';
@@ -880,7 +880,7 @@ paymentRoutes.get('/io.exprsn.payments.listTransactions', authMiddleware, async 
   }
 
   if (cursor) {
-    conditions.push(sql`${paymentTransactions.createdAt} < ${new Date(cursor)}`);
+    conditions.push(lt(paymentTransactions.createdAt, new Date(cursor)));
   }
 
   const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
@@ -1654,7 +1654,7 @@ paymentRoutes.get('/io.exprsn.payments.getSubscribers', authMiddleware, async (c
   ];
 
   if (cursor) {
-    conditions.push(sql`${creatorSubscriptions.createdAt} < ${new Date(cursor)}`);
+    conditions.push(lt(creatorSubscriptions.createdAt, new Date(cursor)));
   }
 
   const subscribers = await db

@@ -7,7 +7,8 @@ export type DocsAudience =
   | 'members and creators'
   | 'moderators and admins'
   | 'platform admins'
-  | 'operators and backend admins';
+  | 'operators and backend admins'
+  | 'creators';
 
 export interface DocsTocItem {
   id: string;
@@ -84,7 +85,16 @@ export type DocsBlock =
 
 export interface DocsSection {
   id: string;
-  slug: 'setup' | 'administration' | 'user-experience' | 'moderation' | 'backend' | 'changelog';
+  slug:
+    | 'setup'
+    | 'administration'
+    | 'user-experience'
+    | 'moderation'
+    | 'backend'
+    | 'changelog'
+    | 'identity'
+    | 'messaging'
+    | 'creator-tools';
   title: string;
   summary: string;
   visibility: DocsVisibility;

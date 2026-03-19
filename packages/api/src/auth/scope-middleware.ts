@@ -9,6 +9,7 @@ import { oauthAgent, OAUTH_SCOPES } from '../services/oauth/OAuthAgent.js';
 import { db } from '../db/index.js';
 import { sessions, authConfig } from '../db/schema.js';
 import { eq } from 'drizzle-orm';
+import { hashSessionToken } from '../utils/session-tokens.js';
 
 // Extend context to include scope information
 declare module 'hono' {
@@ -74,8 +75,10 @@ const ENDPOINT_SCOPE_MAP: Record<string, string[]> = {
 async function getTokenScopes(token: string): Promise<string[]> {
   // Local tokens (exp_) - check session metadata for scopes
   if (token.startsWith('exp_')) {
+    // Hash the token to look it up (tokens are stored as hashes)
+    const tokenHash = hashSessionToken(token);
     const session = await db.query.sessions.findFirst({
-      where: eq(sessions.accessJwt, token),
+      where: eq(sessions.accessJwt, tokenHash),
     });
 
     if (session) {
@@ -294,10 +297,20 @@ export function configBasedRateLimit() {
       });
     }
 
+    // Determine rate limit tier for header
+    const tier = adminUser
+      ? 'admin'
+      : did?.startsWith('did:exprsn:')
+        ? 'exprsn'
+        : did
+          ? 'user'
+          : 'anonymous';
+
     // Add rate limit headers
     c.header('X-RateLimit-Limit', limits.requestsPerMinute.toString());
     c.header('X-RateLimit-Remaining', Math.max(0, limits.requestsPerMinute - current).toString());
     c.header('X-RateLimit-Burst', limits.burstLimit.toString());
+    c.header('X-RateLimit-Tier', tier);
 
     await next();
   };

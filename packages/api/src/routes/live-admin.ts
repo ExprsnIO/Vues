@@ -278,7 +278,8 @@ liveAdminRouter.post(
     // Terminate the stream via media server
     try {
       const streamingProvider = await getStreamingProvider();
-      await streamingProvider.endStream(stream.id);
+      const endStream = (streamingProvider as Record<string, unknown>).endStream as ((id: string) => Promise<void>) | undefined;
+      if (endStream) await endStream(stream.id);
       console.log(`Stream ${id} terminated via media server`);
     } catch (error) {
       console.error('Failed to terminate stream via media server:', error);

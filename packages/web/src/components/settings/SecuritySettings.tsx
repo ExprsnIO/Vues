@@ -36,7 +36,7 @@ export function SecuritySettings() {
     queryFn: async () => {
       // This would call api.getSessions() when implemented
       // For now, return mock data structure
-      if ('getSessions' in api && typeof (api as Record<string, unknown>).getSessions === 'function') {
+      if ('getSessions' in api && typeof (api as unknown as Record<string, unknown>).getSessions === 'function') {
         return (api as unknown as { getSessions: () => Promise<{ sessions: Session[] }> }).getSessions();
       }
       return { sessions: [] as Session[] };
@@ -47,7 +47,7 @@ export function SecuritySettings() {
   const { data: historyData, isLoading: historyLoading } = useQuery({
     queryKey: ['loginHistory'],
     queryFn: async () => {
-      if ('getLoginHistory' in api && typeof (api as Record<string, unknown>).getLoginHistory === 'function') {
+      if ('getLoginHistory' in api && typeof (api as unknown as Record<string, unknown>).getLoginHistory === 'function') {
         return (api as unknown as { getLoginHistory: () => Promise<{ history: LoginHistoryEntry[] }> }).getLoginHistory();
       }
       return { history: [] as LoginHistoryEntry[] };
@@ -57,7 +57,7 @@ export function SecuritySettings() {
   // Revoke session mutation
   const revokeSessionMutation = useMutation({
     mutationFn: async (sessionId: string) => {
-      if ('revokeSession' in api && typeof (api as Record<string, unknown>).revokeSession === 'function') {
+      if ('revokeSession' in api && typeof (api as unknown as Record<string, unknown>).revokeSession === 'function') {
         return (api as unknown as { revokeSession: (id: string) => Promise<{ success: boolean }> }).revokeSession(sessionId);
       }
       throw new Error('Not implemented');
@@ -75,7 +75,7 @@ export function SecuritySettings() {
   // Revoke all other sessions mutation
   const revokeAllMutation = useMutation({
     mutationFn: async () => {
-      if ('revokeAllSessions' in api && typeof (api as Record<string, unknown>).revokeAllSessions === 'function') {
+      if ('revokeAllSessions' in api && typeof (api as unknown as Record<string, unknown>).revokeAllSessions === 'function') {
         return (api as unknown as { revokeAllSessions: () => Promise<{ success: boolean }> }).revokeAllSessions();
       }
       throw new Error('Not implemented');

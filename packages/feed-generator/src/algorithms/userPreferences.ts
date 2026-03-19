@@ -1,5 +1,5 @@
 import { CronJob } from 'cron';
-import { dbType, executeRawSql } from '../db.js';
+import { executeRawSql } from '../db.js';
 import { sql } from 'drizzle-orm';
 
 /**
@@ -31,11 +31,6 @@ export class UserPreferencesCalculator {
 
   async calculate() {
     console.log('Calculating user preferences...');
-
-    if (dbType === 'sqlite') {
-      console.log('User preferences calculation skipped (SQLite mode - use PostgreSQL for full functionality)');
-      return;
-    }
 
     try {
       // Process users who have had interactions in the last hour

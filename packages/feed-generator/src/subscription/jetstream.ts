@@ -1,5 +1,5 @@
 import WebSocket from 'ws';
-import { db, dbType } from '../db.js';
+import { db } from '../db.js';
 import { redis, cacheType } from '../cache.js';
 import { COLLECTIONS } from '@exprsn/shared';
 import { sql } from 'drizzle-orm';
@@ -111,11 +111,6 @@ export class JetstreamConsumer {
   }
 
   private async processEvent(event: JetstreamEvent) {
-    // Skip event processing in SQLite mode - raw SQL queries are PostgreSQL-specific
-    if (dbType === 'sqlite') {
-      return;
-    }
-
     if (event.kind !== 'commit' || !event.commit) {
       return;
     }

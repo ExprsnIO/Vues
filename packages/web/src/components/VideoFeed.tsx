@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useCallback, useState, useMemo } from 'react';
+import { cn } from '@/lib/utils';
 import { useInfiniteQuery } from '@tanstack/react-query';
 import { useInView } from 'react-intersection-observer';
 import { api, type VideoView } from '@/lib/api';
@@ -10,6 +11,7 @@ import { VideoOverlay } from './VideoOverlay';
 import { SuggestedUsers } from './SuggestedUsers';
 import { useFeedStore } from '@/stores/feed-store';
 import { usePullToRefresh } from '@/hooks/use-pull-to-refresh';
+import { useAccessibility } from '@/stores/settings-store';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3002';
 
@@ -29,6 +31,13 @@ interface WatchProgress {
 
 export function VideoFeed({ feedType }: VideoFeedProps) {
   const [currentIndex, setCurrentIndex] = useState(0);
+  const { reducedMotion } = useAccessibility();
+
+  // Also detect OS-level preference so the setting works before the store loads
+  const prefersReducedMotion =
+    reducedMotion ||
+    (typeof window !== 'undefined' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches);
   const containerRef = useRef<HTMLDivElement>(null);
   const videoRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const viewTrackedRef = useRef<Set<string>>(new Set());
@@ -46,7 +55,16 @@ export function VideoFeed({ feedType }: VideoFeedProps) {
       initialPageParam: undefined as string | undefined,
     });
 
-  const videos = data?.pages.flatMap((page) => page.feed) ?? [];
+  const videos = useMemo(() => {
+    const all = data?.pages.flatMap((page) => page.feed) ?? [];
+    // Deduplicate by URI to prevent React key warnings when pages overlap
+    const seen = new Set<string>();
+    return all.filter((v) => {
+      if (seen.has(v.uri)) return false;
+      seen.add(v.uri);
+      return true;
+    });
+  }, [data]);
 
   // Pull to refresh
   const handleRefresh = useCallback(async () => {
@@ -327,7 +345,10 @@ export function VideoFeed({ feedType }: VideoFeedProps) {
   return (
     <div
       ref={containerRef}
-      className="h-[calc(100vh-3rem)] overflow-y-scroll snap-feed no-scrollbar"
+      className={cn(
+        'h-[calc(100vh-3rem)] overflow-y-scroll no-scrollbar',
+        prefersReducedMotion ? 'overflow-y-auto' : 'snap-feed'
+      )}
     >
       {/* Pull to refresh indicator */}
       {(isPulling || isRefreshing) && (
@@ -361,6 +382,7 @@ export function VideoFeed({ feedType }: VideoFeedProps) {
           key={video.uri}
           video={video}
           isActive={index === currentIndex}
+          reducedMotion={prefersReducedMotion}
           onProgress={feedContext.onProgress}
           onEngagement={feedContext.onEngagement}
           ref={(el) => {
@@ -388,6 +410,7 @@ export function VideoFeed({ feedType }: VideoFeedProps) {
 interface VideoItemProps {
   video: VideoView;
   isActive: boolean;
+  reducedMotion: boolean;
   onProgress: (videoUri: string, currentTime: number, duration: number, looped: boolean) => void;
   onEngagement: (videoUri: string, action: string) => void;
 }
@@ -395,6 +418,7 @@ interface VideoItemProps {
 const VideoItem = ({
   video,
   isActive,
+  reducedMotion,
   onProgress,
   onEngagement,
   ref,
@@ -435,12 +459,12 @@ const VideoItem = ({
   }, [video.uri, onEngagement]);
 
   return (
-    <div ref={ref} className="relative h-screen w-full snap-start">
+    <div ref={ref} className={cn('relative h-screen w-full', !reducedMotion && 'snap-start')}>
       <VideoPlayer
         ref={videoRef}
         src={src}
         poster={poster}
-        autoPlay={isActive}
+        autoPlay={isActive && !reducedMotion}
         loop
         muted  // Must be muted for autoplay to work in browsers
         showControls={false}  // Hide controls in feed view
@@ -450,6 +474,21 @@ const VideoItem = ({
         onPause={handlePause}
         onDoubleTap={handleDoubleTap}
       />
+      {/* When reduced motion is on and video is active but not yet playing,
+          show a visible play button so users can start playback themselves. */}
+      {reducedMotion && isActive && (
+        <button
+          onClick={() => videoRef.current?.play()}
+          aria-label="Play video"
+          className="absolute inset-0 flex items-center justify-center bg-black/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-white"
+        >
+          <span className="w-16 h-16 rounded-full bg-black/60 flex items-center justify-center">
+            <svg className="w-8 h-8 text-white ml-1" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M8 5v14l11-7z" />
+            </svg>
+          </span>
+        </button>
+      )}
       <VideoOverlay video={video} />
       <VideoActions
         video={video}

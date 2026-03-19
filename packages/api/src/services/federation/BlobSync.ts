@@ -4,10 +4,24 @@
  */
 
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
-import { eq, and } from 'drizzle-orm';
+import { eq, and, sql, lt, desc } from 'drizzle-orm';
 import * as schema from '../../db/schema.js';
 import { getStorageProvider } from '../storage/index.js';
 import { nanoid } from 'nanoid';
+import { CID } from 'multiformats/cid';
+import * as raw from 'multiformats/codecs/raw';
+import { sha256 } from 'multiformats/hashes/sha2';
+import { redis } from '../../cache/redis.js';
+
+/**
+ * Create an AbortSignal that times out after the specified milliseconds
+ * Compatible with older Node.js versions
+ */
+function createTimeoutSignal(ms: number): AbortSignal {
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), ms);
+  return controller.signal;
+}
 
 /**
  * Blob metadata
@@ -40,12 +54,30 @@ export interface BlobSyncConfig {
   fetchTimeoutMs?: number;
   // Number of retries (default 3)
   maxRetries?: number;
+  // Enable CID verification (default true)
+  verifyCid?: boolean;
+  // Rate limit: max bytes per minute per DID (default 50MB)
+  rateLimitBytesPerMinute?: number;
+  // Storage quota per DID (default 1GB)
+  storageQuotaPerDid?: number;
+  // CDN base URL for serving blobs
+  cdnBaseUrl?: string;
 }
 
 const DEFAULT_CONFIG = {
   maxBlobSize: 100 * 1024 * 1024, // 100MB
   fetchTimeoutMs: 60000, // 60 seconds
   maxRetries: 3,
+  verifyCid: true,
+  rateLimitBytesPerMinute: 50 * 1024 * 1024, // 50MB/min
+  storageQuotaPerDid: 1024 * 1024 * 1024, // 1GB
+};
+
+// Cache keys
+const CACHE_KEYS = {
+  rateLimitBytes: (did: string) => `blobsync:rate:${did}`,
+  storageUsage: (did: string) => `blobsync:usage:${did}`,
+  blobUrl: (did: string, cid: string) => `blobsync:url:${did}:${cid}`,
 };
 
 /**
@@ -59,12 +91,20 @@ export class BlobSync {
   private maxBlobSize: number;
   private fetchTimeoutMs: number;
   private maxRetries: number;
+  private verifyCid: boolean;
+  private rateLimitBytesPerMinute: number;
+  private storageQuotaPerDid: number;
+  private cdnBaseUrl: string | null;
 
   constructor(config: BlobSyncConfig) {
     this.db = config.db;
     this.maxBlobSize = config.maxBlobSize ?? DEFAULT_CONFIG.maxBlobSize;
     this.fetchTimeoutMs = config.fetchTimeoutMs ?? DEFAULT_CONFIG.fetchTimeoutMs;
     this.maxRetries = config.maxRetries ?? DEFAULT_CONFIG.maxRetries;
+    this.verifyCid = config.verifyCid ?? DEFAULT_CONFIG.verifyCid;
+    this.rateLimitBytesPerMinute = config.rateLimitBytesPerMinute ?? DEFAULT_CONFIG.rateLimitBytesPerMinute;
+    this.storageQuotaPerDid = config.storageQuotaPerDid ?? DEFAULT_CONFIG.storageQuotaPerDid;
+    this.cdnBaseUrl = config.cdnBaseUrl ?? process.env.CDN_BASE_URL ?? null;
   }
 
   /**
@@ -123,7 +163,7 @@ export class BlobSync {
 
     try {
       const response = await fetch(`${plcUrl}/${did}`, {
-        signal: AbortSignal.timeout(5000),
+        signal: createTimeoutSignal(5000),
         headers: { Accept: 'application/json' },
       });
 
@@ -168,7 +208,7 @@ export class BlobSync {
 
     try {
       const response = await fetch(`https://${domain}/.well-known/did.json`, {
-        signal: AbortSignal.timeout(5000),
+        signal: createTimeoutSignal(5000),
         headers: { Accept: 'application/did+json, application/json' },
       });
 
@@ -211,37 +251,48 @@ export class BlobSync {
 
     try {
       // Check local DID certificates table
-      const certificate = await this.db.query.didCertificates?.findFirst({
+      const certificate = await this.db.query.exprsnDidCertificates?.findFirst({
         where: and(
-          eq(schema.didCertificates.did, did),
-          eq(schema.didCertificates.status, 'active')
+          eq(schema.exprsnDidCertificates.did, did),
+          eq(schema.exprsnDidCertificates.status, 'active')
         ),
       });
 
-      if (certificate?.pdsEndpoint) {
-        // Build DID document from certificate data
-        const document = {
-          '@context': ['https://www.w3.org/ns/did/v1'],
-          id: did,
-          service: [
-            {
-              id: '#atproto_pds',
-              type: 'AtprotoPersonalDataServer',
-              serviceEndpoint: certificate.pdsEndpoint,
-            },
-          ],
-        };
+      // Note: exprsnDidCertificates doesn't have pdsEndpoint column
+      // We need to derive it from the plcIdentities or caEntityCertificates table
+      if (certificate) {
+        // Try to get PDS endpoint from plcIdentities
+        const identity = await this.db.query.plcIdentities?.findFirst({
+          where: eq(schema.plcIdentities.did, did),
+        });
 
-        return {
-          pdsEndpoint: certificate.pdsEndpoint,
-          document: document as Record<string, unknown>,
-        };
+        const pdsEndpoint = identity?.pdsEndpoint || null;
+
+        if (pdsEndpoint) {
+          // Build DID document from certificate data
+          const document = {
+            '@context': ['https://www.w3.org/ns/did/v1'],
+            id: did,
+            service: [
+              {
+                id: '#atproto_pds',
+                type: 'AtprotoPersonalDataServer',
+                serviceEndpoint: pdsEndpoint,
+              },
+            ],
+          };
+
+          return {
+            pdsEndpoint,
+            document: document as Record<string, unknown>,
+          };
+        }
       }
 
       // Fallback: Try internal PLC directory
       const serviceUrl = process.env.APP_URL || 'http://localhost:3000';
       const response = await fetch(`${serviceUrl}/plc/${did}`, {
-        signal: AbortSignal.timeout(3000),
+        signal: createTimeoutSignal(3000),
         headers: { Accept: 'application/json' },
       });
 
@@ -280,6 +331,21 @@ export class BlobSync {
       const alsoKnownAs = document.alsoKnownAs as string[] | undefined;
       const handle = alsoKnownAs?.find((aka) => aka.startsWith('at://'))?.replace('at://', '');
 
+      // Extract additional fields from document for storage
+      const verificationMethod = document.verificationMethod as Array<{
+        id: string;
+        type: string;
+        publicKeyMultibase?: string;
+      }> | undefined;
+      const signingKey = verificationMethod?.find(vm => vm.type === 'Multikey')?.publicKeyMultibase;
+
+      const services = document.service as Array<{ id: string; type: string; serviceEndpoint: string }> | undefined;
+      const servicesRecord = services?.reduce((acc, svc) => {
+        const key = svc.id.replace('#', '');
+        acc[key] = { type: svc.type, endpoint: svc.serviceEndpoint };
+        return acc;
+      }, {} as Record<string, { type: string; endpoint: string }>) || {};
+
       // Upsert into plcIdentities
       await this.db
         .insert(schema.plcIdentities)
@@ -287,15 +353,21 @@ export class BlobSync {
           did,
           handle: handle || null,
           pdsEndpoint,
-          didDocument: document,
+          signingKey: signingKey || null,
+          rotationKeys: [],
+          alsoKnownAs: alsoKnownAs || [],
+          services: servicesRecord,
           status: 'active',
+          createdAt: new Date(),
           updatedAt: new Date(),
         })
         .onConflictDoUpdate({
           target: schema.plcIdentities.did,
           set: {
             pdsEndpoint,
-            didDocument: document,
+            signingKey: signingKey || null,
+            alsoKnownAs: alsoKnownAs || [],
+            services: servicesRecord,
             updatedAt: new Date(),
           },
         });
@@ -304,6 +376,164 @@ export class BlobSync {
       console.warn(`Failed to cache DID resolution for ${did}:`, error);
     }
   }
+
+  // ============================================
+  // CID Verification
+  // ============================================
+
+  /**
+   * Verify that blob data matches the expected CID
+   * ATProto uses raw codec with SHA-256 hash
+   */
+  async verifyCidMatch(data: Uint8Array, expectedCid: string): Promise<boolean> {
+    try {
+      // Parse the expected CID
+      const expectedCidObj = CID.parse(expectedCid);
+
+      // Compute the hash of the data
+      const hash = await sha256.digest(data);
+
+      // Create CID from computed hash using same codec version
+      const computedCid = CID.create(
+        expectedCidObj.version,
+        expectedCidObj.code, // Use same codec as expected
+        hash
+      );
+
+      // Compare CIDs
+      const matches = computedCid.equals(expectedCidObj);
+
+      if (!matches) {
+        console.warn(
+          `CID mismatch: expected ${expectedCid}, computed ${computedCid.toString()}`
+        );
+      }
+
+      return matches;
+    } catch (error) {
+      console.error('CID verification failed:', error);
+      return false;
+    }
+  }
+
+  // ============================================
+  // Rate Limiting & Quotas
+  // ============================================
+
+  /**
+   * Check if rate limit allows fetching more bytes
+   */
+  private async checkRateLimit(did: string, bytes: number): Promise<boolean> {
+    try {
+      const key = CACHE_KEYS.rateLimitBytes(did);
+      const current = await redis.get(key);
+      const currentBytes = current ? parseInt(current, 10) : 0;
+
+      return currentBytes + bytes <= this.rateLimitBytesPerMinute;
+    } catch {
+      // If Redis fails, allow the request
+      return true;
+    }
+  }
+
+  /**
+   * Record bytes fetched for rate limiting
+   */
+  private async recordBytesTransferred(did: string, bytes: number): Promise<void> {
+    try {
+      const key = CACHE_KEYS.rateLimitBytes(did);
+      const current = await redis.get(key);
+      const newValue = (current ? parseInt(current, 10) : 0) + bytes;
+
+      // Set with 60 second expiry (rate limit window)
+      await redis.setex(key, 60, newValue.toString());
+    } catch {
+      // Non-critical
+    }
+  }
+
+  /**
+   * Check storage quota for a DID
+   */
+  async checkStorageQuota(did: string, additionalBytes: number): Promise<{
+    allowed: boolean;
+    currentUsage: number;
+    quota: number;
+    remaining: number;
+  }> {
+    // Get custom quota or use default
+    const quota = await this.getStorageQuotaForDid(did);
+
+    // Get current usage from cache or calculate
+    let currentUsage = 0;
+
+    try {
+      const cached = await redis.get(CACHE_KEYS.storageUsage(did));
+      if (cached) {
+        currentUsage = parseInt(cached, 10);
+      } else {
+        // Calculate from database
+        const result = await this.db
+          .select({ total: sql<number>`COALESCE(SUM(size), 0)::int` })
+          .from(schema.blobs)
+          .where(eq(schema.blobs.did, did));
+
+        currentUsage = result[0]?.total || 0;
+
+        // Cache for 5 minutes
+        await redis.setex(CACHE_KEYS.storageUsage(did), 300, currentUsage.toString());
+      }
+    } catch {
+      // On error, calculate from database
+      const result = await this.db
+        .select({ total: sql<number>`COALESCE(SUM(size), 0)::int` })
+        .from(schema.blobs)
+        .where(eq(schema.blobs.did, did));
+
+      currentUsage = result[0]?.total || 0;
+    }
+
+    const remaining = quota - currentUsage;
+    const allowed = remaining >= additionalBytes;
+
+    return {
+      allowed,
+      currentUsage,
+      quota,
+      remaining: Math.max(0, remaining),
+    };
+  }
+
+  /**
+   * Get custom storage quota for a DID (or default)
+   */
+  private async getStorageQuotaForDid(did: string): Promise<number> {
+    try {
+      const key = `blobsync:quota:${did}`;
+      const custom = await redis.get(key);
+      if (custom) {
+        return parseInt(custom, 10);
+      }
+    } catch {
+      // Use default
+    }
+    return this.storageQuotaPerDid;
+  }
+
+  /**
+   * Invalidate storage usage cache after storing/deleting
+   */
+  private async invalidateUsageCache(did: string): Promise<void> {
+    try {
+      await redis.del(CACHE_KEYS.storageUsage(did));
+    } catch {
+      // Non-critical
+    }
+  }
+
+  // ============================================
+  // Blob Fetching
+  // ============================================
 
   /**
    * Fetch a blob from a remote PDS
@@ -328,7 +558,7 @@ export class BlobSync {
     for (let attempt = 0; attempt < this.maxRetries; attempt++) {
       try {
         const response = await fetch(url, {
-          signal: AbortSignal.timeout(this.fetchTimeoutMs),
+          signal: createTimeoutSignal(this.fetchTimeoutMs),
           headers: {
             Accept: '*/*',
           },
@@ -351,6 +581,17 @@ export class BlobSync {
         if (data.length > this.maxBlobSize) {
           throw new Error(`Blob too large: ${data.length} bytes`);
         }
+
+        // Verify CID matches content
+        if (this.verifyCid) {
+          const cidValid = await this.verifyCidMatch(data, cid);
+          if (!cidValid) {
+            throw new Error(`CID verification failed: content does not match ${cid}`);
+          }
+        }
+
+        // Record bytes transferred for rate limiting
+        await this.recordBytesTransferred(did, data.length);
 
         return { data, mimeType };
       } catch (error) {
@@ -416,7 +657,10 @@ export class BlobSync {
   /**
    * Fetch and store a blob from a remote server
    */
-  async syncBlob(did: string, cid: string): Promise<FetchBlobResult> {
+  async syncBlob(did: string, cid: string, options?: {
+    skipQuotaCheck?: boolean;
+    estimatedSize?: number;
+  }): Promise<FetchBlobResult> {
     // Check if blob already exists
     const existing = await this.db.query.blobs.findFirst({
       where: and(eq(schema.blobs.did, did), eq(schema.blobs.cid, cid)),
@@ -424,6 +668,24 @@ export class BlobSync {
 
     if (existing) {
       return { success: true, cid };
+    }
+
+    // Check rate limit (use estimated size or max blob size)
+    const estimatedBytes = options?.estimatedSize || this.maxBlobSize;
+    const rateLimitOk = await this.checkRateLimit(did, estimatedBytes);
+    if (!rateLimitOk) {
+      return { success: false, error: 'Rate limit exceeded. Please try again later.' };
+    }
+
+    // Check storage quota
+    if (!options?.skipQuotaCheck) {
+      const quotaCheck = await this.checkStorageQuota(did, estimatedBytes);
+      if (!quotaCheck.allowed) {
+        return {
+          success: false,
+          error: `Storage quota exceeded. Used: ${Math.round(quotaCheck.currentUsage / 1024 / 1024)}MB / ${Math.round(quotaCheck.quota / 1024 / 1024)}MB`,
+        };
+      }
     }
 
     // Fetch from remote
@@ -519,11 +781,397 @@ export class BlobSync {
         .delete(schema.blobs)
         .where(and(eq(schema.blobs.did, did), eq(schema.blobs.cid, cid)));
 
+      // Invalidate caches
+      await this.invalidateUsageCache(did);
+      try {
+        await redis.del(CACHE_KEYS.blobUrl(did, cid));
+      } catch {
+        // Non-critical
+      }
+
       return true;
     } catch (error) {
       console.error('Failed to delete blob:', error);
       return false;
     }
+  }
+
+  // ============================================
+  // CDN Integration
+  // ============================================
+
+  /**
+   * Get CDN URL for a blob
+   * Returns cached URL or generates a new one
+   */
+  async getBlobUrl(did: string, cid: string): Promise<string | null> {
+    // Check if blob exists
+    const blob = await this.db.query.blobs.findFirst({
+      where: and(eq(schema.blobs.did, did), eq(schema.blobs.cid, cid)),
+    });
+
+    if (!blob) {
+      return null;
+    }
+
+    // Check cache first
+    try {
+      const cached = await redis.get(CACHE_KEYS.blobUrl(did, cid));
+      if (cached) {
+        return cached;
+      }
+    } catch {
+      // Cache miss
+    }
+
+    // Generate URL
+    let url: string;
+
+    if (this.cdnBaseUrl) {
+      // Use CDN URL
+      url = `${this.cdnBaseUrl}/blobs/${did}/${cid}`;
+    } else {
+      // Use storage provider presigned URL
+      const storage = await getStorageProvider();
+      url = await storage.getPresignedDownloadUrl(blob.storagePath, 3600); // 1 hour expiry
+    }
+
+    // Cache for 55 minutes (slightly less than signed URL expiry)
+    try {
+      await redis.setex(CACHE_KEYS.blobUrl(did, cid), 3300, url);
+    } catch {
+      // Non-critical
+    }
+
+    return url;
+  }
+
+  /**
+   * Get blob with URL for serving
+   */
+  async getBlobForServing(did: string, cid: string): Promise<{
+    metadata: BlobMetadata;
+    url: string;
+  } | null> {
+    const metadata = await this.getBlobMetadata(did, cid);
+    if (!metadata) return null;
+
+    const url = await this.getBlobUrl(did, cid);
+    if (!url) return null;
+
+    return { metadata, url };
+  }
+
+  // ============================================
+  // Garbage Collection
+  // ============================================
+
+  /**
+   * Find orphaned blobs (not referenced by any record)
+   * This requires integration with the record system
+   */
+  async findOrphanedBlobs(did: string, referencedCids: string[]): Promise<string[]> {
+    const allBlobs = await this.db
+      .select({ cid: schema.blobs.cid })
+      .from(schema.blobs)
+      .where(eq(schema.blobs.did, did));
+
+    const orphaned = allBlobs
+      .map(b => b.cid)
+      .filter(cid => !referencedCids.includes(cid));
+
+    return orphaned;
+  }
+
+  /**
+   * Delete orphaned blobs for a DID
+   */
+  async cleanupOrphanedBlobs(did: string, referencedCids: string[], dryRun?: boolean): Promise<{
+    deleted: number;
+    freedBytes: number;
+    orphanedCids?: string[];
+  }> {
+    const orphaned = await this.findOrphanedBlobs(did, referencedCids);
+
+    let deleted = 0;
+    let freedBytes = 0;
+
+    for (const cid of orphaned) {
+      const metadata = await this.getBlobMetadata(did, cid);
+      if (metadata) {
+        freedBytes += metadata.size;
+      }
+
+      if (!dryRun) {
+        const success = await this.deleteBlob(did, cid);
+        if (success) {
+          deleted++;
+        }
+      } else {
+        deleted++;
+      }
+    }
+
+    return {
+      deleted,
+      freedBytes,
+      ...(dryRun ? { orphanedCids: orphaned } : {}),
+    };
+  }
+
+  /**
+   * Delete blobs older than a certain age
+   * Useful for cleaning up stale federation data
+   */
+  async cleanupOldBlobs(maxAgeMs: number, dryRun?: boolean): Promise<{
+    deleted: number;
+    freedBytes: number;
+    oldBlobCids?: string[];
+  }> {
+    const cutoff = new Date(Date.now() - maxAgeMs);
+
+    const oldBlobs = await this.db
+      .select()
+      .from(schema.blobs)
+      .where(lt(schema.blobs.createdAt, cutoff))
+      .limit(1000); // Process in batches
+
+    let deleted = 0;
+    let freedBytes = 0;
+    const cids: string[] = [];
+
+    for (const blob of oldBlobs) {
+      freedBytes += blob.size;
+      cids.push(blob.cid);
+
+      if (!dryRun) {
+        const success = await this.deleteBlob(blob.did, blob.cid);
+        if (success) {
+          deleted++;
+        }
+      } else {
+        deleted++;
+      }
+    }
+
+    return {
+      deleted,
+      freedBytes,
+      ...(dryRun ? { oldBlobCids: cids } : {}),
+    };
+  }
+
+  /**
+   * List blobs for a DID with pagination
+   */
+  async listBlobsForDid(did: string, options?: {
+    limit?: number;
+    cursor?: string;
+  }): Promise<{
+    blobs: BlobMetadata[];
+    cursor?: string;
+  }> {
+    const limit = options?.limit || 50;
+
+    let query = this.db
+      .select()
+      .from(schema.blobs)
+      .where(eq(schema.blobs.did, did))
+      .orderBy(desc(schema.blobs.createdAt))
+      .limit(limit + 1);
+
+    if (options?.cursor) {
+      // Cursor is the createdAt timestamp
+      const cursorDate = new Date(options.cursor);
+      query = this.db
+        .select()
+        .from(schema.blobs)
+        .where(and(
+          eq(schema.blobs.did, did),
+          lt(schema.blobs.createdAt, cursorDate)
+        ))
+        .orderBy(desc(schema.blobs.createdAt))
+        .limit(limit + 1);
+    }
+
+    const results = await query;
+    const hasMore = results.length > limit;
+    const blobs = results.slice(0, limit);
+
+    const lastBlob = blobs[blobs.length - 1];
+
+    return {
+      blobs: blobs.map(b => ({
+        cid: b.cid,
+        did: b.did,
+        mimeType: b.mimeType,
+        size: b.size,
+        storagePath: b.storagePath,
+      })),
+      cursor: hasMore && lastBlob?.createdAt
+        ? lastBlob.createdAt.toISOString()
+        : undefined,
+    };
+  }
+
+  /**
+   * Set custom storage quota for a DID
+   */
+  async setStorageQuota(did: string, quotaBytes: number): Promise<void> {
+    // Store custom quota in Redis
+    const key = `blobsync:quota:${did}`;
+    await redis.set(key, quotaBytes.toString());
+  }
+
+  /**
+   * Verify a stored blob's CID matches its content
+   */
+  async verifyStoredBlob(did: string, cid: string): Promise<{
+    exists: boolean;
+    verified: boolean;
+    error?: string;
+    metadata?: BlobMetadata;
+  }> {
+    const blob = await this.db.query.blobs.findFirst({
+      where: and(eq(schema.blobs.did, did), eq(schema.blobs.cid, cid)),
+    });
+
+    if (!blob) {
+      return { exists: false, verified: false, error: 'Blob not found' };
+    }
+
+    try {
+      // Fetch blob data from storage
+      const storage = await getStorageProvider();
+      const data = await storage.downloadFile(blob.storagePath);
+
+      if (!data) {
+        return {
+          exists: true,
+          verified: false,
+          error: 'Could not retrieve blob data from storage',
+        };
+      }
+
+      // Verify CID
+      const matches = await this.verifyCidMatch(new Uint8Array(data), cid);
+
+      return {
+        exists: true,
+        verified: matches,
+        error: matches ? undefined : 'CID mismatch - blob data does not match CID',
+        metadata: {
+          cid: blob.cid,
+          did: blob.did,
+          mimeType: blob.mimeType,
+          size: blob.size,
+          storagePath: blob.storagePath,
+        },
+      };
+    } catch (error) {
+      return {
+        exists: true,
+        verified: false,
+        error: `Verification failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      };
+    }
+  }
+
+  /**
+   * Get rate limit status for a DID
+   */
+  async getRateLimitStatus(did: string): Promise<{
+    currentBytes: number;
+    limitBytes: number;
+    remainingBytes: number;
+    percentUsed: number;
+    windowSeconds: number;
+  }> {
+    let currentBytes = 0;
+
+    try {
+      const key = CACHE_KEYS.rateLimitBytes(did);
+      const current = await redis.get(key);
+      currentBytes = current ? parseInt(current, 10) : 0;
+    } catch {
+      // Default to 0
+    }
+
+    const remaining = Math.max(0, this.rateLimitBytesPerMinute - currentBytes);
+    const percentUsed = this.rateLimitBytesPerMinute > 0
+      ? Math.round((currentBytes / this.rateLimitBytesPerMinute) * 100)
+      : 0;
+
+    return {
+      currentBytes,
+      limitBytes: this.rateLimitBytesPerMinute,
+      remainingBytes: remaining,
+      percentUsed,
+      windowSeconds: 60,
+    };
+  }
+
+  // ============================================
+  // Statistics
+  // ============================================
+
+  /**
+   * Get blob sync statistics
+   */
+  async getStats(): Promise<{
+    totalBlobs: number;
+    totalSize: number;
+    byMimeType: Record<string, { count: number; size: number }>;
+    topDids: Array<{ did: string; count: number; size: number }>;
+  }> {
+    // Total counts
+    const [totals] = await this.db
+      .select({
+        count: sql<number>`COUNT(*)::int`,
+        size: sql<number>`COALESCE(SUM(size), 0)::bigint`,
+      })
+      .from(schema.blobs);
+
+    // By MIME type
+    const mimeStats = await this.db
+      .select({
+        mimeType: schema.blobs.mimeType,
+        count: sql<number>`COUNT(*)::int`,
+        size: sql<number>`COALESCE(SUM(size), 0)::bigint`,
+      })
+      .from(schema.blobs)
+      .groupBy(schema.blobs.mimeType);
+
+    const byMimeType: Record<string, { count: number; size: number }> = {};
+    for (const stat of mimeStats) {
+      byMimeType[stat.mimeType] = {
+        count: stat.count,
+        size: Number(stat.size),
+      };
+    }
+
+    // Top DIDs by storage
+    const topDids = await this.db
+      .select({
+        did: schema.blobs.did,
+        count: sql<number>`COUNT(*)::int`,
+        size: sql<number>`COALESCE(SUM(size), 0)::bigint`,
+      })
+      .from(schema.blobs)
+      .groupBy(schema.blobs.did)
+      .orderBy(desc(sql`SUM(size)`))
+      .limit(10);
+
+    return {
+      totalBlobs: totals?.count || 0,
+      totalSize: Number(totals?.size || 0),
+      byMimeType,
+      topDids: topDids.map(d => ({
+        did: d.did,
+        count: d.count,
+        size: Number(d.size),
+      })),
+    };
   }
 }
 

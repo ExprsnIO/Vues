@@ -11,15 +11,16 @@ import toast from 'react-hot-toast';
 
 interface DomainRole {
   id: string;
-  domainId: string;
+  domainId?: string;
   name: string;
-  displayName: string;
+  displayName?: string;
   description?: string;
   isSystem: boolean;
-  priority: number;
+  priority?: number;
   permissions: string[];
+  userCount?: number;
   createdAt: string;
-  updatedAt: string;
+  updatedAt?: string;
 }
 
 export default function DomainRolesPage() {
@@ -34,14 +35,14 @@ export default function DomainRolesPage() {
   // Fetch roles
   const { data, isLoading, error } = useQuery({
     queryKey: ['admin', 'domain', domainId, 'roles'],
-    queryFn: () => api.adminDomainRolesList(domainId, { includeSystem: true }),
+    queryFn: () => api.adminDomainRolesList(domainId),
   });
 
-  const roles = data?.roles || [];
+  const roles = (data?.roles || []) as unknown as DomainRole[];
 
   // Delete mutation
   const deleteMutation = useMutation({
-    mutationFn: (roleId: string) => api.adminDomainRolesDelete(roleId),
+    mutationFn: (roleId: string) => api.adminDomainRolesDelete(domainId, roleId),
     onSuccess: () => {
       toast.success('Role deleted successfully');
       queryClient.invalidateQueries({ queryKey: ['admin', 'domain', domainId, 'roles'] });
@@ -71,7 +72,7 @@ export default function DomainRolesPage() {
   const filteredRoles = roles.filter((role) =>
     search ?
       role.name.toLowerCase().includes(search.toLowerCase()) ||
-      role.displayName.toLowerCase().includes(search.toLowerCase()) ||
+      role.displayName?.toLowerCase().includes(search.toLowerCase()) ||
       role.description?.toLowerCase().includes(search.toLowerCase())
     : true
   );
@@ -154,7 +155,7 @@ export default function DomainRolesPage() {
           </button>
           {!role.isSystem && (
             <button
-              onClick={() => handleDelete(role.id, role.displayName)}
+              onClick={() => handleDelete(role.id, role.displayName ?? role.name)}
               disabled={deletingRoleId === role.id}
               className="px-3 py-1 text-sm text-red-500 hover:text-red-400 disabled:opacity-50"
             >
@@ -233,9 +234,9 @@ export default function DomainRolesPage() {
 
       {/* Table */}
       <DataTable
-        data={filteredRoles}
+        data={filteredRoles as DomainRole[]}
         columns={columns}
-        keyExtractor={(role) => role.id}
+        keyExtractor={(role: DomainRole) => role.id}
         isLoading={isLoading}
         emptyMessage="No roles found"
       />

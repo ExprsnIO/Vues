@@ -12,8 +12,9 @@ import {
   moderationReports,
   moderationUserActions,
   modActionsLog,
+  adminUsers,
 } from '../../db/schema.js';
-import { eq, and, gte, sql, count, desc, inArray } from 'drizzle-orm';
+import { eq, and, gte, sql, count, desc, inArray, asc } from 'drizzle-orm';
 import { redis } from '../../cache/redis.js';
 
 /**
@@ -421,13 +422,24 @@ export class WorkflowEngine extends EventEmitter {
   }
 
   /**
-   * Assign to specific moderator
+   * Assign to specific moderator or use load balancing
    */
   private async actionAssignModerator(context: WorkflowContext, params: Record<string, unknown>): Promise<void> {
     if (!context.contentId) return;
 
-    const moderatorId = params.moderatorId as string;
-    if (!moderatorId) return;
+    let moderatorId = params.moderatorId as string | undefined;
+    const useLoadBalancing = params.loadBalanced === true;
+    const roleFilter = params.role as string | undefined;
+
+    // If load balancing is enabled or no specific moderator is provided
+    if (useLoadBalancing || !moderatorId) {
+      moderatorId = await this.findLeastLoadedModerator(roleFilter) ?? undefined;
+    }
+
+    if (!moderatorId) {
+      console.warn('[WorkflowEngine] No available moderator found for assignment');
+      return;
+    }
 
     await db
       .update(moderationReviewQueue)
@@ -436,6 +448,125 @@ export class WorkflowEngine extends EventEmitter {
         assignedAt: new Date(),
       })
       .where(eq(moderationReviewQueue.moderationItemId, context.contentId));
+  }
+
+  /**
+   * Find the least loaded moderator
+   * Returns the moderator with the fewest pending assignments
+   */
+  private async findLeastLoadedModerator(roleFilter?: string): Promise<string | null> {
+    try {
+      // Get all active moderators with their current assignment counts
+      const moderatorQuery = db
+        .select({
+          userDid: adminUsers.userDid,
+          role: adminUsers.role,
+        })
+        .from(adminUsers)
+        .where(
+          roleFilter
+            ? eq(adminUsers.role, roleFilter)
+            : inArray(adminUsers.role, ['moderator', 'admin', 'super_admin'])
+        );
+
+      const moderators = await moderatorQuery;
+
+      if (moderators.length === 0) {
+        return null;
+      }
+
+      // Get assignment counts for each moderator
+      const assignmentCounts = await db
+        .select({
+          assignedTo: moderationReviewQueue.assignedTo,
+          count: sql<number>`COUNT(*)::int`,
+        })
+        .from(moderationReviewQueue)
+        .where(
+          and(
+            eq(moderationReviewQueue.status, 'pending'),
+            inArray(moderationReviewQueue.assignedTo, moderators.map(m => m.userDid))
+          )
+        )
+        .groupBy(moderationReviewQueue.assignedTo);
+
+      // Create a map of moderator -> count
+      const countMap = new Map<string, number>();
+      for (const ac of assignmentCounts) {
+        if (ac.assignedTo) {
+          countMap.set(ac.assignedTo, ac.count);
+        }
+      }
+
+      // Find moderator with lowest count (0 if not in map)
+      let leastLoaded: { userDid: string; count: number } | null = null;
+      for (const mod of moderators) {
+        const currentCount = countMap.get(mod.userDid) || 0;
+        if (!leastLoaded || currentCount < leastLoaded.count) {
+          leastLoaded = { userDid: mod.userDid, count: currentCount };
+        }
+      }
+
+      // Check recent activity in Redis to prefer online moderators
+      if (leastLoaded) {
+        const onlineModerators = await this.getOnlineModerators(moderators.map(m => m.userDid));
+
+        // If there are online moderators, prefer them
+        if (onlineModerators.length > 0) {
+          let bestOnline: { userDid: string; count: number } | null = null;
+          for (const did of onlineModerators) {
+            const currentCount = countMap.get(did) || 0;
+            if (!bestOnline || currentCount < bestOnline.count) {
+              bestOnline = { userDid: did, count: currentCount };
+            }
+          }
+          if (bestOnline) {
+            return bestOnline.userDid;
+          }
+        }
+      }
+
+      return leastLoaded?.userDid || null;
+    } catch (error) {
+      console.error('[WorkflowEngine] Failed to find least loaded moderator:', error);
+      return null;
+    }
+  }
+
+  /**
+   * Get list of currently online moderators
+   */
+  private async getOnlineModerators(moderatorDids: string[]): Promise<string[]> {
+    const online: string[] = [];
+
+    for (const did of moderatorDids) {
+      try {
+        // Check if moderator has recent activity (within last 15 minutes)
+        const lastActivity = await redis.get(`moderator:activity:${did}`);
+        if (lastActivity) {
+          const lastActivityTime = parseInt(lastActivity, 10);
+          const fifteenMinutesAgo = Date.now() - (15 * 60 * 1000);
+          if (lastActivityTime > fifteenMinutesAgo) {
+            online.push(did);
+          }
+        }
+      } catch {
+        // Redis check failed, skip
+      }
+    }
+
+    return online;
+  }
+
+  /**
+   * Record moderator activity (call this when moderator performs actions)
+   */
+  async recordModeratorActivity(moderatorDid: string): Promise<void> {
+    try {
+      await redis.setex(`moderator:activity:${moderatorDid}`, 900, Date.now().toString());
+    } catch {
+      // Activity recording failed, non-critical
+    }
   }
 
   /**

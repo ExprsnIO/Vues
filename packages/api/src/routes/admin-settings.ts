@@ -113,6 +113,9 @@ adminSettingsRouter.get(
         anonymousRateLimitPerMinute: 30,
         userBurstLimit: 20,
         adminBurstLimit: 50,
+        // Rate limiting - did:exprsn tier
+        exprsnRateLimitPerMinute: 90,
+        exprsnBurstLimit: 35,
         // OAuth settings
         oauthEnabled: true,
         allowedOauthProviders: ['atproto'],
@@ -1637,6 +1640,98 @@ adminSettingsRouter.get(
         reviewedAt: appeal.reviewedAt?.toISOString(),
       })),
     });
+  }
+);
+
+// ─── Rate Limit Management ──────────────────────────────────
+
+/**
+ * GET /xrpc/io.exprsn.admin.settings.getRateLimitStatus
+ * Returns active rate limit tracking keys and blocked entries from Redis
+ */
+adminSettingsRouter.get(
+  '/io.exprsn.admin.settings.getRateLimitStatus',
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_VIEW),
+  async (c) => {
+    const { redis: redisClient } = await import('../cache/redis.js');
+    const entries: Array<{
+      key: string;
+      currentCount: number;
+      isBlocked: boolean;
+      ttl: number;
+    }> = [];
+
+    try {
+      // Find rate limit keys using the keys() method (works with both Redis and MemoryCache)
+      const prefixes = ['rl:auth:*', 'ratelimit:*', 'auth:failed:*'];
+      for (const pattern of prefixes) {
+        const matchedKeys = await redisClient.keys(pattern);
+
+        for (const key of matchedKeys) {
+          const isBlocked = key.endsWith(':blocked');
+          const isCount = key.endsWith(':count') || key.startsWith('auth:failed:');
+          if (!isBlocked && !isCount) continue;
+
+          const ttl = await redisClient.ttl(key);
+          let currentCount = 0;
+
+          if (isBlocked) {
+            // Try to find the companion count key
+            const countKey = key.replace(':blocked', ':count');
+            const countVal = await redisClient.get(countKey);
+            currentCount = countVal ? parseInt(countVal, 10) : 0;
+          } else {
+            const val = await redisClient.get(key);
+            currentCount = val ? parseInt(val, 10) : 0;
+          }
+
+          entries.push({
+            key,
+            currentCount,
+            isBlocked,
+            ttl: Math.max(ttl, 0),
+          });
+        }
+      }
+    } catch (err) {
+      console.warn('[admin] Failed to scan rate limit keys:', err);
+    }
+
+    return c.json({ entries });
+  }
+);
+
+/**
+ * POST /xrpc/io.exprsn.admin.settings.unblockRateLimit
+ * Remove a rate limit block from Redis
+ */
+adminSettingsRouter.post(
+  '/io.exprsn.admin.settings.unblockRateLimit',
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_EDIT),
+  async (c) => {
+    const { key } = await c.req.json<{ key: string }>();
+    if (!key) {
+      return c.json({ error: 'key is required' }, 400);
+    }
+
+    const { redis: redisClient } = await import('../cache/redis.js');
+
+    try {
+      // Delete the block key
+      await redisClient.del(key);
+      // Also delete the companion count key
+      const countKey = key.replace(':blocked', ':count');
+      await redisClient.del(countKey);
+
+      // Audit log
+      const adminUser = c.get('adminUser') as { id: string } | undefined;
+      console.log(`[admin] Rate limit unblocked: key=${key} by=${adminUser?.id || 'unknown'}`);
+
+      return c.json({ success: true });
+    } catch (err) {
+      console.error('[admin] Failed to unblock rate limit:', err);
+      return c.json({ error: 'Failed to unblock' }, 500);
+    }
   }
 );
 

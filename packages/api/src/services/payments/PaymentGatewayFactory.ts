@@ -100,6 +100,24 @@ export class PaymentGatewayFactory {
   }
 
   /**
+   * Credential field metadata for UI display
+   */
+  static readonly credentialMetadata: Record<string, { label: string; description: string; placeholder?: string }> = {
+    // Stripe
+    secretKey: { label: 'Secret Key', description: 'Your Stripe secret API key (starts with sk_)', placeholder: 'sk_test_...' },
+    publishableKey: { label: 'Publishable Key', description: 'Your Stripe publishable key (starts with pk_)', placeholder: 'pk_test_...' },
+    webhookSecret: { label: 'Webhook Secret', description: 'Webhook signing secret (starts with whsec_)', placeholder: 'whsec_...' },
+    // PayPal
+    clientId: { label: 'Client ID', description: 'Your PayPal app Client ID', placeholder: 'AV...' },
+    clientSecret: { label: 'Client Secret', description: 'Your PayPal app Client Secret', placeholder: 'EK...' },
+    webhookId: { label: 'Webhook ID', description: 'PayPal webhook ID for event notifications', placeholder: '1234567890' },
+    // Authorize.Net
+    apiLoginId: { label: 'API Login ID', description: 'Your Authorize.Net API Login ID', placeholder: '5KP3...' },
+    transactionKey: { label: 'Transaction Key', description: 'Your Authorize.Net Transaction Key', placeholder: '4Ktq...' },
+    signatureKey: { label: 'Signature Key', description: 'Signature key for webhook verification', placeholder: '' },
+  };
+
+  /**
    * Get the required credentials for a provider
    */
   static getRequiredCredentials(provider: PaymentProvider): string[] {
@@ -129,6 +147,13 @@ export class PaymentGatewayFactory {
       default:
         return [];
     }
+  }
+
+  /**
+   * Get credential field metadata
+   */
+  static getCredentialMetadata(field: string): { label: string; description: string; placeholder?: string } {
+    return this.credentialMetadata[field] || { label: field, description: '', placeholder: '' };
   }
 
   /**

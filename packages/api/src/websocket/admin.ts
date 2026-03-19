@@ -18,6 +18,7 @@ import {
 import { eq, sql, and, gte, count } from 'drizzle-orm';
 import { getOAuthClient } from '../auth/oauth-client.js';
 import { ROLE_PERMISSIONS, type AdminRole } from '../auth/middleware.js';
+import { hashSessionToken } from '../utils/session-tokens.js';
 
 type NextFunction = (err?: Error) => void;
 
@@ -41,10 +42,10 @@ export interface AdminStats {
 
 export interface AdminNotification {
   id: string;
-  type: 'report' | 'sanction' | 'user' | 'system' | 'render';
+  type: 'report' | 'sanction' | 'user' | 'system' | 'render' | 'domain_transfer_incoming' | 'domain_transfer_completed' | 'domain_transfer_rejected' | 'domain_transfer_cancelled';
   title: string;
   message: string;
-  severity: 'info' | 'warning' | 'error' | 'success';
+  severity?: 'info' | 'warning' | 'error' | 'success';
   timestamp: string;
   data?: Record<string, unknown>;
 }
@@ -325,8 +326,10 @@ export function initializeAdminWebSocket(io: SocketIOServer): void {
 
       // Check for local session token (prefixed with exp_)
       if (token.startsWith('exp_')) {
+        // Hash the token to look it up (tokens are stored as hashes)
+        const tokenHash = hashSessionToken(token);
         const session = await db.query.sessions.findFirst({
-          where: eq(sessions.accessJwt, token),
+          where: eq(sessions.accessJwt, tokenHash),
         });
 
         if (!session || session.expiresAt < new Date()) {

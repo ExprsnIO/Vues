@@ -7,8 +7,9 @@ import {
   notifications,
   notificationSeenAt,
   notificationSubscriptions,
+  videos,
 } from '../db/index.js';
-import { eq, desc, and, sql, lt, lte } from 'drizzle-orm';
+import { eq, desc, and, sql, lt, lte, inArray } from 'drizzle-orm';
 
 export const notificationRouter = new Hono();
 
@@ -265,5 +266,231 @@ notificationRouter.post('/io.exprsn.notification.updateSubscription', authMiddle
       pushEnabled: subscription!.pushEnabled,
       emailEnabled: subscription!.emailEnabled,
     },
+  });
+});
+
+// =============================================================================
+// Types for grouped notifications
+// =============================================================================
+
+interface GroupedNotificationActor {
+  did: string;
+  handle: string;
+  displayName?: string;
+  avatar?: string;
+}
+
+interface SubjectPreview {
+  caption?: string;
+  thumbnailUrl?: string;
+}
+
+interface GroupedNotification {
+  id: string;
+  type: string;
+  reason: string;
+  isGrouped: boolean;
+  actors: GroupedNotificationActor[];
+  actorCount: number;
+  subject?: string;
+  subjectPreview?: SubjectPreview;
+  latestAt: string;
+  isRead: boolean;
+}
+
+// Notification types that carry a video subject and benefit from grouping
+const VIDEO_SUBJECT_REASONS = new Set(['like', 'comment', 'repost', 'mention']);
+
+/**
+ * List grouped notifications for the authenticated user
+ * GET /xrpc/io.exprsn.notification.listGrouped
+ *
+ * Collapses same-type notifications on the same target within a 24-hour
+ * window, attaches stacked actor info and a subject preview for video
+ * notifications, and returns an unread count.
+ */
+notificationRouter.get('/io.exprsn.notification.listGrouped', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  const limit = Math.min(parseInt(c.req.query('limit') || '30', 10), 100);
+  const cursor = c.req.query('cursor');
+
+  // ------------------------------------------------------------------
+  // 1. Fetch raw notifications
+  //    We over-fetch relative to the requested limit so that collapsing
+  //    groups doesn't leave us short on results.  A 5x multiplier is
+  //    conservative; high-traffic users may have many likes on the same
+  //    video all arriving in the same window.
+  // ------------------------------------------------------------------
+  const fetchLimit = limit * 5;
+  const conditions = [eq(notifications.userDid, userDid)];
+
+  if (cursor) {
+    const cursorDate = new Date(cursor);
+    if (!isNaN(cursorDate.getTime())) {
+      conditions.push(lt(notifications.createdAt, cursorDate));
+    }
+  }
+
+  const rawRows = await db
+    .select({ notification: notifications })
+    .from(notifications)
+    .where(and(...conditions))
+    .orderBy(desc(notifications.createdAt))
+    .limit(fetchLimit);
+
+  // ------------------------------------------------------------------
+  // 2. Batch-load actor profiles (de-duped DIDs)
+  // ------------------------------------------------------------------
+  const actorDids = [...new Set(rawRows.map((r) => r.notification.actorDid))];
+  const actorRows =
+    actorDids.length > 0
+      ? await db
+          .select({
+            did: users.did,
+            handle: users.handle,
+            displayName: users.displayName,
+            avatar: users.avatar,
+          })
+          .from(users)
+          .where(inArray(users.did, actorDids))
+      : [];
+  const actorMap = new Map(actorRows.map((a) => [a.did, a]));
+
+  // ------------------------------------------------------------------
+  // 3. Batch-load video subject previews (de-duped URIs)
+  // ------------------------------------------------------------------
+  const subjectUris = [
+    ...new Set(
+      rawRows
+        .map((r) => r.notification.reasonSubject)
+        .filter((s): s is string => s !== null && s !== undefined)
+    ),
+  ];
+  const subjectRows =
+    subjectUris.length > 0
+      ? await db
+          .select({
+            uri: videos.uri,
+            caption: videos.caption,
+            thumbnailUrl: videos.thumbnailUrl,
+          })
+          .from(videos)
+          .where(inArray(videos.uri, subjectUris))
+      : [];
+  const subjectMap = new Map(subjectRows.map((s) => [s.uri, s]));
+
+  // ------------------------------------------------------------------
+  // 4. Group notifications by (reason, reasonSubject, 24-h bucket)
+  //
+  //    The bucket key is: `${reason}::${reasonSubject ?? ''}::${windowStart}`
+  //    where windowStart is the ISO date of the notification truncated to
+  //    the start of a 24-hour window (floored to midnight UTC).
+  // ------------------------------------------------------------------
+  const WINDOW_MS = 24 * 60 * 60 * 1000;
+
+  // Map from group key → ordered list of raw notification rows
+  const groupMap = new Map<string, typeof rawRows>();
+
+  for (const row of rawRows) {
+    const n = row.notification;
+    const windowStart = Math.floor(n.createdAt.getTime() / WINDOW_MS) * WINDOW_MS;
+    const key = `${n.reason}::${n.reasonSubject ?? ''}::${windowStart}`;
+
+    const existing = groupMap.get(key);
+    if (existing) {
+      existing.push(row);
+    } else {
+      groupMap.set(key, [row]);
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // 5. Build grouped notification views and sort by most-recent
+  // ------------------------------------------------------------------
+  const grouped: GroupedNotification[] = Array.from(groupMap.values()).map((rows) => {
+    // rows are already in desc(createdAt) order because the DB returned
+    // them that way; the first row is therefore the most recent.
+    const representative = rows[0]!.notification;
+    const isGrouped = rows.length > 1;
+
+    // Collect up to 3 unique actors in chronological-newest order
+    const seenActors = new Set<string>();
+    const actors: GroupedNotificationActor[] = [];
+    for (const row of rows) {
+      const did = row.notification.actorDid;
+      if (!seenActors.has(did)) {
+        seenActors.add(did);
+        const profile = actorMap.get(did);
+        actors.push({
+          did,
+          handle: profile?.handle ?? 'unknown',
+          displayName: profile?.displayName ?? undefined,
+          avatar: profile?.avatar ?? undefined,
+        });
+        if (actors.length === 3) break;
+      }
+    }
+
+    // Total unique actors (may exceed 3)
+    const totalActors = new Set(rows.map((r) => r.notification.actorDid)).size;
+
+    // Subject preview for video-related notification types
+    let subject: string | undefined;
+    let subjectPreview: SubjectPreview | undefined;
+    const reasonSubject = representative.reasonSubject;
+    if (VIDEO_SUBJECT_REASONS.has(representative.reason) && reasonSubject) {
+      subject = reasonSubject;
+      const videoRow = subjectMap.get(reasonSubject);
+      if (videoRow) {
+        subjectPreview = {
+          caption: videoRow.caption ?? undefined,
+          thumbnailUrl: videoRow.thumbnailUrl ?? undefined,
+        };
+      }
+    }
+
+    // A group is considered read only when every notification in it is read
+    const isRead = rows.every((r) => r.notification.isRead);
+
+    return {
+      id: isGrouped ? `group_${representative.id}` : `notif_${representative.id}`,
+      type: representative.reason,
+      reason: representative.reason,
+      isGrouped,
+      actors,
+      actorCount: totalActors,
+      ...(subject !== undefined && { subject }),
+      ...(subjectPreview !== undefined && { subjectPreview }),
+      latestAt: representative.createdAt.toISOString(),
+      isRead,
+    };
+  });
+
+  // Sort groups by latest notification descending
+  grouped.sort((a, b) => (a.latestAt < b.latestAt ? 1 : a.latestAt > b.latestAt ? -1 : 0));
+
+  // Apply the caller's limit against groups (not raw rows)
+  const page = grouped.slice(0, limit);
+
+  // ------------------------------------------------------------------
+  // 6. Cursor: ISO timestamp of the oldest raw notification included in
+  //    the current page so the client can fetch the next page.
+  // ------------------------------------------------------------------
+  const lastGroup = page[page.length - 1];
+  const nextCursor =
+    page.length === limit && lastGroup ? lastGroup.latestAt : undefined;
+
+  // ------------------------------------------------------------------
+  // 7. Unread count across all unread notifications for this user
+  // ------------------------------------------------------------------
+  const [unreadResult] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(notifications)
+    .where(and(eq(notifications.userDid, userDid), eq(notifications.isRead, false)));
+
+  return c.json({
+    notifications: page,
+    cursor: nextCursor,
+    unreadCount: Number(unreadResult?.count ?? 0),
   });
 });

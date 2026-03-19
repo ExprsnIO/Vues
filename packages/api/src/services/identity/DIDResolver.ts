@@ -296,12 +296,29 @@ export class DIDResolver {
       return null;
     }
 
+    // Reconstruct DID document from stored fields
+    const document: DIDDocument | undefined = identity.pdsEndpoint || identity.signingKey ? {
+      id: identity.did,
+      alsoKnownAs: identity.alsoKnownAs || undefined,
+      verificationMethod: identity.signingKey ? [{
+        id: `${identity.did}#atproto`,
+        type: 'Multikey',
+        controller: identity.did,
+        publicKeyMultibase: identity.signingKey,
+      }] : undefined,
+      service: identity.services ? Object.entries(identity.services).map(([key, svc]) => ({
+        id: `#${key}`,
+        type: svc.type,
+        serviceEndpoint: svc.endpoint,
+      })) : undefined,
+    } : undefined;
+
     return {
       did: identity.did,
       handle: identity.handle || undefined,
       pdsEndpoint: identity.pdsEndpoint || undefined,
       signingKey: identity.signingKey || undefined,
-      document: identity.document as DIDDocument | undefined,
+      document,
       resolvedAt: identity.updatedAt || identity.createdAt,
       source: 'database',
     };
@@ -449,25 +466,36 @@ export class DIDResolver {
     // Redis cache
     await this.setRedisCache(did, data);
 
+    // Extract services from document for storage
+    const services = data.document?.service?.reduce((acc, svc) => {
+      const key = svc.id.replace('#', '');
+      acc[key] = { type: svc.type, endpoint: svc.serviceEndpoint };
+      return acc;
+    }, {} as Record<string, { type: string; endpoint: string }>) || {};
+
     // Database (persistent)
     await this.db
       .insert(schema.plcIdentities)
       .values({
         did,
-        handle: data.handle,
-        pdsEndpoint: data.pdsEndpoint,
-        signingKey: data.signingKey,
-        document: data.document,
+        handle: data.handle || null,
+        pdsEndpoint: data.pdsEndpoint || null,
+        signingKey: data.signingKey || null,
+        rotationKeys: [],
+        alsoKnownAs: data.document?.alsoKnownAs || [],
+        services,
+        status: 'active',
         createdAt: new Date(),
         updatedAt: new Date(),
       })
       .onConflictDoUpdate({
         target: schema.plcIdentities.did,
         set: {
-          handle: data.handle,
-          pdsEndpoint: data.pdsEndpoint,
-          signingKey: data.signingKey,
-          document: data.document,
+          handle: data.handle || null,
+          pdsEndpoint: data.pdsEndpoint || null,
+          signingKey: data.signingKey || null,
+          alsoKnownAs: data.document?.alsoKnownAs || [],
+          services,
           updatedAt: new Date(),
         },
       });

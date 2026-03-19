@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { useParams } from 'next/navigation';
+import { useParams, useRouter } from 'next/navigation';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api';
 import { DataTable } from '@/components/admin/ui/DataTable';
@@ -45,6 +45,7 @@ const PROVIDER_ICONS: Record<string, string> = {
   microsoft: '🟦',
   twitter: '🐦',
   discord: '🎮',
+  exprsn: '🛡️',
   oidc: '🔐',
   custom: '⚙️',
 };
@@ -78,10 +79,16 @@ const PROVIDER_TEMPLATES: Record<string, Partial<OAuthProvider>> = {
     scopes: ['openid', 'profile', 'email'],
     buttonColor: '#00a4ef',
   },
+  exprsn: {
+    type: 'oidc',
+    scopes: ['openid', 'profile', 'email'],
+    buttonColor: '#f83b85',
+  },
 };
 
 export default function DomainOAuthPage() {
   const params = useParams();
+  const router = useRouter();
   const domainId = params.domainId as string;
   const [showAddModal, setShowAddModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
@@ -259,6 +266,14 @@ export default function DomainOAuthPage() {
               {name.charAt(0).toUpperCase() + name.slice(1)}
             </button>
           ))}
+          <button
+            onClick={() => router.push(`/admin/d/${domainId}/settings/sso/exprsn`)}
+            className="px-3 py-1.5 text-sm border border-accent/30 rounded-lg hover:border-accent hover:text-accent bg-accent/5 transition-colors flex items-center gap-2"
+          >
+            <span>{PROVIDER_ICONS.exprsn}</span>
+            Exprsn
+            <span className="text-[10px] px-1 py-0.5 bg-accent/10 text-accent rounded">SSO + Scopes</span>
+          </button>
         </div>
       </div>
 
@@ -577,16 +592,23 @@ function OAuthProviderModal({
 
           <div>
             <label className="block text-sm font-medium text-text-secondary mb-2">
-              Scopes (comma-separated) *
+              Scopes {formData.providerKey === 'exprsn' || template === 'exprsn' ? '' : '(comma-separated)'} *
             </label>
-            <input
-              type="text"
-              required
-              value={formData.scopes}
-              onChange={(e) => setFormData({ ...formData, scopes: e.target.value })}
-              className="w-full px-4 py-2 bg-background border border-border rounded-lg text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
-              placeholder="openid, profile, email"
-            />
+            {formData.providerKey === 'exprsn' || template === 'exprsn' ? (
+              <ExprsnScopePicker
+                value={formData.scopes.split(',').map(s => s.trim()).filter(Boolean)}
+                onChange={(scopes) => setFormData({ ...formData, scopes: scopes.join(', ') })}
+              />
+            ) : (
+              <input
+                type="text"
+                required
+                value={formData.scopes}
+                onChange={(e) => setFormData({ ...formData, scopes: e.target.value })}
+                className="w-full px-4 py-2 bg-background border border-border rounded-lg text-text-primary focus:outline-none focus:ring-2 focus:ring-accent"
+                placeholder="openid, profile, email"
+              />
+            )}
           </div>
 
           <div className="grid grid-cols-2 gap-4">
@@ -666,6 +688,130 @@ function OAuthProviderModal({
           </div>
         </form>
       </div>
+    </div>
+  );
+}
+
+const EXPRSN_SCOPE_GROUPS = [
+  {
+    label: 'Identity',
+    scopes: [
+      { id: 'openid', description: 'OpenID Connect identity' },
+      { id: 'profile', description: 'User profile information' },
+      { id: 'email', description: 'Email address' },
+    ],
+  },
+  {
+    label: 'Content',
+    scopes: [
+      { id: 'read', description: 'Read all public content' },
+      { id: 'write', description: 'Create and update content' },
+      { id: 'videos:read', description: 'Read video data' },
+      { id: 'videos:write', description: 'Upload and manage videos' },
+    ],
+  },
+  {
+    label: 'Social',
+    scopes: [
+      { id: 'comments:read', description: 'Read comments' },
+      { id: 'comments:write', description: 'Post comments' },
+      { id: 'follows:read', description: 'Read follow relationships' },
+      { id: 'follows:write', description: 'Follow and unfollow users' },
+      { id: 'messages:read', description: 'Read direct messages' },
+      { id: 'messages:write', description: 'Send direct messages' },
+    ],
+  },
+  {
+    label: 'Platform',
+    scopes: [
+      { id: 'notifications:read', description: 'Read notifications' },
+      { id: 'profile:read', description: 'Read user profile' },
+      { id: 'profile:write', description: 'Update user profile' },
+      { id: 'live:stream', description: 'Start live streams' },
+      { id: 'payments:read', description: 'Read payment data' },
+      { id: 'payments:write', description: 'Create payments' },
+    ],
+  },
+  {
+    label: 'Admin',
+    scopes: [
+      { id: 'admin', description: 'Full admin access' },
+    ],
+  },
+];
+
+function ExprsnScopePicker({
+  value,
+  onChange,
+}: {
+  value: string[];
+  onChange: (scopes: string[]) => void;
+}) {
+  const toggle = (scope: string) => {
+    if (value.includes(scope)) {
+      onChange(value.filter((s) => s !== scope));
+    } else {
+      onChange([...value, scope]);
+    }
+  };
+
+  const toggleGroup = (group: typeof EXPRSN_SCOPE_GROUPS[0]) => {
+    const groupIds = group.scopes.map((s) => s.id);
+    const allSelected = groupIds.every((id) => value.includes(id));
+    if (allSelected) {
+      onChange(value.filter((s) => !groupIds.includes(s)));
+    } else {
+      onChange([...new Set([...value, ...groupIds])]);
+    }
+  };
+
+  return (
+    <div className="space-y-3 p-3 bg-background border border-border rounded-lg max-h-64 overflow-y-auto">
+      {EXPRSN_SCOPE_GROUPS.map((group) => {
+        const groupIds = group.scopes.map((s) => s.id);
+        const allSelected = groupIds.every((id) => value.includes(id));
+        const someSelected = groupIds.some((id) => value.includes(id));
+
+        return (
+          <div key={group.label}>
+            <button
+              type="button"
+              onClick={() => toggleGroup(group)}
+              className="flex items-center gap-2 text-xs font-semibold text-text-muted uppercase tracking-wider mb-1.5 hover:text-text-primary"
+            >
+              <span className={`w-3 h-3 rounded border flex items-center justify-center text-[8px] ${
+                allSelected ? 'bg-accent border-accent text-white' :
+                someSelected ? 'bg-accent/30 border-accent/50' : 'border-border'
+              }`}>
+                {allSelected && '✓'}
+              </span>
+              {group.label}
+            </button>
+            <div className="grid grid-cols-2 gap-1 ml-5">
+              {group.scopes.map((scope) => (
+                <label
+                  key={scope.id}
+                  className="flex items-start gap-2 py-1 cursor-pointer hover:bg-surface-hover rounded px-1"
+                >
+                  <input
+                    type="checkbox"
+                    checked={value.includes(scope.id)}
+                    onChange={() => toggle(scope.id)}
+                    className="mt-0.5 w-3.5 h-3.5 text-accent bg-background border-border rounded focus:ring-accent"
+                  />
+                  <div className="min-w-0">
+                    <span className="text-xs font-medium text-text-primary">{scope.id}</span>
+                    <p className="text-[10px] text-text-muted leading-tight">{scope.description}</p>
+                  </div>
+                </label>
+              ))}
+            </div>
+          </div>
+        );
+      })}
+      <p className="text-[10px] text-text-muted pt-1 border-t border-border">
+        {value.length} scope{value.length !== 1 ? 's' : ''} selected
+      </p>
     </div>
   );
 }

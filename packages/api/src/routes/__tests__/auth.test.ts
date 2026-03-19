@@ -190,7 +190,8 @@ describe('Authentication Endpoints', () => {
       expect(data).toHaveProperty('success', true);
       expect(data).toHaveProperty('accessJwt');
       expect(data).toHaveProperty('refreshJwt');
-      expect(data).toHaveProperty('handle', handle);
+      // Handle should be returned with domain suffix (e.g., "user.exprsn" or "user.exprsn.io")
+      expect(data.handle).toMatch(new RegExp(`^${handle}\\.`));
       expect(data).toHaveProperty('did');
       expect(data.did).toMatch(/^did:(plc|exprn):/);
 

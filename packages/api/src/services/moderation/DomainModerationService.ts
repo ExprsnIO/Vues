@@ -4,6 +4,7 @@
  */
 
 import { db } from '../../db/index.js';
+import * as schema from '../../db/schema.js';
 import { eq, and, or, sql, desc, asc } from 'drizzle-orm';
 
 export interface ModerationPolicy {
@@ -156,27 +157,27 @@ export class DomainModerationService {
     let policies: ModerationPolicy[] = [];
 
     // Get domain's own policies
-    const ownPolicies = await db.execute(sql`
+    const ownPolicies = await db.execute<any>(sql`
       SELECT * FROM moderation_policies
       WHERE domain_id = ${domainId}
       ORDER BY priority DESC, created_at ASC
     `);
 
-    policies = (ownPolicies.rows as any[]).map(row => this.rowToPolicy(row));
+    policies = (ownPolicies as any[]).map(row => this.rowToPolicy(row));
 
     // Get inherited policies if enabled
     if (includeInherited) {
       const parentDomains = await this.getParentDomains(domainId);
 
       for (const parentId of parentDomains) {
-        const parentPolicies = await db.execute(sql`
+        const parentPolicies = await db.execute<any>(sql`
           SELECT * FROM moderation_policies
           WHERE domain_id = ${parentId}
             AND inherit_from_parent = 1
           ORDER BY priority DESC
         `);
 
-        const inherited = (parentPolicies.rows as any[])
+        const inherited = (parentPolicies as any[])
           .map(row => this.rowToPolicy(row))
           .filter(p => {
             // Check if child domain has override
@@ -313,13 +314,13 @@ export class DomainModerationService {
       return this.wordFilterCache.get(domainId)!;
     }
 
-    const result = await db.execute(sql`
+    const result = await db.execute<any>(sql`
       SELECT * FROM word_filters
       WHERE domain_id = ${domainId} AND enabled = 1
       ORDER BY severity DESC, category ASC
     `);
 
-    const filters = (result.rows as any[]).map(row => this.rowToWordFilter(row));
+    const filters = (result as any[]).map(row => this.rowToWordFilter(row));
     this.wordFilterCache.set(domainId, filters);
 
     return filters;
@@ -588,7 +589,7 @@ export class DomainModerationService {
       domainCache.delete(userId);
     }
 
-    const result = await db.execute(sql`
+    const result = await db.execute<any>(sql`
       SELECT * FROM shadow_bans
       WHERE user_id = ${userId}
         AND domain_id = ${domainId}
@@ -596,9 +597,9 @@ export class DomainModerationService {
       LIMIT 1
     `);
 
-    if (result.rows.length === 0) return null;
+    if (result.length === 0) return null;
 
-    const row = result.rows[0] as any;
+    const row = result[0] as any;
     const ban: ShadowBanConfig = {
       userId: row.user_id,
       domainId: row.domain_id,
@@ -650,18 +651,18 @@ export class DomainModerationService {
       return this.configCache.get(domainId)!;
     }
 
-    const result = await db.execute(sql`
+    const result = await db.execute<any>(sql`
       SELECT * FROM domain_moderation_config WHERE domain_id = ${domainId}
     `);
 
-    if (result.rows.length === 0) {
+    if (result.length === 0) {
       // Return defaults
       const defaults = this.getDefaultConfig(domainId);
       this.configCache.set(domainId, defaults);
       return defaults;
     }
 
-    const row = result.rows[0] as any;
+    const row = result[0] as any;
     const config: DomainModerationConfig = {
       domainId: row.domain_id,
       autoModerationEnabled: Boolean(row.auto_moderation_enabled),
@@ -734,16 +735,16 @@ export class DomainModerationService {
   // Private helpers
 
   private async getPolicy(policyId: string): Promise<ModerationPolicy | null> {
-    const result = await db.execute(sql`
+    const result = await db.execute<any>(sql`
       SELECT * FROM moderation_policies WHERE id = ${policyId}
     `);
 
-    if (result.rows.length === 0) return null;
-    return this.rowToPolicy(result.rows[0] as any);
+    if (result.length === 0) return null;
+    return this.rowToPolicy(result[0] as any);
   }
 
   private async getParentDomains(domainId: string): Promise<string[]> {
-    const result = await db.execute(sql`
+    const result = await db.execute<any>(sql`
       WITH RECURSIVE domain_hierarchy AS (
         SELECT id, parent_domain_id, 0 as level
         FROM domains
@@ -761,29 +762,43 @@ export class DomainModerationService {
       ORDER BY level ASC
     `);
 
-    return (result.rows as any[]).map(row => row.id);
+    return (result as any[]).map(row => row.id);
   }
 
   private async getUserExemptions(
     userId: string,
     domainId: string
   ): Promise<{ trustLevel?: number; roles?: string[] }> {
-    const result = await db.execute(sql`
-      SELECT
-        u.trust_level,
-        ARRAY_AGG(dur.role_id) as roles
-      FROM users u
-      LEFT JOIN domain_user_roles dur ON u.did = dur.user_id AND dur.domain_id = ${domainId}
-      WHERE u.did = ${userId}
-      GROUP BY u.did, u.trust_level
-    `);
+    // Get user roles for this domain
+    const userRoles = await db
+      .select({
+        roleId: schema.domainUserRoles.roleId,
+      })
+      .from(schema.domainUserRoles)
+      .innerJoin(schema.domainUsers, eq(schema.domainUserRoles.domainUserId, schema.domainUsers.id))
+      .where(and(
+        eq(schema.domainUsers.userDid, userId),
+        eq(schema.domainUsers.domainId, domainId)
+      ));
 
-    if (result.rows.length === 0) return {};
+    // Check if user is in trusted users table
+    const trustedUser = await db
+      .select()
+      .from(schema.trustedUsers)
+      .where(eq(schema.trustedUsers.userDid, userId))
+      .limit(1);
 
-    const row = result.rows[0] as any;
+    // Map trust level string to numeric value
+    const trustLevelMap: Record<string, number> = {
+      'basic': 1,
+      'verified': 2,
+      'creator': 3,
+      'partner': 4,
+    };
+
     return {
-      trustLevel: row.trust_level,
-      roles: row.roles?.filter(Boolean),
+      trustLevel: trustedUser[0] ? trustLevelMap[trustedUser[0].trustLevel] || 1 : 1,
+      roles: userRoles.map(r => r.roleId),
     };
   }
 

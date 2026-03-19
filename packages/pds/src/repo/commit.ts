@@ -3,6 +3,7 @@ import * as dagCbor from '@ipld/dag-cbor';
 import { sha256 } from 'multiformats/hashes/sha2';
 import { generateTid } from './tid.js';
 import * as crypto from '@atproto/crypto';
+import { formatDidKey } from '@atproto/crypto';
 
 /**
  * Commit structure for ATProto repositories
@@ -147,7 +148,8 @@ export async function createCommitCid(commit: Commit): Promise<CID> {
  */
 export async function verifyCommitSignature(
   commit: Commit,
-  publicKey: Uint8Array
+  publicKey: Uint8Array,
+  jwtAlg: string = 'ES256K'
 ): Promise<boolean> {
   try {
     // Build the unsigned commit to get the bytes that were signed
@@ -160,9 +162,11 @@ export async function verifyCommitSignature(
     };
     const signBytes = getSignBytes(unsigned);
 
+    // Convert public key bytes to did:key format
+    const didKey = formatDidKey(jwtAlg, publicKey);
+
     // Verify signature using @atproto/crypto
-    // The public key is expected to be in compressed format
-    return await crypto.verifySignature(publicKey, signBytes, commit.sig);
+    return await crypto.verifySignature(didKey, signBytes, commit.sig);
   } catch (error) {
     console.error('[Commit] Signature verification failed:', error);
     return false;

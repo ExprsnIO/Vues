@@ -1,13 +1,14 @@
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import bcrypt from 'bcryptjs';
-import { eq, and, ne, desc } from 'drizzle-orm';
+import { eq, and, or, ne, desc, sql } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import crypto from 'crypto';
-import { db, actorRepos, users, sessions, ssoAuditLog, userSettings, notificationSubscriptions, userRenderQuotas, userFeedPreferences, apiTokens, organizations, organizationMembers, organizationRoles } from '../db/index.js';
+import { db, actorRepos, users, sessions, ssoAuditLog, userSettings, notificationSubscriptions, userRenderQuotas, userFeedPreferences, apiTokens, organizations, organizationMembers, organizationRoles, repositories, repoCommits, caEntityCertificates, plcIdentities, domains, domainUsers } from '../db/index.js';
 import { SYSTEM_ROLES, SYSTEM_ROLE_PERMISSIONS, type SystemRoleName } from '@exprsn/shared';
 import { PlcService, getPlcConfig, type DidMethod } from '../services/plc/index.js';
 import { ExprsnDidService } from '../services/did/index.js';
+import { queueTimelinePrefetch } from '../services/prefetch/producer.js';
 import type { OrganizationType } from '@exprsn/shared';
 import {
   authRateLimiter,
@@ -23,6 +24,13 @@ import {
   createSessionSchema,
   revokeSessionSchema,
 } from '../utils/validation-schemas.js';
+import {
+  generateSessionTokens,
+  hashSessionToken,
+} from '../utils/session-tokens.js';
+import { redis } from '../cache/redis.js';
+import { emailService } from '../services/email/index.js';
+import { promises as dnsPromises } from 'dns';
 
 export const authRouter = new Hono();
 
@@ -84,15 +92,8 @@ async function generateKeyPair(): Promise<{ publicKey: string; privateKey: strin
   };
 }
 
-/**
- * Generate JWT-like session tokens
- */
-function generateTokens(): { accessToken: string; refreshToken: string } {
-  return {
-    accessToken: `exp_${nanoid(32)}`,
-    refreshToken: `ref_${nanoid(48)}`,
-  };
-}
+// Session token generation moved to utils/session-tokens.ts
+// Uses generateSessionTokens() which provides both raw tokens and hashes
 
 /**
  * Validate handle format
@@ -269,6 +270,78 @@ function getDefaultApiScopes(accountType?: AccountType): string[] {
 }
 
 /**
+ * Ensure a domain record exists in the database for the given domain suffix.
+ * Performs a DNS lookup to determine if the domain is active.
+ * Does not assign ownership — just ensures the domain is tracked.
+ */
+async function ensureDomainExists(domainSuffix: string): Promise<void> {
+  // Normalize: strip leading dots
+  const domainName = domainSuffix.replace(/^\.+/, '');
+  if (!domainName || domainName.length < 2) return;
+
+  // Check if domain already exists
+  const existing = await db.query.domains.findFirst({
+    where: eq(domains.domain, domainName),
+  });
+
+  if (existing) {
+    // Domain already tracked — increment user count
+    await db
+      .update(domains)
+      .set({ userCount: sql`${domains.userCount} + 1`, updatedAt: new Date() })
+      .where(eq(domains.id, existing.id));
+    return;
+  }
+
+  // Perform DNS lookup to check if domain resolves
+  let dnsActive = false;
+  let dnsRecords: string[] = [];
+  try {
+    const addresses = await dnsPromises.resolve4(domainName);
+    if (addresses.length > 0) {
+      dnsActive = true;
+      dnsRecords = addresses;
+    }
+  } catch {
+    // Domain doesn't resolve — that's fine, we still track it
+    try {
+      // Try CNAME as fallback
+      const cname = await dnsPromises.resolveCname(domainName);
+      if (cname.length > 0) {
+        dnsActive = true;
+        dnsRecords = cname;
+      }
+    } catch {
+      // No DNS records found — domain is tracked but unverified
+    }
+  }
+
+  const domainId = nanoid();
+  const now = new Date();
+
+  try {
+    await db.insert(domains).values({
+      id: domainId,
+      name: domainName,
+      domain: domainName,
+      type: 'hosted',
+      status: dnsActive ? 'active' : 'pending',
+      handleSuffix: `.${domainName}`,
+      dnsVerifiedAt: dnsActive ? now : null,
+      userCount: 1,
+      groupCount: 0,
+      certificateCount: 0,
+      identityCount: 0,
+      createdAt: now,
+      updatedAt: now,
+    }).onConflictDoNothing(); // Race-safe: another request may have created it
+  } catch (err) {
+    // Domain insert failed (e.g. unique constraint race) — not critical
+    console.warn(`Failed to auto-create domain record for ${domainName}:`, err);
+  }
+}
+
+/**
  * Create additional user data during signup
  */
 async function createUserSignupData(
@@ -416,28 +489,49 @@ authRouter.post('/io.exprsn.auth.createAccount', authRateLimiter('signup'), zVal
 
   const handle = body.handle.toLowerCase().trim();
 
-  // Check if handle exists in actor_repos
-  const existingHandle = await db.query.actorRepos.findFirst({
-    where: eq(actorRepos.handle, handle),
-  });
+  // Determine DID method based on account type
+  const didMethod = body.didMethod || determineDefaultDidMethod(body.accountType);
 
-  if (existingHandle) {
+  // Compute the full handle (with domain suffix) upfront so availability
+  // checks compare against the same value that will be stored.
+  const plcConfig = await getPlcConfig();
+  const domainSuffix = didMethod === 'exprn'
+    ? 'exprsn'
+    : (plcConfig.handleSuffix || 'exprsn.io');
+  const fullHandle = `${handle}.${domainSuffix}`;
+
+  // ── Availability checks (across ALL identity tables) ─────────────────
+  // Check actor_repos, users, AND plcIdentities for the full handle
+  const [existingActor, existingUser, existingPlcIdentity, existingEmail] = await Promise.all([
+    db.query.actorRepos.findFirst({
+      where: or(eq(actorRepos.handle, handle), eq(actorRepos.handle, fullHandle)),
+    }),
+    db.query.users.findFirst({
+      where: or(eq(users.handle, handle), eq(users.handle, fullHandle)),
+    }),
+    db.query.plcIdentities.findFirst({
+      where: eq(plcIdentities.handle, fullHandle),
+    }),
+    db.query.actorRepos.findFirst({
+      where: eq(actorRepos.email, body.email.toLowerCase()),
+    }),
+  ]);
+
+  if (existingActor || existingUser || existingPlcIdentity) {
     throw new HTTPException(400, { message: 'Handle already taken' });
   }
-
-  // Check if email exists
-  const existingEmail = await db.query.actorRepos.findFirst({
-    where: eq(actorRepos.email, body.email.toLowerCase()),
-  });
 
   if (existingEmail) {
     throw new HTTPException(400, { message: 'Email already registered' });
   }
 
-  // Determine DID method based on account type
-  const didMethod = body.didMethod || determineDefaultDidMethod(body.accountType);
+  // ── Ensure domain is tracked in the domains table ────────────────────
+  // Fire-and-forget: domain creation is non-blocking for signup
+  ensureDomainExists(domainSuffix).catch((err) =>
+    console.warn('Failed to auto-create domain record during signup:', err)
+  );
 
-  // Handle did:exprsn creation for creator/business accounts
+  // ── did:exprsn flow (creator/business/organization accounts) ─────────
   if (didMethod === 'exprn') {
     try {
       // Create did:exprsn with certificate
@@ -449,8 +543,8 @@ authRouter.post('/io.exprsn.auth.createAccount', authRateLimiter('signup'), zVal
 
       const passwordHash = await bcrypt.hash(body.password, 10);
 
-      // Generate session tokens
-      const { accessToken, refreshToken } = generateTokens();
+      // Generate session tokens (returns raw tokens for user, hashes for storage)
+      const { accessToken, refreshToken, accessTokenHash, refreshTokenHash } = generateSessionTokens();
       const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
 
       // Create account in actor_repos with certificate reference
@@ -466,7 +560,7 @@ authRouter.post('/io.exprsn.auth.createAccount', authRateLimiter('signup'), zVal
         status: 'active',
       });
 
-      // Create in users table
+      // Create in users table (must happen before linking certificates via subjectDid FK)
       await db.insert(users).values({
         did: result.did,
         handle: result.handle,
@@ -475,6 +569,39 @@ authRouter.post('/io.exprsn.auth.createAccount', authRateLimiter('signup'), zVal
         bio: null,
       });
 
+      // Now link certificates to the user via subjectDid (FK requires users row)
+      await db
+        .update(caEntityCertificates)
+        .set({ subjectDid: result.did })
+        .where(eq(caEntityCertificates.id, result.certificate.id));
+
+      if (result.additionalCertificates?.codeSigning) {
+        await db
+          .update(caEntityCertificates)
+          .set({ subjectDid: result.did })
+          .where(eq(caEntityCertificates.id, result.additionalCertificates.codeSigning.id));
+      }
+
+      // Create initial empty repository
+      try {
+        const initialCommitCid = `bafyrei${crypto.randomBytes(16).toString('hex').slice(0, 43)}`;
+
+        await db.insert(repositories).values({
+          did: result.did,
+          head: initialCommitCid,
+          rev: 1,
+        }).onConflictDoNothing();
+
+        await db.insert(repoCommits).values({
+          cid: initialCommitCid,
+          did: result.did,
+          rev: '1',
+          data: '',
+        }).onConflictDoNothing();
+      } catch (err) {
+        console.warn('Failed to create initial repo commit:', err);
+      }
+
       // Create default user settings based on account type
       const defaultSettings = getDefaultUserSettings(body.accountType);
       await db.insert(userSettings).values({
@@ -482,12 +609,12 @@ authRouter.post('/io.exprsn.auth.createAccount', authRateLimiter('signup'), zVal
         ...defaultSettings,
       });
 
-      // Create session
+      // Create session (store hashes, not raw tokens)
       await db.insert(sessions).values({
         id: nanoid(),
         did: result.did,
-        accessJwt: accessToken,
-        refreshJwt: refreshToken,
+        accessJwt: accessTokenHash,
+        refreshJwt: refreshTokenHash,
         expiresAt,
       });
 
@@ -552,17 +679,14 @@ authRouter.post('/io.exprsn.auth.createAccount', authRateLimiter('signup'), zVal
     }
   }
 
-  // Standard did:plc or did:web flow
+  // ── Standard did:plc or did:web flow ─────────────────────────────────
   const did = await generateDid(handle, didMethod);
   const { publicKey, privateKey } = await generateKeyPair();
   const passwordHash = await bcrypt.hash(body.password, 10);
 
-  // Generate session tokens
-  const { accessToken, refreshToken } = generateTokens();
+  // Generate session tokens (returns raw tokens for user, hashes for storage)
+  const { accessToken, refreshToken, accessTokenHash, refreshTokenHash } = generateSessionTokens();
   const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
-
-  // Get PLC config to determine if we should register with PLC
-  const plcConfig = await getPlcConfig();
 
   // If PLC is enabled, register the DID with the PLC service
   if (plcConfig.enabled && did.startsWith('did:plc:')) {
@@ -570,8 +694,9 @@ authRouter.post('/io.exprsn.auth.createAccount', authRateLimiter('signup'), zVal
       // Convert the SPKI public key to multibase format for PLC
       const publicKeyMultibase = `z${Buffer.from(publicKey, 'base64').toString('base64url')}`;
 
-      await PlcService.createDid({
-        handle: `${handle}.${plcConfig.handleSuffix || 'exprsn'}`,
+      // Register the already-generated DID with PLC
+      await PlcService.registerDid(did, {
+        handle: fullHandle,
         signingKey: publicKeyMultibase,
         rotationKeys: [publicKeyMultibase], // User controls their own rotation key
         pdsEndpoint: PDS_ENDPOINT,
@@ -582,10 +707,10 @@ authRouter.post('/io.exprsn.auth.createAccount', authRateLimiter('signup'), zVal
     }
   }
 
-  // Create account in actor_repos
+  // Create account in actor_repos with full handle
   await db.insert(actorRepos).values({
     did,
-    handle,
+    handle: fullHandle,
     email: body.email.toLowerCase(),
     passwordHash,
     signingKeyPublic: publicKey,
@@ -597,11 +722,31 @@ authRouter.post('/io.exprsn.auth.createAccount', authRateLimiter('signup'), zVal
   // Also create in users table for app functionality
   await db.insert(users).values({
     did,
-    handle,
+    handle: fullHandle,
     displayName: body.displayName || handle,
     avatar: null,
     bio: null,
   });
+
+  // Create initial empty repository
+  try {
+    const initialCommitCid = `bafyrei${crypto.randomBytes(16).toString('hex').slice(0, 43)}`;
+
+    await db.insert(repositories).values({
+      did,
+      head: initialCommitCid,
+      rev: 1,
+    }).onConflictDoNothing();
+
+    await db.insert(repoCommits).values({
+      cid: initialCommitCid,
+      did,
+      rev: '1',
+      data: '',
+    }).onConflictDoNothing();
+  } catch (err) {
+    console.warn('Failed to create initial repo commit:', err);
+  }
 
   // Create default user settings based on account type
   const defaultSettings = getDefaultUserSettings(body.accountType);
@@ -610,12 +755,12 @@ authRouter.post('/io.exprsn.auth.createAccount', authRateLimiter('signup'), zVal
     ...defaultSettings,
   });
 
-  // Create session
+  // Create session (store hashes, not raw tokens)
   await db.insert(sessions).values({
     id: nanoid(),
     did,
-    accessJwt: accessToken,
-    refreshJwt: refreshToken,
+    accessJwt: accessTokenHash,
+    refreshJwt: refreshTokenHash,
     expiresAt,
   });
 
@@ -632,7 +777,7 @@ authRouter.post('/io.exprsn.auth.createAccount', authRateLimiter('signup'), zVal
   // Send welcome email (non-blocking)
   getNotificationService().sendWelcomeEmail(
     did,
-    handle,
+    fullHandle,
     body.email,
     body.displayName
   ).catch((err) => console.error('Failed to send welcome email:', err));
@@ -641,12 +786,12 @@ authRouter.post('/io.exprsn.auth.createAccount', authRateLimiter('signup'), zVal
     success: true,
     accessJwt: accessToken,
     refreshJwt: refreshToken,
-    handle,
+    handle: fullHandle,
     did,
     didMethod,
     user: {
       did,
-      handle,
+      handle: fullHandle,
       displayName: body.displayName || handle,
       avatar: null,
     },
@@ -670,7 +815,7 @@ authRouter.post('/io.exprsn.auth.createSession', authRateLimiter('login'), zVali
   const body = getValidatedData<typeof createSessionSchema._output>(c);
 
   const identifier = sanitizeInput(body.identifier);
-  const clientIP = c.req.header('x-forwarded-for')?.split(',')[0].trim() ||
+  const clientIP = c.req.header('x-forwarded-for')?.split(',')[0]?.trim() ||
     c.req.header('x-real-ip') || 'unknown';
 
   // Apply progressive delay based on failed attempts
@@ -683,6 +828,13 @@ authRouter.post('/io.exprsn.auth.createSession', authRateLimiter('login'), zVali
   let account = await db.query.actorRepos.findFirst({
     where: eq(actorRepos.handle, identifier),
   });
+
+  // Try with .exprsn.io suffix if bare handle was provided
+  if (!account && !identifier.includes('.')) {
+    account = await db.query.actorRepos.findFirst({
+      where: eq(actorRepos.handle, `${identifier}.exprsn.io`),
+    });
+  }
 
   if (!account) {
     account = await db.query.actorRepos.findFirst({
@@ -712,16 +864,16 @@ authRouter.post('/io.exprsn.auth.createSession', authRateLimiter('login'), zVali
     throw new HTTPException(403, { message: 'Account is not active' });
   }
 
-  // Generate new session tokens
-  const { accessToken, refreshToken } = generateTokens();
+  // Generate new session tokens (returns raw tokens for user, hashes for storage)
+  const { accessToken, refreshToken, accessTokenHash, refreshTokenHash } = generateSessionTokens();
   const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
 
-  // Create session
+  // Create session (store hashes, not raw tokens)
   await db.insert(sessions).values({
     id: nanoid(),
     did: account.did,
-    accessJwt: accessToken,
-    refreshJwt: refreshToken,
+    accessJwt: accessTokenHash,
+    refreshJwt: refreshTokenHash,
     expiresAt,
   });
 
@@ -729,6 +881,9 @@ authRouter.post('/io.exprsn.auth.createSession', authRateLimiter('login'), zVali
   const user = await db.query.users.findFirst({
     where: eq(users.did, account.did),
   });
+
+  // Queue high-priority timeline prefetch on login (fire-and-forget)
+  queueTimelinePrefetch(account.did, 'high').catch(() => {});
 
   return c.json({
     success: true,
@@ -761,9 +916,11 @@ authRouter.get('/io.exprsn.auth.getSession', async (c) => {
   }
 
   const accessToken = auth.slice(7);
+  // Hash the token to look it up in the database
+  const accessTokenHash = hashSessionToken(accessToken);
 
   const session = await db.query.sessions.findFirst({
-    where: eq(sessions.accessJwt, accessToken),
+    where: eq(sessions.accessJwt, accessTokenHash),
   });
 
   if (!session || session.expiresAt < new Date()) {
@@ -818,13 +975,22 @@ authRouter.post('/io.exprsn.auth.refreshSession', authRateLimiter('refresh'), as
   }
 
   const refreshToken = auth.slice(7);
+  // Hash the token to look it up in the database
+  const refreshTokenHash = hashSessionToken(refreshToken);
 
   const session = await db.query.sessions.findFirst({
-    where: eq(sessions.refreshJwt, refreshToken),
+    where: eq(sessions.refreshJwt, refreshTokenHash),
   });
 
   if (!session) {
     throw new HTTPException(401, { message: 'Invalid refresh token' });
+  }
+
+  // Check if the session has expired
+  if (session.expiresAt < new Date()) {
+    // Delete expired session
+    await db.delete(sessions).where(eq(sessions.id, session.id));
+    throw new HTTPException(401, { message: 'Session expired' });
   }
 
   // Get account
@@ -839,16 +1005,16 @@ authRouter.post('/io.exprsn.auth.refreshSession', authRateLimiter('refresh'), as
   // Delete old session
   await db.delete(sessions).where(eq(sessions.id, session.id));
 
-  // Generate new tokens
-  const { accessToken: newAccessToken, refreshToken: newRefreshToken } = generateTokens();
+  // Generate new tokens (returns raw tokens for user, hashes for storage)
+  const { accessToken: newAccessToken, refreshToken: newRefreshToken, accessTokenHash, refreshTokenHash: newRefreshTokenHash } = generateSessionTokens();
   const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
 
-  // Create new session
+  // Create new session (store hashes, not raw tokens)
   await db.insert(sessions).values({
     id: nanoid(),
     did: account.did,
-    accessJwt: newAccessToken,
-    refreshJwt: newRefreshToken,
+    accessJwt: accessTokenHash,
+    refreshJwt: newRefreshTokenHash,
     expiresAt,
   });
 
@@ -875,8 +1041,10 @@ authRouter.post('/io.exprsn.auth.deleteSession', async (c) => {
   }
 
   const accessToken = auth.slice(7);
+  // Hash the token to look it up in the database
+  const accessTokenHash = hashSessionToken(accessToken);
 
-  await db.delete(sessions).where(eq(sessions.accessJwt, accessToken));
+  await db.delete(sessions).where(eq(sessions.accessJwt, accessTokenHash));
 
   return c.json({ success: true });
 });
@@ -896,10 +1064,12 @@ authRouter.get('/io.exprsn.auth.listSessions', async (c) => {
   }
 
   const accessToken = auth.slice(7);
+  // Hash the token to look it up in the database
+  const accessTokenHash = hashSessionToken(accessToken);
 
   // Get current session to find the user
   const currentSession = await db.query.sessions.findFirst({
-    where: eq(sessions.accessJwt, accessToken),
+    where: eq(sessions.accessJwt, accessTokenHash),
   });
 
   if (!currentSession || currentSession.expiresAt < new Date()) {
@@ -935,11 +1105,13 @@ authRouter.post('/io.exprsn.auth.revokeSession', zValidator('json', revokeSessio
   }
 
   const accessToken = auth.slice(7);
+  // Hash the token to look it up in the database
+  const accessTokenHash = hashSessionToken(accessToken);
   const body = getValidatedData<typeof revokeSessionSchema._output>(c);
 
   // Get current session to verify ownership
   const currentSession = await db.query.sessions.findFirst({
-    where: eq(sessions.accessJwt, accessToken),
+    where: eq(sessions.accessJwt, accessTokenHash),
   });
 
   if (!currentSession || currentSession.expiresAt < new Date()) {
@@ -981,10 +1153,12 @@ authRouter.post('/io.exprsn.auth.revokeAllSessions', async (c) => {
   }
 
   const accessToken = auth.slice(7);
+  // Hash the token to look it up in the database
+  const accessTokenHash = hashSessionToken(accessToken);
 
   // Get current session
   const currentSession = await db.query.sessions.findFirst({
-    where: eq(sessions.accessJwt, accessToken),
+    where: eq(sessions.accessJwt, accessTokenHash),
   });
 
   if (!currentSession || currentSession.expiresAt < new Date()) {
@@ -1013,10 +1187,12 @@ authRouter.get('/io.exprsn.auth.getLoginHistory', async (c) => {
   }
 
   const accessToken = auth.slice(7);
+  // Hash the token to look it up in the database
+  const accessTokenHash = hashSessionToken(accessToken);
 
   // Get current session to find the user
   const currentSession = await db.query.sessions.findFirst({
-    where: eq(sessions.accessJwt, accessToken),
+    where: eq(sessions.accessJwt, accessTokenHash),
   });
 
   if (!currentSession || currentSession.expiresAt < new Date()) {
@@ -1080,4 +1256,134 @@ authRouter.get('/io.exprsn.auth.getLoginHistory', async (c) => {
       };
     }),
   });
+});
+
+// =============================================================================
+// Password Reset
+// =============================================================================
+
+/**
+ * Request a password reset
+ * POST /xrpc/io.exprsn.auth.requestPasswordReset
+ * Rate limited: 3 per hour per IP
+ *
+ * Accepts { email } or { handle } or { identifier } (auto-detect).
+ * Always returns { success: true } to avoid revealing whether an account exists.
+ */
+authRouter.post('/io.exprsn.auth.requestPasswordReset', authRateLimiter('signup'), async (c) => {
+  const body = await c.req.json<{ email?: string; handle?: string; identifier?: string }>();
+
+  // Support { identifier } that could be either email or handle
+  const email = body.email || (body.identifier && body.identifier.includes('@') ? body.identifier : undefined);
+  const handle = body.handle || (body.identifier && !body.identifier.includes('@') ? body.identifier : undefined);
+
+  if (!email && !handle) {
+    // Still return success to avoid leaking info
+    return c.json({ success: true });
+  }
+
+  try {
+    // Look up user by email or handle
+    let account = email
+      ? await db.query.actorRepos.findFirst({
+          where: eq(actorRepos.email, email.toLowerCase()),
+        })
+      : null;
+
+    if (!account && handle) {
+      account = await db.query.actorRepos.findFirst({
+        where: eq(actorRepos.handle, handle.toLowerCase().trim()),
+      });
+    }
+
+    if (account && account.email) {
+      // Generate a reset token
+      const token = nanoid(32);
+
+      // Store in Redis with 1-hour TTL
+      await redis.setex(
+        `password-reset:${token}`,
+        3600, // 1 hour
+        JSON.stringify({
+          did: account.did,
+          email: account.email,
+          handle: account.handle,
+        })
+      );
+
+      // In development, log the token so it can be used without an actual inbox
+      if (process.env.NODE_ENV !== 'production') {
+        console.log(`[Password Reset] Token for ${account.handle} (${account.email}): ${token}`);
+        console.log(`[Password Reset] Reset URL: ${process.env.WEB_URL || 'http://localhost:3001'}/reset-password?token=${token}`);
+      }
+
+      // Send password reset email (fire-and-forget)
+      emailService.sendPasswordReset(account.email, token, account.handle).catch((err) =>
+        console.error('[Password Reset] Failed to send email:', err)
+      );
+    }
+  } catch (error) {
+    // Log error but don't reveal it to the client
+    console.error('Password reset request error:', error);
+  }
+
+  // Always return success to avoid revealing whether the account exists
+  return c.json({ success: true });
+});
+
+/**
+ * Reset password using a token
+ * POST /xrpc/io.exprsn.auth.resetPassword
+ * Rate limited: 5 per 15 minutes per IP
+ */
+authRouter.post('/io.exprsn.auth.resetPassword', authRateLimiter('login'), async (c) => {
+  const body = await c.req.json<{ token: string; newPassword: string }>();
+
+  if (!body.token || !body.newPassword) {
+    throw new HTTPException(400, { message: 'Token and new password are required' });
+  }
+
+  if (body.newPassword.length < 8) {
+    throw new HTTPException(400, { message: 'Password must be at least 8 characters' });
+  }
+
+  // Look up token in Redis
+  const tokenData = await redis.get(`password-reset:${body.token}`);
+
+  if (!tokenData) {
+    throw new HTTPException(400, { message: 'Invalid or expired reset token' });
+  }
+
+  let resetInfo: { did: string; email: string; handle: string };
+  try {
+    resetInfo = JSON.parse(tokenData);
+  } catch {
+    throw new HTTPException(400, { message: 'Invalid reset token' });
+  }
+
+  // Verify the account still exists
+  const account = await db.query.actorRepos.findFirst({
+    where: eq(actorRepos.did, resetInfo.did),
+  });
+
+  if (!account) {
+    throw new HTTPException(400, { message: 'Account not found' });
+  }
+
+  // Hash the new password
+  const passwordHash = await bcrypt.hash(body.newPassword, 10);
+
+  // Update the password
+  await db
+    .update(actorRepos)
+    .set({ passwordHash, updatedAt: new Date() })
+    .where(eq(actorRepos.did, resetInfo.did));
+
+  // Delete the reset token (single use)
+  await redis.del(`password-reset:${body.token}`);
+
+  // Delete all sessions for this user (force re-login)
+  await db.delete(sessions).where(eq(sessions.did, resetInfo.did));
+
+  return c.json({ success: true });
 });

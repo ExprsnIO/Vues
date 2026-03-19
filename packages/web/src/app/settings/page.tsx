@@ -20,6 +20,7 @@ import { TokensSettings } from '@/components/settings/TokensSettings';
 import { EditorSettings } from '@/components/settings/EditorSettings';
 import { BlockedMutedSettings } from '@/components/settings/BlockedMutedSettings';
 import { OrganizationsSettings } from '@/components/settings/OrganizationsSettings';
+import { FeedPreferencesSettings } from '@/components/settings/FeedPreferencesSettings';
 import type { UserSettings, UserSettingsUpdate } from '@exprsn/shared';
 import { DEFAULT_SETTINGS } from '@exprsn/shared';
 import { cn } from '@/lib/utils';
@@ -28,6 +29,7 @@ import { Sidebar } from '@/components/Sidebar';
 type SettingsTab =
   | 'appearance'
   | 'playback'
+  | 'feed'
   | 'privacy'
   | 'notifications'
   | 'accessibility'
@@ -42,6 +44,7 @@ type SettingsTab =
 const SETTINGS_TABS: { id: SettingsTab; label: string; icon: React.FC<{ className?: string }> }[] = [
   { id: 'appearance', label: 'Appearance', icon: PaletteIcon },
   { id: 'playback', label: 'Playback', icon: PlayIcon },
+  { id: 'feed', label: 'Feed', icon: FeedIcon },
   { id: 'privacy', label: 'Privacy', icon: ShieldIcon },
   { id: 'notifications', label: 'Notifications', icon: BellIcon },
   { id: 'accessibility', label: 'Accessibility', icon: AccessibilityIcon },
@@ -178,6 +181,12 @@ export default function SettingsPage() {
               onUpdate={handleSettingsUpdate}
               isUpdating={updateSettingsMutation.isPending}
             />
+          </SettingsSection>
+        );
+      case 'feed':
+        return (
+          <SettingsSection title="Feed" description="Control what appears in your For You feed">
+            <FeedPreferencesSettings />
           </SettingsSection>
         );
       case 'privacy':
@@ -421,6 +430,14 @@ function FilterIcon({ className }: { className?: string }) {
   return (
     <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
       <path strokeLinecap="round" strokeLinejoin="round" d="M12 3c2.755 0 5.455.232 8.083.678.533.09.917.556.917 1.096v1.044a2.25 2.25 0 01-.659 1.591l-5.432 5.432a2.25 2.25 0 00-.659 1.591v2.927a2.25 2.25 0 01-1.244 2.013L9.75 21v-6.568a2.25 2.25 0 00-.659-1.591L3.659 7.409A2.25 2.25 0 013 5.818V4.774c0-.54.384-1.006.917-1.096A48.32 48.32 0 0112 3z" />
+    </svg>
+  );
+}
+
+function FeedIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 12h16.5m-16.5 3.75h16.5M3.75 19.5h16.5M5.625 4.5h12.75a1.875 1.875 0 010 3.75H5.625a1.875 1.875 0 010-3.75z" />
     </svg>
   );
 }

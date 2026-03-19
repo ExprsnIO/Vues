@@ -13,7 +13,7 @@ import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { optionalAuthMiddleware } from '../auth/middleware.js';
 import { db, users, videos, sounds } from '../db/index.js';
-import { eq, desc, and, or, sql, ilike, inArray, isNull, ne } from 'drizzle-orm';
+import { eq, desc, and, or, sql, ilike, inArray, isNull, ne, lt } from 'drizzle-orm';
 
 export const searchRouter = new Hono();
 
@@ -89,7 +89,7 @@ searchRouter.get('/io.exprsn.search.search', optionalAuthMiddleware, async (c) =
       ? [desc(videos.createdAt)]
       : sort === 'popular'
         ? [desc(videos.viewCount), desc(videos.likeCount)]
-        : [desc(videos.viewCount)]; // relevance approximated by view count
+        : [desc(sql`${videos.viewCount} * CASE WHEN ${users.did} LIKE 'did:exprsn:%' THEN 1.15 ELSE 1.0 END`)]; // relevance with did:exprsn boost
 
     const videoResults = await db
       .select({
@@ -147,38 +147,25 @@ searchRouter.get('/io.exprsn.search.search', optionalAuthMiddleware, async (c) =
   // Search sounds
   if (type === 'all' || type === 'sounds') {
     const soundResults = await db
-      .select({
-        sound: sounds,
-        author: users,
-      })
+      .select()
       .from(sounds)
-      .leftJoin(users, eq(users.did, sounds.authorDid))
       .where(
-        and(
-          or(
-            ilike(sounds.name, searchPattern),
-            ilike(sounds.artistName, searchPattern)
-          ),
-          eq(sounds.isPublic, true)
+        or(
+          ilike(sounds.title, searchPattern),
+          ilike(sounds.artist, searchPattern)
         )
       )
-      .orderBy(desc(sounds.usageCount))
+      .orderBy(desc(sounds.useCount))
       .limit(limit);
 
-    results.sounds = soundResults.map(({ sound, author }) => ({
-      uri: sound.uri,
-      name: sound.name,
-      artistName: sound.artistName,
-      coverArt: sound.coverArt,
+    results.sounds = soundResults.map((sound) => ({
+      id: sound.id,
+      title: sound.title,
+      artist: sound.artist,
+      coverUrl: sound.coverUrl,
       duration: sound.duration,
-      usageCount: sound.usageCount,
+      useCount: sound.useCount,
       audioUrl: sound.audioUrl,
-      author: author ? {
-        did: author.did,
-        handle: author.handle,
-        displayName: author.displayName,
-        avatar: author.avatar,
-      } : null,
     }));
   }
 
@@ -237,12 +224,13 @@ searchRouter.get('/io.exprsn.search.videos', optionalAuthMiddleware, async (c) =
   if (cursor) {
     try {
       const { createdAt, uri } = JSON.parse(Buffer.from(cursor, 'base64').toString());
+      const cursorDate = new Date(createdAt);
       conditions.push(
         or(
-          sql`${videos.createdAt} < ${new Date(createdAt)}`,
+          lt(videos.createdAt, cursorDate),
           and(
-            eq(videos.createdAt, new Date(createdAt)),
-            sql`${videos.uri} < ${uri}`
+            eq(videos.createdAt, cursorDate),
+            lt(videos.uri, uri)
           )
         )!
       );
@@ -385,22 +373,21 @@ searchRouter.get('/io.exprsn.search.sounds', optionalAuthMiddleware, async (c) =
 
   const conditions = [
     or(
-      ilike(sounds.name, searchPattern),
-      ilike(sounds.artistName, searchPattern)
+      ilike(sounds.title, searchPattern),
+      ilike(sounds.artist, searchPattern)
     ),
-    eq(sounds.isPublic, true),
   ];
 
   // Handle cursor pagination
   if (cursor) {
     try {
-      const { usageCount, uri } = JSON.parse(Buffer.from(cursor, 'base64').toString());
+      const { useCount, id } = JSON.parse(Buffer.from(cursor, 'base64').toString());
       conditions.push(
         or(
-          sql`${sounds.usageCount} < ${usageCount}`,
+          sql`${sounds.useCount} < ${useCount}`,
           and(
-            eq(sounds.usageCount, usageCount),
-            sql`${sounds.uri} < ${uri}`
+            eq(sounds.useCount, useCount),
+            sql`${sounds.id} < ${id}`
           )
         )!
       );
@@ -410,14 +397,10 @@ searchRouter.get('/io.exprsn.search.sounds', optionalAuthMiddleware, async (c) =
   }
 
   const soundResults = await db
-    .select({
-      sound: sounds,
-      author: users,
-    })
+    .select()
     .from(sounds)
-    .leftJoin(users, eq(users.did, sounds.authorDid))
     .where(and(...conditions))
-    .orderBy(desc(sounds.usageCount), desc(sounds.uri))
+    .orderBy(desc(sounds.useCount), desc(sounds.id))
     .limit(limit + 1);
 
   const hasMore = soundResults.length > limit;
@@ -427,27 +410,21 @@ searchRouter.get('/io.exprsn.search.sounds', optionalAuthMiddleware, async (c) =
   if (hasMore && results.length > 0) {
     const last = results[results.length - 1]!;
     nextCursor = Buffer.from(JSON.stringify({
-      usageCount: last.sound.usageCount,
-      uri: last.sound.uri,
+      useCount: last.useCount,
+      id: last.id,
     })).toString('base64');
   }
 
   return c.json({
     query,
-    sounds: results.map(({ sound, author }) => ({
-      uri: sound.uri,
-      name: sound.name,
-      artistName: sound.artistName,
-      coverArt: sound.coverArt,
+    sounds: results.map((sound) => ({
+      id: sound.id,
+      title: sound.title,
+      artist: sound.artist,
+      coverUrl: sound.coverUrl,
       duration: sound.duration,
-      usageCount: sound.usageCount,
+      useCount: sound.useCount,
       audioUrl: sound.audioUrl,
-      author: author ? {
-        did: author.did,
-        handle: author.handle,
-        displayName: author.displayName,
-        avatar: author.avatar,
-      } : null,
     })),
     cursor: nextCursor,
   });
@@ -542,31 +519,28 @@ searchRouter.get('/io.exprsn.search.typeahead', optionalAuthMiddleware, async (c
   if (type === 'all' || type === 'sounds') {
     const soundResults = await db
       .select({
-        name: sounds.name,
-        artistName: sounds.artistName,
-        coverArt: sounds.coverArt,
-        usageCount: sounds.usageCount,
+        title: sounds.title,
+        artist: sounds.artist,
+        coverUrl: sounds.coverUrl,
+        useCount: sounds.useCount,
       })
       .from(sounds)
       .where(
-        and(
-          or(
-            ilike(sounds.name, searchPattern),
-            ilike(sounds.artistName, searchPattern)
-          ),
-          eq(sounds.isPublic, true)
+        or(
+          ilike(sounds.title, searchPattern),
+          ilike(sounds.artist, searchPattern)
         )
       )
-      .orderBy(desc(sounds.usageCount))
+      .orderBy(desc(sounds.useCount))
       .limit(limit);
 
     suggestions.push(
       ...soundResults.map((sound) => ({
         type: 'sound' as const,
-        value: sound.name,
-        label: sound.name,
-        avatar: sound.coverArt || undefined,
-        meta: sound.artistName || undefined,
+        value: sound.title,
+        label: sound.title,
+        avatar: sound.coverUrl || undefined,
+        meta: sound.artist || undefined,
       }))
     );
   }

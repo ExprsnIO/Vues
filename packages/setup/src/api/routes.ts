@@ -16,6 +16,7 @@ import { initializeCertificates, getCertificateStatus } from '../steps/certifica
 import { createAdminUser, hasAdminUsers } from '../steps/admin.js';
 import { configureServices, getServicesConfig, AVAILABLE_SERVICES } from '../steps/services.js';
 import { finalizeSetup, getSystemInfo } from '../steps/finalize.js';
+import { updateEnvFile, readEnvFile, getSetupEnvSchema } from '../steps/env-writer.js';
 
 export const apiRoutes = new Hono();
 
@@ -134,6 +135,21 @@ apiRoutes.post('/services', async (c) => {
 
   if (result.success) {
     await completeStep('services');
+
+    // Persist service feature flags to .env
+    const envUpdates: Record<string, string> = {};
+    if (body.render_pipeline) envUpdates.RENDER_ENABLED = 'true';
+    if (body.federation) {
+      envUpdates.PDS_ENABLED = 'true';
+      envUpdates.RELAY_ENABLED = 'true';
+    }
+    if (body.spark_messaging) envUpdates.CHAT_ENABLED = 'true';
+    if (body.live_streaming) envUpdates.LIVESTREAM_ENABLED = 'true';
+    if (body.analytics) envUpdates.ANALYTICS_ENABLED = 'true';
+    if (body.ai_moderation) envUpdates.AI_MODERATION_ENABLED = 'true';
+    if (body.email_notifications) envUpdates.EMAIL_ENABLED = 'true';
+
+    await updateEnvFile(envUpdates);
   }
 
   return c.json(result);
@@ -154,7 +170,33 @@ apiRoutes.get('/services', async (c) => {
  * Step 5: Finalize setup
  */
 apiRoutes.post('/finalize', async (c) => {
-  const body = await c.req.json().catch(() => ({}));
+  type FinalizeBody = {
+    adminDid?: string;
+    branding?: {
+      name?: string;
+      domain?: string;
+      accentColor?: string;
+      tagline?: string;
+    };
+  };
+
+  const body: FinalizeBody = await c.req.json<FinalizeBody>().catch(() => ({}));
+
+  // Write branding and production safety vars before finalizing
+  if (body.branding) {
+    const branding = body.branding;
+    const brandingEnv: Record<string, string> = {};
+    if (branding.name) brandingEnv.PLATFORM_NAME = branding.name;
+    if (branding.domain) brandingEnv.APP_URL = `https://${branding.domain}`;
+    if (branding.accentColor) brandingEnv.PLATFORM_ACCENT_COLOR = branding.accentColor;
+    if (branding.tagline) brandingEnv.PLATFORM_TAGLINE = branding.tagline;
+
+    // Enforce production safety
+    brandingEnv.DEV_AUTH_BYPASS = 'false';
+    brandingEnv.NODE_ENV = 'production';
+
+    await updateEnvFile(brandingEnv);
+  }
 
   const result = await finalizeSetup(body);
 
@@ -167,6 +209,35 @@ apiRoutes.post('/finalize', async (c) => {
 apiRoutes.get('/system', async (c) => {
   const info = await getSystemInfo();
   return c.json(info);
+});
+
+/**
+ * Get environment variable schema with current values
+ */
+apiRoutes.get('/env', async (c) => {
+  const current = await readEnvFile();
+  const schema = getSetupEnvSchema();
+
+  // Return schema with current values (mask sensitive ones)
+  const variables = schema.map((s) => ({
+    ...s,
+    value: current.get(s.key) || s.default || '',
+    isSet: current.has(s.key),
+    displayValue:
+      s.sensitive && current.has(s.key) ? '••••••••' : (current.get(s.key) || ''),
+  }));
+
+  return c.json({ variables, path: process.cwd() + '/.env' });
+});
+
+/**
+ * Write environment variables to .env file
+ */
+apiRoutes.post('/env', async (c) => {
+  const body = await c.req.json<Record<string, string>>();
+
+  const result = await updateEnvFile(body);
+  return c.json(result);
 });
 
 /**

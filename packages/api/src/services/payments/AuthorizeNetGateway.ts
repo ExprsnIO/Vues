@@ -1,6 +1,6 @@
 import * as AuthorizeNet from 'authorizenet';
 import crypto from 'crypto';
-import type { TransactionStatus, CurrencyCode } from '@exprsn/shared/types';
+import type { TransactionStatus, CurrencyCode, CardBrand } from '@exprsn/shared/types';
 import {
   BasePaymentGateway,
   type GatewayCredentials,
@@ -400,8 +400,94 @@ export class AuthorizeNetGateway extends BasePaymentGateway {
     };
   }
 
-  async listPaymentMethods(_customerId: string): Promise<PaymentMethodResult[]> {
-    return [];
+  async listPaymentMethods(customerId: string): Promise<PaymentMethodResult[]> {
+    return new Promise((resolve) => {
+      try {
+        // Use Authorize.Net Customer Information Manager (CIM) to get payment profiles
+        const getRequest = new ApiContracts.GetCustomerProfileRequest();
+        getRequest.setMerchantAuthentication(this.getMerchantAuth());
+        getRequest.setCustomerProfileId(customerId);
+
+        const ctrl = new ApiControllers.GetCustomerProfileController(
+          getRequest.getJSON()
+        );
+        ctrl.setEnvironment(this.environment);
+
+        ctrl.execute(() => {
+          const response = ctrl.getResponse();
+
+          if (
+            response.getMessages().getResultCode() ===
+            ApiContracts.MessageTypeEnum.OK
+          ) {
+            const profile = response.getProfile();
+            const paymentProfiles = profile?.getPaymentProfiles?.() || [];
+
+            const results: PaymentMethodResult[] = paymentProfiles.map(
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              (paymentProfile: any): PaymentMethodResult => {
+                const payment = paymentProfile.getPayment?.();
+                const creditCard = payment?.getCreditCard?.();
+                const bankAccount = payment?.getBankAccount?.();
+
+                if (creditCard) {
+                  const cardNumber = creditCard.getCardNumber?.() || '';
+                  const expirationDate = creditCard.getExpirationDate?.() || '';
+                  const [expMonth, expYear] = expirationDate.includes('/')
+                    ? expirationDate.split('/')
+                    : [expirationDate.slice(0, 2), expirationDate.slice(2)];
+
+                  return {
+                    success: true,
+                    paymentMethodId: paymentProfile.getCustomerPaymentProfileId?.() || '',
+                    type: 'card' as const,
+                    last4: cardNumber.slice(-4),
+                    brand: this.detectCardBrand(cardNumber),
+                    expiryMonth: parseInt(expMonth, 10) || undefined,
+                    expiryYear: parseInt(expYear.length === 2 ? `20${expYear}` : expYear, 10) || undefined,
+                  };
+                } else if (bankAccount) {
+                  return {
+                    success: true,
+                    paymentMethodId: paymentProfile.getCustomerPaymentProfileId?.() || '',
+                    type: 'bank_account' as const,
+                    last4: bankAccount.getAccountNumber?.()?.slice(-4),
+                  };
+                }
+
+                return {
+                  success: true,
+                  paymentMethodId: paymentProfile.getCustomerPaymentProfileId?.() || '',
+                  type: 'card' as const,
+                };
+              }
+            );
+
+            resolve(results);
+          } else {
+            const errorMessage = response.getMessages().getMessage()[0]?.getText();
+            console.error('Authorize.Net listPaymentMethods failed:', errorMessage);
+            resolve([]);
+          }
+        });
+      } catch (error) {
+        console.error('Authorize.Net listPaymentMethods error:', error);
+        resolve([]);
+      }
+    });
+  }
+
+  /**
+   * Detect card brand from masked card number
+   */
+  private detectCardBrand(cardNumber: string): CardBrand | undefined {
+    // Card number may be masked like XXXX1234, so use prefix patterns
+    const firstChar = cardNumber.charAt(0);
+    if (firstChar === '4') return 'visa';
+    if (firstChar === '5') return 'mastercard';
+    if (firstChar === '3') return 'amex';
+    if (firstChar === '6') return 'discover';
+    return undefined;
   }
 
   async processRefund(refundData: RefundData): Promise<RefundResult> {
@@ -692,5 +778,122 @@ export class AuthorizeNetGateway extends BasePaymentGateway {
   async healthCheck(): Promise<{ healthy: boolean; message?: string }> {
     // Try to get merchant details as a health check
     return { healthy: true };
+  }
+
+  /**
+   * Create a payout using Authorize.Net
+   * Note: Authorize.Net doesn't have a native payouts API like Stripe or PayPal.
+   * For ACH payouts, you need to use their eCheck feature which requires:
+   * - Merchant account setup for ACH
+   * - Compliance with NACHA rules
+   *
+   * This implementation uses refund transactions to existing payment profiles,
+   * which can be used for issuing credits to customers.
+   */
+  async createPayout(
+    amount: number,
+    _currency: CurrencyCode,
+    destination: string, // JSON with customerProfileId and paymentProfileId
+    _metadata?: Record<string, unknown>
+  ): Promise<{
+    success: boolean;
+    payoutId: string;
+    status: 'pending' | 'in_transit' | 'paid' | 'failed';
+    arrivalDate?: Date;
+    errorMessage?: string;
+  }> {
+    return new Promise((resolve) => {
+      try {
+        // Parse destination - expected format:
+        // { customerProfileId: '...', paymentProfileId: '...' }
+        let destInfo: {
+          customerProfileId?: string;
+          paymentProfileId?: string;
+          originalTransactionId?: string;
+        };
+
+        try {
+          destInfo = typeof destination === 'string' ? JSON.parse(destination) : destination;
+        } catch {
+          resolve({
+            success: false,
+            payoutId: '',
+            status: 'failed',
+            errorMessage: 'Invalid destination format. Expected JSON with customerProfileId and paymentProfileId, or originalTransactionId.',
+          });
+          return;
+        }
+
+        // For Authorize.Net, we use refund transactions
+        // This requires either an original transaction ID or a customer payment profile
+        if (destInfo.originalTransactionId) {
+          // Refund to original transaction
+          const merchantAuth = this.getMerchantAuth();
+
+          const transactionRequest = new ApiContracts.TransactionRequestType();
+          transactionRequest.setTransactionType(ApiContracts.TransactionTypeEnum.REFUNDTRANSACTION);
+          transactionRequest.setAmount((amount / 100).toFixed(2));
+          transactionRequest.setRefTransId(destInfo.originalTransactionId);
+
+          const createRequest = new ApiContracts.CreateTransactionRequest();
+          createRequest.setMerchantAuthentication(merchantAuth);
+          createRequest.setTransactionRequest(transactionRequest);
+
+          const ctrl = new ApiControllers.CreateTransactionController(createRequest.getJSON());
+          ctrl.setEnvironment(this.environment);
+
+          ctrl.execute(() => {
+            const response = ctrl.getResponse();
+            const transactionResponse = response.getTransactionResponse();
+
+            if (
+              response.getMessages().getResultCode() === ApiContracts.MessageTypeEnum.OK &&
+              transactionResponse
+            ) {
+              const transId = transactionResponse.getTransId();
+
+              resolve({
+                success: true,
+                payoutId: transId || `anet_payout_${Date.now()}`,
+                status: 'in_transit',
+                arrivalDate: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000), // ~3 days
+              });
+            } else {
+              let errorMessage = 'Payout failed';
+              const errors = transactionResponse?.getErrors?.();
+              if (errors?.[0]) {
+                errorMessage = errors[0].getErrorText();
+              } else {
+                const msg = response.getMessages().getMessage()[0];
+                if (msg) errorMessage = msg.getText();
+              }
+
+              resolve({
+                success: false,
+                payoutId: '',
+                status: 'failed',
+                errorMessage,
+              });
+            }
+          });
+        } else {
+          // For payouts without original transaction, Authorize.Net requires special setup
+          resolve({
+            success: false,
+            payoutId: '',
+            status: 'failed',
+            errorMessage: 'Authorize.Net payouts require an originalTransactionId for refund-based credits. For ACH payouts, please use PayPal or Stripe.',
+          });
+        }
+      } catch (error) {
+        const authError = error as Error;
+        resolve({
+          success: false,
+          payoutId: '',
+          status: 'failed',
+          errorMessage: authError.message,
+        });
+      }
+    });
   }
 }

@@ -128,9 +128,11 @@ federationRouter.get('/io.exprsn.sync.getRecords', async (c) => {
 /**
  * POST io.exprsn.sync.pushRecords
  * Receive records from remote servers (federation push)
+ *
+ * SECURITY: Requires service authentication to prevent unauthorized data injection.
+ * Set FEDERATION_REQUIRE_AUTH=false to disable (not recommended for production).
  */
 federationRouter.post('/io.exprsn.sync.pushRecords', async (c) => {
-  // Verify service authentication
   const auth = getServiceAuth();
   const headers: Record<string, string> = {};
   for (const [key, value] of Object.entries(c.req.header())) {
@@ -146,8 +148,25 @@ federationRouter.post('/io.exprsn.sync.pushRecords', async (c) => {
     return c.json({ error: 'InvalidRequest', message: 'Invalid JSON body' }, 400);
   }
 
-  // Optional: Verify service auth (if headers present)
-  if (headers['x-exprsn-certificate']) {
+  // Verify service authentication
+  // SECURITY: Auth is required by default to prevent unauthorized data injection
+  const requireAuth = process.env.FEDERATION_REQUIRE_AUTH !== 'false';
+
+  if (requireAuth) {
+    // Auth is required - must have valid certificate
+    if (!headers['x-exprsn-certificate']) {
+      return c.json(
+        { error: 'Unauthorized', message: 'Service authentication required for federation push' },
+        401
+      );
+    }
+
+    const authResult = await auth.verifyRequest(headers, 'POST', c.req.path, body);
+    if (!authResult) {
+      return c.json({ error: 'Unauthorized', message: 'Service authentication failed' }, 401);
+    }
+  } else if (headers['x-exprsn-certificate']) {
+    // Auth not required but headers present - still verify them
     const authResult = await auth.verifyRequest(headers, 'POST', c.req.path, body);
     if (!authResult) {
       return c.json({ error: 'Unauthorized', message: 'Service authentication failed' }, 401);
@@ -784,6 +803,288 @@ federationRouter.post(
     } catch (error) {
       console.error('Manual blob sync error:', error);
       return c.json({ error: 'InternalError', message: 'Failed to sync blob' }, 500);
+    }
+  }
+);
+
+// ===========================================
+// Blob Sync Endpoints
+// ===========================================
+
+/**
+ * GET io.exprsn.blob.getUrl
+ * Get a CDN/presigned URL for a blob
+ */
+federationRouter.get('/io.exprsn.blob.getUrl', async (c) => {
+  const did = c.req.query('did');
+  const cid = c.req.query('cid');
+
+  if (!did || !cid) {
+    return c.json({ error: 'InvalidRequest', message: 'Missing did or cid' }, 400);
+  }
+
+  try {
+    const blobSync = createBlobSync(db as PostgresJsDatabase<typeof schema>);
+    const url = await blobSync.getBlobUrl(did, cid);
+
+    if (!url) {
+      return c.json({ error: 'NotFound', message: 'Blob not found' }, 404);
+    }
+
+    return c.json({ url, did, cid });
+  } catch (error) {
+    console.error('Get blob URL error:', error);
+    return c.json({ error: 'InternalError', message: 'Failed to get blob URL' }, 500);
+  }
+});
+
+/**
+ * GET io.exprsn.blob.getMetadata
+ * Get metadata for a blob (size, mimeType, etc.)
+ */
+federationRouter.get('/io.exprsn.blob.getMetadata', async (c) => {
+  const did = c.req.query('did');
+  const cid = c.req.query('cid');
+
+  if (!did || !cid) {
+    return c.json({ error: 'InvalidRequest', message: 'Missing did or cid' }, 400);
+  }
+
+  try {
+    const blobSync = createBlobSync(db as PostgresJsDatabase<typeof schema>);
+    const metadata = await blobSync.getBlobMetadata(did, cid);
+
+    if (!metadata) {
+      return c.json({ error: 'NotFound', message: 'Blob not found' }, 404);
+    }
+
+    return c.json(metadata);
+  } catch (error) {
+    console.error('Get blob metadata error:', error);
+    return c.json({ error: 'InternalError', message: 'Failed to get blob metadata' }, 500);
+  }
+});
+
+/**
+ * GET io.exprsn.blob.listForDid
+ * List all blobs for a DID
+ */
+federationRouter.get('/io.exprsn.blob.listForDid', async (c) => {
+  const did = c.req.query('did');
+  const limit = Math.min(parseInt(c.req.query('limit') || '50', 10), 200);
+  const cursor = c.req.query('cursor');
+
+  if (!did) {
+    return c.json({ error: 'InvalidRequest', message: 'Missing did' }, 400);
+  }
+
+  try {
+    const blobSync = createBlobSync(db as PostgresJsDatabase<typeof schema>);
+    const result = await blobSync.listBlobsForDid(did, { limit, cursor });
+
+    return c.json(result);
+  } catch (error) {
+    console.error('List blobs error:', error);
+    return c.json({ error: 'InternalError', message: 'Failed to list blobs' }, 500);
+  }
+});
+
+/**
+ * GET io.exprsn.blob.getStorageQuota
+ * Get storage quota information for a DID
+ */
+federationRouter.get('/io.exprsn.blob.getStorageQuota', async (c) => {
+  const did = c.req.query('did');
+
+  if (!did) {
+    return c.json({ error: 'InvalidRequest', message: 'Missing did' }, 400);
+  }
+
+  try {
+    const blobSync = createBlobSync(db as PostgresJsDatabase<typeof schema>);
+    const quota = await blobSync.checkStorageQuota(did, 0);
+
+    return c.json({
+      did,
+      currentUsage: quota.currentUsage,
+      quota: quota.quota,
+      remaining: quota.remaining,
+      percentUsed: quota.quota > 0 ? Math.round((quota.currentUsage / quota.quota) * 100) : 0,
+    });
+  } catch (error) {
+    console.error('Get storage quota error:', error);
+    return c.json({ error: 'InternalError', message: 'Failed to get storage quota' }, 500);
+  }
+});
+
+/**
+ * GET io.exprsn.admin.blobSync.stats
+ * Get blob sync statistics (admin only)
+ */
+federationRouter.get(
+  '/io.exprsn.admin.blobSync.stats',
+  adminAuthMiddleware,
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_VIEW),
+  async (c) => {
+    try {
+      const blobSync = createBlobSync(db as PostgresJsDatabase<typeof schema>);
+      const stats = await blobSync.getStats();
+
+      return c.json(stats);
+    } catch (error) {
+      console.error('Get blob sync stats error:', error);
+      return c.json({ error: 'InternalError', message: 'Failed to get blob sync stats' }, 500);
+    }
+  }
+);
+
+/**
+ * POST io.exprsn.admin.blobSync.runGarbageCollection
+ * Run garbage collection for orphaned blobs (admin only)
+ */
+federationRouter.post(
+  '/io.exprsn.admin.blobSync.runGarbageCollection',
+  adminAuthMiddleware,
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_EDIT),
+  async (c) => {
+    let body: {
+      did?: string;
+      referencedCids?: string[];
+      maxAgeMs?: number;
+      dryRun?: boolean;
+    };
+    try {
+      body = await c.req.json();
+    } catch {
+      body = {};
+    }
+
+    try {
+      const blobSync = createBlobSync(db as PostgresJsDatabase<typeof schema>);
+
+      if (body.did && body.referencedCids) {
+        // Cleanup orphaned blobs for a specific DID
+        const result = await blobSync.cleanupOrphanedBlobs(body.did, body.referencedCids, body.dryRun);
+        return c.json({
+          type: 'orphaned',
+          did: body.did,
+          ...result,
+        });
+      } else if (body.maxAgeMs) {
+        // Cleanup old blobs based on age
+        const result = await blobSync.cleanupOldBlobs(body.maxAgeMs, body.dryRun);
+        return c.json({
+          type: 'old',
+          maxAgeMs: body.maxAgeMs,
+          ...result,
+        });
+      } else {
+        return c.json({
+          error: 'InvalidRequest',
+          message: 'Must provide either (did + referencedCids) or maxAgeMs',
+        }, 400);
+      }
+    } catch (error) {
+      console.error('Garbage collection error:', error);
+      return c.json({ error: 'InternalError', message: 'Failed to run garbage collection' }, 500);
+    }
+  }
+);
+
+/**
+ * POST io.exprsn.admin.blobSync.setQuota
+ * Set storage quota for a DID (admin only)
+ */
+federationRouter.post(
+  '/io.exprsn.admin.blobSync.setQuota',
+  adminAuthMiddleware,
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_EDIT),
+  async (c) => {
+    const body = await c.req.json<{
+      did: string;
+      quotaBytes: number;
+    }>();
+
+    if (!body.did || typeof body.quotaBytes !== 'number') {
+      return c.json({ error: 'InvalidRequest', message: 'Missing did or quotaBytes' }, 400);
+    }
+
+    if (body.quotaBytes < 0) {
+      return c.json({ error: 'InvalidRequest', message: 'quotaBytes must be non-negative' }, 400);
+    }
+
+    try {
+      const blobSync = createBlobSync(db as PostgresJsDatabase<typeof schema>);
+      await blobSync.setStorageQuota(body.did, body.quotaBytes);
+
+      return c.json({
+        success: true,
+        did: body.did,
+        quotaBytes: body.quotaBytes,
+      });
+    } catch (error) {
+      console.error('Set quota error:', error);
+      return c.json({ error: 'InternalError', message: 'Failed to set quota' }, 500);
+    }
+  }
+);
+
+/**
+ * POST io.exprsn.admin.blobSync.verifyBlob
+ * Verify a blob's CID matches its content (admin only)
+ */
+federationRouter.post(
+  '/io.exprsn.admin.blobSync.verifyBlob',
+  adminAuthMiddleware,
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_VIEW),
+  async (c) => {
+    const body = await c.req.json<{
+      did: string;
+      cid: string;
+    }>();
+
+    if (!body.did || !body.cid) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing did or cid' }, 400);
+    }
+
+    try {
+      const blobSync = createBlobSync(db as PostgresJsDatabase<typeof schema>);
+      const result = await blobSync.verifyStoredBlob(body.did, body.cid);
+
+      return c.json(result);
+    } catch (error) {
+      console.error('Verify blob error:', error);
+      return c.json({ error: 'InternalError', message: 'Failed to verify blob' }, 500);
+    }
+  }
+);
+
+/**
+ * GET io.exprsn.admin.blobSync.getRateLimitStatus
+ * Get rate limit status for a DID (admin only)
+ */
+federationRouter.get(
+  '/io.exprsn.admin.blobSync.getRateLimitStatus',
+  adminAuthMiddleware,
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_VIEW),
+  async (c) => {
+    const did = c.req.query('did');
+
+    if (!did) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing did' }, 400);
+    }
+
+    try {
+      const blobSync = createBlobSync(db as PostgresJsDatabase<typeof schema>);
+      const status = await blobSync.getRateLimitStatus(did);
+
+      return c.json({
+        did,
+        ...status,
+      });
+    } catch (error) {
+      console.error('Get rate limit status error:', error);
+      return c.json({ error: 'InternalError', message: 'Failed to get rate limit status' }, 500);
     }
   }
 );

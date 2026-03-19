@@ -9,6 +9,10 @@ import { Firehose } from './firehose.js';
 import type { FirehoseConfig, FirehoseFrame } from './firehose.js';
 import { Backfill } from './backfill.js';
 import type { BackfillConfig } from './backfill.js';
+import { WsFirehose } from './ws-firehose.js';
+import { JetstreamServer } from './jetstream.js';
+import { RelayStats } from './stats.js';
+import type { StatsSnapshot } from './stats.js';
 
 /**
  * Relay service configuration
@@ -19,11 +23,24 @@ export interface RelayConfig {
   heartbeatIntervalMs?: number;
   maxBackfillEvents?: number;
   maxStoredEvents?: number;
+  /** Enable Socket.IO firehose (default: true) */
+  enableSocketIO?: boolean;
+  /** Enable raw WebSocket CBOR firehose (default: true) */
+  enableWebSocket?: boolean;
+  /** Enable Jetstream JSON WebSocket (default: true) */
+  enableJetstream?: boolean;
+  /** Max raw WebSocket subscribers */
+  maxWsSubscribers?: number;
+  /** Max Jetstream subscribers */
+  maxJetstreamSubscribers?: number;
+  /** Verify commit signatures before relaying */
+  verifySignatures?: boolean;
 }
 
 /**
  * Relay service for AT Protocol federation
  * Implements event sequencing, cursor management, and firehose streaming
+ * across three protocols: Socket.IO, raw WebSocket (CBOR), and Jetstream (JSON).
  */
 export class RelayService {
   private redis: Redis;
@@ -31,6 +48,9 @@ export class RelayService {
   private cursorStore: CursorStore;
   private backfill: Backfill;
   private firehose: Firehose;
+  private wsFirehose: WsFirehose | null = null;
+  private jetstreamServer: JetstreamServer | null = null;
+  private relayStats: RelayStats;
   private config: RelayConfig;
   private initialized = false;
 
@@ -66,6 +86,31 @@ export class RelayService {
       heartbeatIntervalMs: config.heartbeatIntervalMs || 30000,
       maxBackfillEvents: config.maxBackfillEvents || 10000,
     });
+
+    this.relayStats = new RelayStats();
+
+    // Initialize raw WebSocket firehose if enabled
+    if (config.enableWebSocket !== false) {
+      this.wsFirehose = new WsFirehose({
+        sequencer: this.sequencer,
+        cursorStore: this.cursorStore,
+        backfill: this.backfill,
+        stats: this.relayStats,
+        heartbeatIntervalMs: config.heartbeatIntervalMs || 30000,
+        maxSubscribers: config.maxWsSubscribers || 1000,
+      });
+    }
+
+    // Initialize Jetstream server if enabled
+    if (config.enableJetstream !== false) {
+      this.jetstreamServer = new JetstreamServer({
+        sequencer: this.sequencer,
+        cursorStore: this.cursorStore,
+        backfill: this.backfill,
+        stats: this.relayStats,
+        maxSubscribers: config.maxJetstreamSubscribers || 5000,
+      });
+    }
   }
 
   /**
@@ -74,21 +119,57 @@ export class RelayService {
   initialize(io: SocketIOServer): void {
     if (this.initialized) return;
 
-    this.firehose.initialize(io);
+    if (this.config.enableSocketIO !== false) {
+      this.firehose.initialize(io);
+    }
     this.initialized = true;
   }
 
   /**
-   * Emit a commit event to the firehose
+   * Emit a commit event to all enabled firehose protocols
    */
   async emitCommit(did: string, commit: CommitEvent): Promise<RelayEvent> {
     // Sequence the event
     const event = await this.sequencer.sequenceEvent(did, commit);
 
-    // Broadcast to subscribers
-    await this.firehose.broadcastEvent(event);
+    // Broadcast to Socket.IO subscribers
+    if (this.config.enableSocketIO !== false) {
+      await this.firehose.broadcastEvent(event);
+      this.relayStats.recordEvent('socketio', 0); // Size unknown for Socket.IO
+    }
+
+    // Broadcast to raw WebSocket subscribers
+    if (this.wsFirehose) {
+      this.wsFirehose.broadcastEvent(event);
+    }
+
+    // Broadcast to Jetstream subscribers
+    if (this.jetstreamServer) {
+      this.jetstreamServer.broadcastEvent(event);
+    }
 
     return event;
+  }
+
+  /**
+   * Get the raw WebSocket firehose for upgrade handler wiring
+   */
+  getWsFirehose(): WsFirehose | null {
+    return this.wsFirehose;
+  }
+
+  /**
+   * Get the Jetstream server for upgrade handler wiring
+   */
+  getJetstreamServer(): JetstreamServer | null {
+    return this.jetstreamServer;
+  }
+
+  /**
+   * Get per-protocol stats snapshot
+   */
+  getStats(): StatsSnapshot {
+    return this.relayStats.getSnapshot();
   }
 
   /**
@@ -120,10 +201,13 @@ export class RelayService {
   }
 
   /**
-   * Get connected client count
+   * Get connected client count across all protocols
    */
   getClientCount(): number {
-    return this.firehose.getClientCount();
+    let count = this.firehose.getClientCount();
+    if (this.wsFirehose) count += this.wsFirehose.getClientCount();
+    if (this.jetstreamServer) count += this.jetstreamServer.getClientCount();
+    return count;
   }
 
   /**
@@ -138,11 +222,48 @@ export class RelayService {
   }
 
   /**
+   * Disconnect a subscriber by ID across all protocols
+   */
+  disconnectSubscriber(id: string): void {
+    if (this.wsFirehose) this.wsFirehose.disconnectClient(id);
+    if (this.jetstreamServer) this.jetstreamServer.disconnectClient(id);
+    // Socket.IO clients would be disconnected through the firehose
+  }
+
+  /**
+   * Get protocol configuration for admin display
+   */
+  getProtocolConfig(): {
+    socketio: { enabled: boolean };
+    websocket: { enabled: boolean; maxSubscribers: number };
+    jetstream: { enabled: boolean; maxSubscribers: number };
+    verifySignatures: boolean;
+    maxBackfillEvents: number;
+  } {
+    return {
+      socketio: { enabled: this.config.enableSocketIO !== false },
+      websocket: {
+        enabled: this.config.enableWebSocket !== false,
+        maxSubscribers: this.config.maxWsSubscribers || 1000,
+      },
+      jetstream: {
+        enabled: this.config.enableJetstream !== false,
+        maxSubscribers: this.config.maxJetstreamSubscribers || 5000,
+      },
+      verifySignatures: this.config.verifySignatures || false,
+      maxBackfillEvents: this.config.maxBackfillEvents || 10000,
+    };
+  }
+
+  /**
    * Clean up resources
    */
   async shutdown(): Promise<void> {
     this.firehose.stopHeartbeat();
     await this.firehose.disconnectAll();
+
+    if (this.wsFirehose) this.wsFirehose.disconnectAll();
+    if (this.jetstreamServer) this.jetstreamServer.disconnectAll();
 
     if (typeof this.config.redis === 'string') {
       // Only disconnect if we created the connection
@@ -160,6 +281,7 @@ export class RelayService {
     router.get('/relay/status', async (c) => {
       const summary = await this.getBackfillSummary();
       const subscribers = await this.listSubscribers();
+      const stats = this.getStats();
 
       return c.json({
         status: 'ok',
@@ -169,6 +291,23 @@ export class RelayService {
           active: subscribers.filter((s) => s.status === 'active').length,
         },
         connectedClients: this.getClientCount(),
+        protocols: {
+          socketio: {
+            enabled: this.config.enableSocketIO !== false,
+            clients: this.firehose.getClientCount(),
+            stats: stats.socketio,
+          },
+          websocket: {
+            enabled: this.config.enableWebSocket !== false,
+            clients: this.wsFirehose?.getClientCount() || 0,
+            stats: stats.websocket,
+          },
+          jetstream: {
+            enabled: this.config.enableJetstream !== false,
+            clients: this.jetstreamServer?.getClientCount() || 0,
+            stats: stats.jetstream,
+          },
+        },
       });
     });
 
@@ -194,6 +333,24 @@ export class RelayService {
 // Export components
 export { Sequencer, CursorStore, Firehose, Backfill };
 
+// Export new protocol servers
+export { WsFirehose } from './ws-firehose.js';
+export { JetstreamServer } from './jetstream.js';
+export { RelayStats } from './stats.js';
+
+// Export frame encoder
+export {
+  encodeFrame,
+  encodeErrorFrame,
+  encodeCommitFrame,
+  encodeInfoFrame,
+  encodeTombstoneFrame,
+  encodeHandleFrame,
+} from './frame-encoder.js';
+
+// Export commit verifier
+export { verifyCommitSignature } from './commit-verifier.js';
+
 // Export external relay client
 export {
   ExternalRelayClient,
@@ -207,6 +364,7 @@ export {
   createBlock,
   buildCommitCar,
   buildDeleteCar,
+  buildMstProof,
 } from './car-builder.js';
 
 // Export types
@@ -217,6 +375,7 @@ export type {
   FirehoseFrame,
   FirehoseConfig,
   BackfillConfig,
+  StatsSnapshot,
 };
 
 export type {

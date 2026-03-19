@@ -19,6 +19,8 @@ export default function SSOOverviewPage() {
   const router = useRouter();
   const domainId = params.domainId as string;
   const { setSelectedDomain, selectedDomain } = useAdminDomain();
+  const isDev = process.env.NODE_ENV !== 'production';
+  const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3002';
 
   useEffect(() => {
     if (domainId) {
@@ -108,7 +110,7 @@ export default function SSOOverviewPage() {
       </div>
 
       {/* Quick Actions */}
-      <div className="grid grid-cols-3 gap-4">
+      <div className="grid grid-cols-4 gap-4">
         <button
           onClick={() => router.push(`/admin/d/${domainId}/settings/sso/providers`)}
           className="p-4 bg-surface hover:bg-surface-hover border border-border rounded-xl text-left transition-colors group"
@@ -159,7 +161,67 @@ export default function SSOOverviewPage() {
           </div>
           <p className="text-xs text-text-muted">Configure MFA and session rules</p>
         </button>
+
+        <button
+          onClick={() => router.push(`/admin/d/${domainId}/settings/sso/exprsn`)}
+          className="p-4 bg-surface hover:bg-surface-hover border border-border rounded-xl text-left transition-colors group"
+        >
+          <div className="flex items-center gap-3 mb-2">
+            <div className="p-2 bg-accent/10 rounded-lg">
+              <svg className="w-5 h-5 text-accent" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M12 1L3 5v6c0 5.25 3.75 10.15 9 11.35C17.25 21.15 21 16.25 21 11V5l-9-4zm-1 13l-3-3 1.41-1.41L11 11.17l4.59-4.58L17 8l-6 6z" />
+              </svg>
+            </div>
+            <span className="text-sm font-medium text-text-primary group-hover:text-accent">
+              Exprsn SSO
+            </span>
+          </div>
+          <p className="text-xs text-text-muted">Connect Exprsn instances with scopes &amp; roles</p>
+        </button>
       </div>
+
+      {/* Development Mode Default OAuth Info */}
+      {isDev && (
+        <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-4">
+          <div className="flex items-start gap-3">
+            <svg className="w-5 h-5 text-blue-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <div className="flex-1">
+              <h3 className="text-sm font-semibold text-blue-400">Development OAuth Configuration</h3>
+              <div className="mt-2 space-y-2 text-sm text-blue-300">
+                <div>
+                  <span className="font-medium">OAuth Endpoint:</span>{' '}
+                  <code className="px-1.5 py-0.5 bg-blue-500/20 rounded font-mono text-xs">
+                    {API_BASE}/oauth
+                  </code>
+                </div>
+                <div>
+                  <span className="font-medium">Authorization:</span>{' '}
+                  <code className="px-1.5 py-0.5 bg-blue-500/20 rounded font-mono text-xs">
+                    {API_BASE}/oauth/authorize
+                  </code>
+                </div>
+                <div>
+                  <span className="font-medium">Token:</span>{' '}
+                  <code className="px-1.5 py-0.5 bg-blue-500/20 rounded font-mono text-xs">
+                    {API_BASE}/oauth/token
+                  </code>
+                </div>
+                <div>
+                  <span className="font-medium">OIDC Discovery:</span>{' '}
+                  <code className="px-1.5 py-0.5 bg-blue-500/20 rounded font-mono text-xs">
+                    {API_BASE}/.well-known/openid-configuration
+                  </code>
+                </div>
+              </div>
+              <p className="text-xs text-blue-300/70 mt-3">
+                Use these endpoints when configuring external OAuth clients to authenticate with your local development server.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Active Providers */}
       <div>

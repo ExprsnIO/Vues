@@ -1,6 +1,6 @@
 import paypal from '@paypal/checkout-server-sdk';
 import crypto from 'crypto';
-import type { TransactionStatus, CurrencyCode } from '@exprsn/shared/types';
+import type { TransactionStatus, CurrencyCode, CardBrand } from '@exprsn/shared/types';
 import {
   BasePaymentGateway,
   type GatewayCredentials,
@@ -290,60 +290,403 @@ export class PayPalGateway extends BasePaymentGateway {
     }
   }
 
-  // PayPal doesn't have traditional customer management like Stripe
+  /**
+   * Create a customer in PayPal Vault
+   * PayPal uses merchant_customer_id for customer identification
+   */
   async createCustomer(customerData: CustomerData): Promise<CustomerResult> {
+    try {
+      // PayPal doesn't have a separate customer creation endpoint
+      // Customers are created implicitly when vaulting payment methods
+      // We generate a merchant_customer_id that can be used to link payment tokens
+      const merchantCustomerId = `cust_${crypto.randomUUID().replace(/-/g, '').substring(0, 22)}`;
+
+      return {
+        success: true,
+        customerId: merchantCustomerId,
+        email: customerData.email,
+        name: customerData.name,
+        metadata: {
+          merchantCustomerId,
+          note: 'PayPal customer ID for vault operations. Payment tokens will be linked to this ID.',
+        },
+      };
+    } catch (error) {
+      const err = error as Error;
+      return {
+        success: false,
+        customerId: '',
+        errorMessage: err.message,
+      };
+    }
+  }
+
+  /**
+   * Get customer info from PayPal
+   * Retrieves payment tokens associated with customer_id
+   */
+  async getCustomer(customerId: string): Promise<CustomerResult> {
+    try {
+      const accessToken = await this.getAccessToken();
+      const baseUrl = this.testMode
+        ? 'https://api-m.sandbox.paypal.com'
+        : 'https://api-m.paypal.com';
+
+      // List payment tokens for this customer
+      const response = await fetch(
+        `${baseUrl}/v3/vault/payment-tokens?customer_id=${encodeURIComponent(customerId)}`,
+        {
+          method: 'GET',
+          headers: {
+            'Authorization': `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
+        }
+      );
+
+      if (!response.ok) {
+        if (response.status === 404) {
+          return {
+            success: false,
+            customerId,
+            errorMessage: 'Customer not found or has no vaulted payment methods',
+          };
+        }
+        throw new Error(`PayPal API error: ${response.status}`);
+      }
+
+      const data = await response.json() as {
+        customer?: { id: string; merchant_customer_id?: string };
+        payment_tokens?: Array<{ id: string }>;
+        total_items?: number;
+      };
+
+      return {
+        success: true,
+        customerId,
+        metadata: {
+          paymentTokenCount: data.payment_tokens?.length || 0,
+          totalItems: data.total_items || 0,
+        },
+      };
+    } catch (error) {
+      const err = error as Error;
+      return {
+        success: false,
+        customerId,
+        errorMessage: err.message,
+      };
+    }
+  }
+
+  /**
+   * Update customer - PayPal doesn't support direct customer updates
+   * Customer data is managed through payment token operations
+   */
+  async updateCustomer(customerId: string, updates: Partial<CustomerData>): Promise<CustomerResult> {
+    // PayPal doesn't have customer profile updates
+    // Return success with note about limitations
     return {
       success: true,
-      customerId: `paypal_${Date.now()}`, // Placeholder ID
-      email: customerData.email,
-      name: customerData.name,
+      customerId,
+      email: updates.email,
+      name: updates.name,
       metadata: {
-        note: 'PayPal does not have a traditional customer object. Payer info is captured during checkout.',
+        note: 'PayPal customer profiles are managed through payment tokens. Updates to email/name should be handled in your application database.',
       },
     };
   }
 
-  async getCustomer(_customerId: string): Promise<CustomerResult> {
-    return {
-      success: false,
-      customerId: '',
-      errorMessage: 'PayPal does not support direct customer retrieval',
-    };
+  /**
+   * Delete customer - Deletes all vaulted payment tokens for customer
+   */
+  async deleteCustomer(customerId: string): Promise<{ success: boolean; errorMessage?: string }> {
+    try {
+      const accessToken = await this.getAccessToken();
+      const baseUrl = this.testMode
+        ? 'https://api-m.sandbox.paypal.com'
+        : 'https://api-m.paypal.com';
+
+      // First, list all payment tokens for this customer
+      const listResponse = await fetch(
+        `${baseUrl}/v3/vault/payment-tokens?customer_id=${encodeURIComponent(customerId)}`,
+        {
+          method: 'GET',
+          headers: {
+            'Authorization': `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
+        }
+      );
+
+      if (!listResponse.ok) {
+        if (listResponse.status === 404) {
+          return { success: true }; // No tokens to delete
+        }
+        throw new Error(`Failed to list payment tokens: ${listResponse.status}`);
+      }
+
+      const data = await listResponse.json() as {
+        payment_tokens?: Array<{ id: string }>;
+      };
+
+      // Delete each payment token
+      const tokens = data.payment_tokens || [];
+      for (const token of tokens) {
+        const deleteResponse = await fetch(
+          `${baseUrl}/v3/vault/payment-tokens/${token.id}`,
+          {
+            method: 'DELETE',
+            headers: {
+              'Authorization': `Bearer ${accessToken}`,
+              'Content-Type': 'application/json',
+            },
+          }
+        );
+
+        if (!deleteResponse.ok && deleteResponse.status !== 404) {
+          console.warn(`Failed to delete PayPal token ${token.id}: ${deleteResponse.status}`);
+        }
+      }
+
+      return { success: true };
+    } catch (error) {
+      const err = error as Error;
+      return {
+        success: false,
+        errorMessage: err.message,
+      };
+    }
   }
 
-  async updateCustomer(_customerId: string, _updates: Partial<CustomerData>): Promise<CustomerResult> {
-    return {
-      success: false,
-      customerId: '',
-      errorMessage: 'PayPal does not support direct customer updates',
-    };
+  /**
+   * Create a setup token for vaulting a payment method
+   * Returns URL for customer to complete payment method setup
+   */
+  async attachPaymentMethod(data: PaymentMethodData): Promise<PaymentMethodResult> {
+    try {
+      const accessToken = await this.getAccessToken();
+      const baseUrl = this.testMode
+        ? 'https://api-m.sandbox.paypal.com'
+        : 'https://api-m.paypal.com';
+
+      const returnUrl = process.env.PAYPAL_RETURN_URL || `${process.env.APP_URL}/payments/success`;
+      const cancelUrl = process.env.PAYPAL_CANCEL_URL || `${process.env.APP_URL}/payments/cancel`;
+
+      // Create a setup token for vault
+      const response = await fetch(`${baseUrl}/v3/vault/setup-tokens`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+          'PayPal-Request-Id': crypto.randomUUID(),
+        },
+        body: JSON.stringify({
+          payment_source: {
+            paypal: {
+              description: 'Billing Agreement',
+              usage_type: 'MERCHANT',
+              customer_type: 'CONSUMER',
+              experience_context: {
+                return_url: returnUrl,
+                cancel_url: cancelUrl,
+              },
+            },
+          },
+          customer: data.customerId ? { id: data.customerId } : undefined,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(`PayPal setup token creation failed: ${response.status} - ${JSON.stringify(errorData)}`);
+      }
+
+      const setupToken = await response.json() as {
+        id: string;
+        status: string;
+        links: Array<{ rel: string; href: string }>;
+      };
+
+      return {
+        success: true,
+        paymentMethodId: setupToken.id,
+        type: 'paypal',
+      };
+    } catch (error) {
+      const err = error as Error;
+      return {
+        success: false,
+        paymentMethodId: '',
+        type: 'paypal',
+        errorMessage: err.message,
+      };
+    }
   }
 
-  async deleteCustomer(_customerId: string): Promise<{ success: boolean; errorMessage?: string }> {
-    return {
-      success: false,
-      errorMessage: 'PayPal does not support customer deletion',
-    };
+  /**
+   * Delete a vaulted payment token
+   */
+  async detachPaymentMethod(paymentMethodId: string): Promise<{ success: boolean; errorMessage?: string }> {
+    try {
+      const accessToken = await this.getAccessToken();
+      const baseUrl = this.testMode
+        ? 'https://api-m.sandbox.paypal.com'
+        : 'https://api-m.paypal.com';
+
+      const response = await fetch(
+        `${baseUrl}/v3/vault/payment-tokens/${paymentMethodId}`,
+        {
+          method: 'DELETE',
+          headers: {
+            'Authorization': `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
+        }
+      );
+
+      if (!response.ok && response.status !== 404) {
+        throw new Error(`Failed to delete payment token: ${response.status}`);
+      }
+
+      return { success: true };
+    } catch (error) {
+      const err = error as Error;
+      return {
+        success: false,
+        errorMessage: err.message,
+      };
+    }
   }
 
-  async attachPaymentMethod(_data: PaymentMethodData): Promise<PaymentMethodResult> {
-    return {
-      success: false,
-      paymentMethodId: '',
-      type: 'paypal',
-      errorMessage: 'PayPal handles payment methods through checkout flow',
-    };
+  async listPaymentMethods(customerId: string): Promise<PaymentMethodResult[]> {
+    try {
+      // Get access token for API calls
+      const accessToken = await this.getAccessToken();
+
+      // PayPal Vault API to list payment tokens
+      const baseUrl = this.testMode
+        ? 'https://api-m.sandbox.paypal.com'
+        : 'https://api-m.paypal.com';
+
+      const response = await fetch(
+        `${baseUrl}/v3/vault/payment-tokens?customer_id=${encodeURIComponent(customerId)}`,
+        {
+          method: 'GET',
+          headers: {
+            'Authorization': `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
+        }
+      );
+
+      if (!response.ok) {
+        console.error(`PayPal listPaymentMethods failed: ${response.status} ${response.statusText}`);
+        return [];
+      }
+
+      const data = await response.json() as {
+        payment_tokens?: Array<{
+          id: string;
+          customer?: { id: string };
+          payment_source?: {
+            card?: {
+              last_digits?: string;
+              brand?: string;
+              expiry?: string;
+            };
+            paypal?: {
+              email_address?: string;
+            };
+          };
+        }>;
+      };
+
+      if (!data.payment_tokens || data.payment_tokens.length === 0) {
+        return [];
+      }
+
+      return data.payment_tokens.map((token): PaymentMethodResult => {
+        const card = token.payment_source?.card;
+        const paypalAccount = token.payment_source?.paypal;
+
+        if (card) {
+          return {
+            success: true,
+            paymentMethodId: token.id,
+            type: 'card' as const,
+            last4: card.last_digits,
+            brand: this.mapPayPalCardBrand(card.brand),
+            expiryMonth: card.expiry ? parseInt(card.expiry.split('-')[1] || '0', 10) : undefined,
+            expiryYear: card.expiry ? parseInt(card.expiry.split('-')[0] || '0', 10) : undefined,
+          };
+        } else if (paypalAccount) {
+          return {
+            success: true,
+            paymentMethodId: token.id,
+            type: 'paypal' as const,
+          };
+        }
+
+        return {
+          success: true,
+          paymentMethodId: token.id,
+          type: 'paypal' as const,
+        };
+      });
+    } catch (error) {
+      console.error('PayPal listPaymentMethods error:', error);
+      return [];
+    }
   }
 
-  async detachPaymentMethod(_paymentMethodId: string): Promise<{ success: boolean; errorMessage?: string }> {
-    return {
-      success: false,
-      errorMessage: 'PayPal handles payment methods through checkout flow',
-    };
+  /**
+   * Get PayPal access token for API calls
+   */
+  private async getAccessToken(): Promise<string> {
+    const credentials = this.credentials as PayPalCredentials;
+    const baseUrl = this.testMode
+      ? 'https://api-m.sandbox.paypal.com'
+      : 'https://api-m.paypal.com';
+
+    const auth = Buffer.from(`${credentials.clientId}:${credentials.clientSecret}`).toString('base64');
+
+    const response = await fetch(`${baseUrl}/v1/oauth2/token`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Basic ${auth}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: 'grant_type=client_credentials',
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to get PayPal access token: ${response.status}`);
+    }
+
+    const data = await response.json() as { access_token: string };
+    return data.access_token;
   }
 
-  async listPaymentMethods(_customerId: string): Promise<PaymentMethodResult[]> {
-    return [];
+  /**
+   * Map PayPal card brand to standard CardBrand type
+   */
+  private mapPayPalCardBrand(brand?: string): CardBrand | undefined {
+    if (!brand) return undefined;
+    const brandLower = brand.toLowerCase();
+    const brandMap: Record<string, CardBrand> = {
+      visa: 'visa',
+      mastercard: 'mastercard',
+      amex: 'amex',
+      'american express': 'amex',
+      discover: 'discover',
+      diners: 'diners',
+      'diners club': 'diners',
+      jcb: 'jcb',
+      unionpay: 'unionpay',
+      'china unionpay': 'unionpay',
+    };
+    return brandMap[brandLower] || 'unknown';
   }
 
   verifyWebhookSignature(payload: string | Buffer, signature: string): boolean {
@@ -397,6 +740,163 @@ export class PayPalGateway extends BasePaymentGateway {
     } catch (error) {
       const paypalError = error as Error;
       return { healthy: false, message: paypalError.message };
+    }
+  }
+
+  /**
+   * Create a payout to a PayPal account or email
+   * Uses PayPal Payouts API
+   */
+  async createPayout(
+    amount: number,
+    currency: CurrencyCode,
+    destination: string, // PayPal email or PayPal ID
+    metadata?: Record<string, unknown>
+  ): Promise<{
+    success: boolean;
+    payoutId: string;
+    status: 'pending' | 'in_transit' | 'paid' | 'failed';
+    arrivalDate?: Date;
+    errorMessage?: string;
+  }> {
+    try {
+      const accessToken = await this.getAccessToken();
+      const baseUrl = this.testMode
+        ? 'https://api-m.sandbox.paypal.com'
+        : 'https://api-m.paypal.com';
+
+      // Determine if destination is email or PayPal ID
+      const isEmail = destination.includes('@');
+      const recipientType = isEmail ? 'EMAIL' : 'PAYPAL_ID';
+
+      // Convert amount to decimal string (PayPal expects string with 2 decimal places)
+      const amountStr = (amount / 100).toFixed(2);
+
+      // Create a unique sender batch ID
+      const senderBatchId = `payout_${crypto.randomUUID().replace(/-/g, '').substring(0, 20)}`;
+      const senderItemId = `item_${crypto.randomUUID().replace(/-/g, '').substring(0, 20)}`;
+
+      const response = await fetch(`${baseUrl}/v1/payments/payouts`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+          'PayPal-Request-Id': crypto.randomUUID(),
+        },
+        body: JSON.stringify({
+          sender_batch_header: {
+            sender_batch_id: senderBatchId,
+            email_subject: metadata?.subject || 'You have received a payment',
+            email_message: metadata?.message || 'Thank you for your service.',
+          },
+          items: [
+            {
+              recipient_type: recipientType,
+              amount: {
+                value: amountStr,
+                currency: currency.toUpperCase(),
+              },
+              receiver: destination,
+              note: metadata?.note || 'Creator payout',
+              sender_item_id: senderItemId,
+            },
+          ],
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(`PayPal payout failed: ${response.status} - ${JSON.stringify(errorData)}`);
+      }
+
+      const data = await response.json() as {
+        batch_header: {
+          payout_batch_id: string;
+          batch_status: string;
+          time_created?: string;
+        };
+        links: Array<{ rel: string; href: string }>;
+      };
+
+      // Map PayPal batch status to our status
+      const statusMap: Record<string, 'pending' | 'in_transit' | 'paid' | 'failed'> = {
+        'PENDING': 'pending',
+        'PROCESSING': 'in_transit',
+        'SUCCESS': 'paid',
+        'NEW': 'pending',
+        'DENIED': 'failed',
+        'CANCELED': 'failed',
+      };
+
+      const status = statusMap[data.batch_header.batch_status] || 'pending';
+
+      return {
+        success: true,
+        payoutId: data.batch_header.payout_batch_id,
+        status,
+        arrivalDate: status === 'paid' ? new Date() : undefined,
+      };
+    } catch (error) {
+      const err = error as Error;
+      console.error('PayPal payout error:', err);
+      return {
+        success: false,
+        payoutId: '',
+        status: 'failed',
+        errorMessage: err.message,
+      };
+    }
+  }
+
+  /**
+   * Get payout status
+   */
+  async getPayoutStatus(payoutId: string): Promise<{
+    status: 'pending' | 'in_transit' | 'paid' | 'failed';
+    errorMessage?: string;
+  }> {
+    try {
+      const accessToken = await this.getAccessToken();
+      const baseUrl = this.testMode
+        ? 'https://api-m.sandbox.paypal.com'
+        : 'https://api-m.paypal.com';
+
+      const response = await fetch(`${baseUrl}/v1/payments/payouts/${payoutId}`, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to get payout status: ${response.status}`);
+      }
+
+      const data = await response.json() as {
+        batch_header: {
+          batch_status: string;
+        };
+      };
+
+      const statusMap: Record<string, 'pending' | 'in_transit' | 'paid' | 'failed'> = {
+        'PENDING': 'pending',
+        'PROCESSING': 'in_transit',
+        'SUCCESS': 'paid',
+        'NEW': 'pending',
+        'DENIED': 'failed',
+        'CANCELED': 'failed',
+      };
+
+      return {
+        status: statusMap[data.batch_header.batch_status] || 'pending',
+      };
+    } catch (error) {
+      const err = error as Error;
+      return {
+        status: 'failed',
+        errorMessage: err.message,
+      };
     }
   }
 }

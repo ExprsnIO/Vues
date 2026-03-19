@@ -7,15 +7,17 @@ import { Sidebar } from '@/components/Sidebar';
 import { SearchInput } from '@/components/discover/SearchInput';
 import { SearchFilters, SearchFiltersState } from '@/components/discover/SearchFilters';
 import { TrendingSounds } from '@/components/discover/TrendingSounds';
-import { api, VideoView } from '@/lib/api';
+import { api, API_BASE, VideoView, TagView } from '@/lib/api';
 import { formatCount } from '@/lib/utils';
 import { useAuth } from '@/lib/auth-context';
 import { useSearchHistory } from '@/hooks/useSearchHistory';
+import { DiscoverSkeleton } from '@/components/skeletons';
 
 // Fallback tags if API fails
 const FALLBACK_TAGS = ['fyp', 'viral', 'funny', 'dance', 'music'];
 
 export default function DiscoverPage() {
+  const { user } = useAuth();
   const [searchQuery, setSearchQuery] = useState('');
   const [activeSearchQuery, setActiveSearchQuery] = useState('');
   const [searchType, setSearchType] = useState<'videos' | 'users' | 'sounds'>(
@@ -26,6 +28,7 @@ export default function DiscoverPage() {
     duration: 'all',
     timeRange: 'all',
     sortBy: 'relevance',
+    verifiedOnly: false,
   });
 
   const { addSearch } = useSearchHistory();
@@ -44,7 +47,16 @@ export default function DiscoverPage() {
     staleTime: 5 * 60 * 1000, // Cache for 5 minutes
   });
 
-  const trendingTags = trendingTagsData?.tags ?? FALLBACK_TAGS.map(name => ({ name, videoCount: 0 }));
+  const trendingTags = (trendingTagsData?.tags ?? FALLBACK_TAGS.map(name => ({ name, videoCount: 0 }))) as TrendingTagItem[];
+
+  // Fetch followed hashtags for authenticated users
+  const { data: followedTagsData } = useQuery({
+    queryKey: ['followed-hashtags'],
+    queryFn: () => api.getFollowedHashtags(undefined, 12),
+    enabled: !!user,
+    staleTime: 2 * 60 * 1000,
+    retry: false,
+  });
 
   // Build search query with filters
   const buildSearchParams = () => {
@@ -91,6 +103,13 @@ export default function DiscoverPage() {
 
       // Client-side filtering for now (can be removed when API supports it)
       let filtered = results.results;
+
+      // Verified creators filter (users only)
+      if (searchType === 'users' && filters.verifiedOnly) {
+        filtered = (filtered as UserResult[]).filter(
+          (u) => u.verified || (u as any).did?.startsWith('did:exprsn:')
+        );
+      }
 
       // Duration filtering for videos
       if (searchType === 'videos' && filters.duration !== 'all') {
@@ -180,6 +199,7 @@ export default function DiscoverPage() {
                 filters={filters}
                 onChange={setFilters}
                 showDuration={showDurationFilter}
+                showVerifiedToggle={searchType === 'users'}
               />
             </div>
           )}
@@ -187,9 +207,7 @@ export default function DiscoverPage() {
           {/* Search Results */}
           {isSearching ? (
             isLoading ? (
-              <div className="flex justify-center py-12">
-                <div className="w-8 h-8 border-3 border-primary-500 border-t-transparent rounded-full animate-spin" />
-              </div>
+              <DiscoverSkeleton />
             ) : searchResults?.results.length === 0 ? (
               <div className="text-center py-12">
                 <NoResultsIcon className="w-16 h-16 text-gray-600 mx-auto mb-4" />
@@ -202,7 +220,7 @@ export default function DiscoverPage() {
               <div className="space-y-3">
                 {/* Results Count */}
                 <p className="text-sm text-text-muted mb-4">
-                  Found {searchResults.results.length} {searchType}
+                  Found {searchResults?.results.length ?? 0} {searchType}
                   {filters.contentType !== 'all' || filters.duration !== 'all' || filters.timeRange !== 'all' ? ' with filters' : ''}
                 </p>
 
@@ -219,6 +237,31 @@ export default function DiscoverPage() {
             )
           ) : (
             <>
+              {/* Tags You Follow — authenticated users only */}
+              {user && followedTagsData && followedTagsData.tags.length > 0 && (
+                <section className="mb-8">
+                  <h2 className="text-lg font-semibold text-white mb-4">
+                    Tags You Follow
+                  </h2>
+                  <div className="flex flex-wrap gap-2">
+                    {followedTagsData.tags.map((item) => (
+                      <Link
+                        key={item.tag}
+                        href={`/tag/${encodeURIComponent(item.tag)}`}
+                        className="px-4 py-2 bg-accent/10 hover:bg-accent/20 border border-accent/30 text-accent rounded-full text-sm transition-colors flex items-center gap-2"
+                      >
+                        <span>#{item.tag}</span>
+                        {item.videoCount > 0 && (
+                          <span className="text-accent/70 text-xs">
+                            {formatCount(item.videoCount)}
+                          </span>
+                        )}
+                      </Link>
+                    ))}
+                  </div>
+                </section>
+              )}
+
               {/* Trending Sounds Section */}
               <TrendingSounds limit={9} />
 
@@ -234,6 +277,7 @@ export default function DiscoverPage() {
                       href={`/tag/${encodeURIComponent(tag.name)}`}
                       className="px-4 py-2 bg-surface hover:bg-surface-hover text-text-primary rounded-full text-sm transition-colors flex items-center gap-2"
                     >
+                      <TrendingDirectionIcon direction={tag.trendingDirection} />
                       <span>#{tag.name}</span>
                       {tag.videoCount > 0 && (
                         <span className="text-gray-400 text-xs">
@@ -287,6 +331,38 @@ const CATEGORIES = [
   { id: 'gaming', name: 'Gaming', gradient: 'bg-gradient-to-br from-purple-500 to-violet-600' },
 ];
 
+// Trending tag with optional direction fields returned by the API
+interface TrendingTagItem extends TagView {
+  trendingDirection?: 'up' | 'down' | 'stable';
+  velocity?: number;
+  rank?: number;
+}
+
+function TrendingDirectionIcon({ direction }: { direction?: 'up' | 'down' | 'stable' }) {
+  if (direction === 'up') {
+    return (
+      <svg className="w-3 h-3 text-green-400 flex-shrink-0" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 10.5L12 3m0 0l7.5 7.5M12 3v18" />
+      </svg>
+    );
+  }
+  if (direction === 'down') {
+    return (
+      <svg className="w-3 h-3 text-red-400 flex-shrink-0" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 13.5L12 21m0 0l-7.5-7.5M12 21V3" />
+      </svg>
+    );
+  }
+  if (direction === 'stable') {
+    return (
+      <svg className="w-3 h-3 text-gray-500 flex-shrink-0" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" d="M5 12h14" />
+      </svg>
+    );
+  }
+  return null;
+}
+
 // Search Result Types
 interface UserResult {
   did: string;
@@ -329,7 +405,7 @@ function VideoResults({ results }: { results: VideoView[] }) {
               />
             ) : videoUrl ? (
               <video
-                src={videoUrl.startsWith('/') ? `http://localhost:3002${videoUrl}` : videoUrl}
+                src={videoUrl.startsWith('/') ? `${API_BASE}${videoUrl}` : videoUrl}
                 className="w-full h-full object-cover"
                 muted
                 preload="metadata"

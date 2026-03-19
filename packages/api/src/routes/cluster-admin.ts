@@ -9,6 +9,7 @@ import { renderClusters, renderWorkers } from '../db/schema.js';
 import { eq, desc, and, gte, sql } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import { adminAuthMiddleware } from '../auth/middleware.js';
+import { getClusterOrchestrator } from '../services/cluster/index.js';
 
 const clusterAdminRouter = new Hono();
 
@@ -87,12 +88,37 @@ clusterAdminRouter.get('/xrpc/io.exprsn.admin.cluster.get', async (c) => {
 clusterAdminRouter.post('/xrpc/io.exprsn.admin.cluster.create', async (c) => {
   const body = await c.req.json<{
     name: string;
-    type: 'docker' | 'kubernetes';
+    type: 'docker' | 'kubernetes' | 'docker-compose' | 'docker-swarm';
     endpoint?: string;
     region?: string;
     maxWorkers?: number;
     gpuEnabled?: boolean;
-    config?: Record<string, unknown>;
+    config?: {
+      kubeconfig?: string;
+      namespace?: string;
+      context?: string;
+      kubeconfigPath?: string;
+      dockerHost?: string;
+      labels?: Record<string, string>;
+    };
+    tls?: {
+      enabled: boolean;
+      caCert?: string;
+      clientCert?: string;
+      clientKey?: string;
+      skipVerify?: boolean;
+    };
+    auth?: {
+      type: 'none' | 'basic' | 'token' | 'certificate';
+      username?: string;
+      password?: string;
+      token?: string;
+    };
+    resources?: {
+      maxCpu?: string;
+      maxMemory?: string;
+      maxGpu?: number;
+    };
     priorityRouting?: {
       urgent?: boolean;
       high?: boolean;
@@ -118,13 +144,16 @@ clusterAdminRouter.post('/xrpc/io.exprsn.admin.cluster.create', async (c) => {
       maxWorkers: body.maxWorkers,
       gpuEnabled: body.gpuEnabled || false,
       config: body.config,
+      tls: body.tls || { enabled: false },
+      auth: body.auth || { type: 'none' },
+      resources: body.resources,
       priorityRouting: body.priorityRouting || {
         urgent: true,
         high: true,
         normal: true,
         low: true,
       },
-      status: 'active',
+      status: 'inactive',
     })
     .returning();
 
@@ -143,14 +172,39 @@ clusterAdminRouter.post('/xrpc/io.exprsn.admin.cluster.update', async (c) => {
     region?: string;
     maxWorkers?: number;
     gpuEnabled?: boolean;
-    config?: Record<string, unknown>;
+    config?: {
+      kubeconfig?: string;
+      namespace?: string;
+      context?: string;
+      kubeconfigPath?: string;
+      dockerHost?: string;
+      labels?: Record<string, string>;
+    };
+    tls?: {
+      enabled: boolean;
+      caCert?: string;
+      clientCert?: string;
+      clientKey?: string;
+      skipVerify?: boolean;
+    };
+    auth?: {
+      type: 'none' | 'basic' | 'token' | 'certificate';
+      username?: string;
+      password?: string;
+      token?: string;
+    };
+    resources?: {
+      maxCpu?: string;
+      maxMemory?: string;
+      maxGpu?: number;
+    };
     priorityRouting?: {
       urgent?: boolean;
       high?: boolean;
       normal?: boolean;
       low?: boolean;
     };
-    status?: 'active' | 'draining' | 'offline';
+    status?: 'active' | 'draining' | 'offline' | 'inactive' | 'error';
   }>();
 
   if (!body.clusterId) {
@@ -167,6 +221,9 @@ clusterAdminRouter.post('/xrpc/io.exprsn.admin.cluster.update', async (c) => {
   if (body.maxWorkers !== undefined) updates.maxWorkers = body.maxWorkers;
   if (body.gpuEnabled !== undefined) updates.gpuEnabled = body.gpuEnabled;
   if (body.config !== undefined) updates.config = body.config;
+  if (body.tls !== undefined) updates.tls = body.tls;
+  if (body.auth !== undefined) updates.auth = body.auth;
+  if (body.resources !== undefined) updates.resources = body.resources;
   if (body.priorityRouting !== undefined) updates.priorityRouting = body.priorityRouting;
   if (body.status !== undefined) updates.status = body.status;
 
@@ -245,24 +302,32 @@ clusterAdminRouter.post('/xrpc/io.exprsn.admin.cluster.scale', async (c) => {
     return c.json({ error: 'Scaling is only supported for Kubernetes clusters' }, 400);
   }
 
-  // In a real implementation, this would call the Kubernetes API
-  // For now, we just update the desired worker count
-  const [updated] = await db
-    .update(renderClusters)
-    .set({
-      maxWorkers: body.replicas,
-      updatedAt: new Date(),
-    })
-    .where(eq(renderClusters.id, body.clusterId))
-    .returning();
+  // Use ClusterOrchestratorService for actual Kubernetes scaling
+  const orchestrator = getClusterOrchestrator();
+  const scaleResult = await orchestrator.scaleKubernetesDeployment(body.clusterId, body.replicas);
 
-  // TODO: Implement actual Kubernetes scaling via kubectl or client-go
-  // const k8sClient = getK8sClient(cluster.config);
-  // await k8sClient.apps.v1.deployments.scale('render-worker', body.replicas);
+  // Get updated cluster
+  const [updated] = await db
+    .select()
+    .from(renderClusters)
+    .where(eq(renderClusters.id, body.clusterId))
+    .limit(1);
+
+  if (!scaleResult.success) {
+    return c.json({
+      cluster: updated,
+      message: `Scaling requested but Kubernetes API call failed: ${scaleResult.error}`,
+      warning: scaleResult.error,
+      previousReplicas: scaleResult.previousReplicas,
+      requestedReplicas: body.replicas,
+    });
+  }
 
   return c.json({
     cluster: updated,
-    message: `Scaling to ${body.replicas} workers requested`,
+    message: `Successfully scaled from ${scaleResult.previousReplicas} to ${body.replicas} workers`,
+    previousReplicas: scaleResult.previousReplicas,
+    newReplicas: scaleResult.newReplicas,
   });
 });
 
@@ -379,6 +444,157 @@ clusterAdminRouter.post('/xrpc/io.exprsn.admin.cluster.activate', async (c) => {
   return c.json({ cluster });
 });
 
+/**
+ * Test cluster connection
+ * POST /xrpc/io.exprsn.admin.cluster.testConnection
+ */
+clusterAdminRouter.post('/xrpc/io.exprsn.admin.cluster.testConnection', async (c) => {
+  const body = await c.req.json<{
+    clusterId?: string;
+    type: 'docker' | 'kubernetes' | 'docker-compose' | 'docker-swarm';
+    endpoint: string;
+    tls?: {
+      enabled: boolean;
+      caCert?: string;
+      clientCert?: string;
+      clientKey?: string;
+      skipVerify?: boolean;
+    };
+    auth?: {
+      type: 'none' | 'basic' | 'token' | 'certificate';
+      username?: string;
+      password?: string;
+      token?: string;
+    };
+    config?: {
+      namespace?: string;
+      context?: string;
+    };
+  }>();
+
+  if (!body.endpoint || !body.type) {
+    return c.json({ error: 'endpoint and type are required' }, 400);
+  }
+
+  try {
+    let connectionSuccess = false;
+    let responseMessage = '';
+    let details: Record<string, unknown> = {};
+
+    // Test connection based on cluster type
+    if (body.type === 'kubernetes') {
+      // Test Kubernetes API server connection
+      const headers: Record<string, string> = {};
+
+      if (body.auth?.type === 'token' && body.auth.token) {
+        headers['Authorization'] = `Bearer ${body.auth.token}`;
+      } else if (body.auth?.type === 'basic' && body.auth.username && body.auth.password) {
+        const credentials = Buffer.from(`${body.auth.username}:${body.auth.password}`).toString('base64');
+        headers['Authorization'] = `Basic ${credentials}`;
+      }
+
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000);
+
+      try {
+        const response = await fetch(`${body.endpoint}/version`, {
+          signal: controller.signal,
+          headers,
+          // TLS verification handling would go here in production
+        });
+
+        clearTimeout(timeout);
+
+        if (response.ok) {
+          const versionData = await response.json();
+          connectionSuccess = true;
+          responseMessage = 'Successfully connected to Kubernetes cluster';
+          details = {
+            version: versionData,
+            namespace: body.config?.namespace || 'default',
+          };
+        } else {
+          responseMessage = `Kubernetes API returned status ${response.status}`;
+          details = { statusText: response.statusText };
+        }
+      } catch (error) {
+        clearTimeout(timeout);
+        responseMessage = `Failed to connect to Kubernetes API: ${error instanceof Error ? error.message : 'Unknown error'}`;
+      }
+    } else if (body.type === 'docker' || body.type === 'docker-compose' || body.type === 'docker-swarm') {
+      // Test Docker API connection
+      const headers: Record<string, string> = {};
+
+      if (body.auth?.type === 'basic' && body.auth.username && body.auth.password) {
+        const credentials = Buffer.from(`${body.auth.username}:${body.auth.password}`).toString('base64');
+        headers['Authorization'] = `Basic ${credentials}`;
+      }
+
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000);
+
+      try {
+        const response = await fetch(`${body.endpoint}/version`, {
+          signal: controller.signal,
+          headers,
+        });
+
+        clearTimeout(timeout);
+
+        if (response.ok) {
+          const versionData = await response.json() as Record<string, unknown>;
+          connectionSuccess = true;
+          responseMessage = `Successfully connected to Docker ${body.type === 'docker-swarm' ? 'Swarm' : ''} host`;
+          details = {
+            version: versionData,
+            apiVersion: versionData.ApiVersion,
+          };
+        } else {
+          responseMessage = `Docker API returned status ${response.status}`;
+          details = { statusText: response.statusText };
+        }
+      } catch (error) {
+        clearTimeout(timeout);
+        responseMessage = `Failed to connect to Docker API: ${error instanceof Error ? error.message : 'Unknown error'}`;
+      }
+    }
+
+    // Update cluster health check if clusterId provided
+    if (body.clusterId && connectionSuccess) {
+      await db
+        .update(renderClusters)
+        .set({
+          lastHealthCheck: new Date(),
+          status: 'active',
+          errorMessage: null,
+        })
+        .where(eq(renderClusters.id, body.clusterId));
+    } else if (body.clusterId && !connectionSuccess) {
+      await db
+        .update(renderClusters)
+        .set({
+          lastHealthCheck: new Date(),
+          status: 'error',
+          errorMessage: responseMessage,
+        })
+        .where(eq(renderClusters.id, body.clusterId));
+    }
+
+    return c.json({
+      success: connectionSuccess,
+      message: responseMessage,
+      details,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    return c.json({
+      success: false,
+      message: `Connection test failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      timestamp: new Date().toISOString(),
+    }, 500);
+  }
+});
+
 // ============================================================================
 // Worker Management Routes
 // ============================================================================
@@ -390,13 +606,11 @@ clusterAdminRouter.post('/xrpc/io.exprsn.admin.cluster.activate', async (c) => {
 clusterAdminRouter.get('/xrpc/io.exprsn.admin.workers.list', async (c) => {
   const clusterId = c.req.query('clusterId');
 
-  let query = db.select().from(renderWorkers);
-
-  if (clusterId) {
-    query = query.where(sql`metadata->>'clusterId' = ${clusterId}`);
-  }
-
-  const workers = await query.orderBy(desc(renderWorkers.lastHeartbeat));
+  const workers = await db
+    .select()
+    .from(renderWorkers)
+    .where(clusterId ? sql`metadata->>'clusterId' = ${clusterId}` : undefined)
+    .orderBy(desc(renderWorkers.lastHeartbeat));
 
   // Enrich workers with cluster info and online status
   const enrichedWorkers = workers.map((worker) => {
@@ -589,25 +803,46 @@ clusterAdminRouter.post('/xrpc/io.exprsn.admin.workers.restart', async (c) => {
     return c.json({ error: 'Associated cluster not found' }, 404);
   }
 
-  // TODO: Implement actual restart logic based on cluster type
-  // if (cluster.type === 'kubernetes') {
-  //   await restartK8sPod(worker.id);
-  // } else if (cluster.type === 'docker') {
-  //   await restartDockerContainer(worker.id);
-  // }
+  // Use ClusterOrchestratorService for actual restart operations
+  const orchestrator = getClusterOrchestrator();
+  const containerInfo = orchestrator.getWorkerContainerInfo(worker);
+  let restartResult;
 
-  // For now, just mark as restarting and let the worker re-register
-  await db
-    .update(renderWorkers)
-    .set({
-      status: 'offline',
-      lastHeartbeat: new Date(0), // Set to epoch to mark as stale
-    })
-    .where(eq(renderWorkers.id, body.workerId));
+  if (cluster.type === 'kubernetes' && containerInfo.podName) {
+    restartResult = await orchestrator.restartKubernetesPod(body.workerId, containerInfo.podName);
+  } else if (cluster.type === 'docker' && containerInfo.containerId) {
+    restartResult = await orchestrator.restartDockerContainer(body.workerId, containerInfo.containerId);
+  } else {
+    // Fallback: just mark as offline and let the worker re-register
+    await db
+      .update(renderWorkers)
+      .set({
+        status: 'offline',
+        lastHeartbeat: new Date(0),
+      })
+      .where(eq(renderWorkers.id, body.workerId));
+
+    return c.json({
+      success: true,
+      message: `Worker ${worker.hostname} marked as offline (no pod/container info available)`,
+      warning: 'Could not restart via orchestration API - missing pod/container metadata',
+    });
+  }
+
+  if (!restartResult.success) {
+    return c.json({
+      success: false,
+      message: `Failed to restart worker ${worker.hostname}`,
+      error: restartResult.error,
+    }, 500);
+  }
 
   return c.json({
     success: true,
-    message: `Restart signal sent to worker ${worker.hostname}`,
+    message: `Successfully restarted worker ${worker.hostname}`,
+    clusterType: cluster.type,
+    podName: containerInfo.podName,
+    containerId: containerInfo.containerId,
   });
 });
 
@@ -651,7 +886,7 @@ clusterAdminRouter.delete('/xrpc/io.exprsn.admin.workers.remove', async (c) => {
  */
 clusterAdminRouter.get('/xrpc/io.exprsn.admin.workers.logs', async (c) => {
   const workerId = c.req.query('workerId');
-  const lines = parseInt(c.req.query('lines') || '100');
+  const tailLines = parseInt(c.req.query('lines') || '100');
 
   if (!workerId) {
     return c.json({ error: 'workerId is required' }, 400);
@@ -667,22 +902,112 @@ clusterAdminRouter.get('/xrpc/io.exprsn.admin.workers.logs', async (c) => {
     return c.json({ error: 'Worker not found' }, 404);
   }
 
-  // In a real implementation, this would fetch logs from the logging system
-  // (e.g., Kubernetes logs API, Docker logs, or centralized logging like ELK)
+  const metadata = worker.metadata as Record<string, unknown> | null;
+  const clusterId = metadata?.clusterId as string | undefined;
+  const containerId = metadata?.containerId as string | undefined;
+  const podName = metadata?.podName as string | undefined;
+  const namespace = metadata?.namespace as string | undefined;
 
-  // For now, return a placeholder
-  const logs = [
-    `[${new Date().toISOString()}] Worker ${worker.hostname} started`,
-    `[${new Date().toISOString()}] Status: ${worker.status}`,
-    `[${new Date().toISOString()}] Active jobs: ${worker.activeJobs || 0}`,
-    `[${new Date().toISOString()}] Total processed: ${worker.totalProcessed || 0}`,
-  ];
+  let logs: string[] = [];
+  let source = 'status'; // Default source
+
+  // Try to fetch actual logs based on available metadata
+  if (clusterId) {
+    // Get cluster to determine type
+    const [cluster] = await db
+      .select()
+      .from(renderClusters)
+      .where(eq(renderClusters.id, clusterId))
+      .limit(1);
+
+    if (cluster?.type === 'kubernetes' && podName) {
+      // Fetch Kubernetes pod logs
+      try {
+        const k8sApiUrl = cluster.endpoint || process.env.KUBERNETES_API_URL;
+        const k8sNamespace = namespace || 'default';
+
+        if (k8sApiUrl) {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 10000);
+
+          const response = await fetch(
+            `${k8sApiUrl}/api/v1/namespaces/${k8sNamespace}/pods/${podName}/log?tailLines=${tailLines}&timestamps=true`,
+            {
+              signal: controller.signal,
+              headers: {
+                'Authorization': `Bearer ${process.env.KUBERNETES_TOKEN || ''}`,
+              },
+            }
+          );
+
+          clearTimeout(timeout);
+
+          if (response.ok) {
+            const logText = await response.text();
+            logs = logText.split('\n').filter(line => line.trim());
+            source = 'kubernetes';
+          }
+        }
+      } catch (error) {
+        console.warn('Failed to fetch Kubernetes logs:', error);
+      }
+    } else if (cluster?.type === 'docker' && containerId) {
+      // Fetch Docker container logs
+      try {
+        const dockerHost = cluster.endpoint || process.env.DOCKER_HOST || 'unix:///var/run/docker.sock';
+
+        // For HTTP-based Docker API (not unix socket)
+        if (dockerHost.startsWith('http')) {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 10000);
+
+          const response = await fetch(
+            `${dockerHost}/containers/${containerId}/logs?stdout=true&stderr=true&tail=${tailLines}&timestamps=true`,
+            { signal: controller.signal }
+          );
+
+          clearTimeout(timeout);
+
+          if (response.ok) {
+            const logText = await response.text();
+            // Docker logs have a header byte per line, strip it
+            logs = logText.split('\n')
+              .map(line => line.slice(8)) // Remove Docker log header
+              .filter(line => line.trim());
+            source = 'docker';
+          }
+        }
+      } catch (error) {
+        console.warn('Failed to fetch Docker logs:', error);
+      }
+    }
+  }
+
+  // Fall back to worker status info if no logs available
+  if (logs.length === 0) {
+    const now = new Date().toISOString();
+    logs = [
+      `[${now}] Worker: ${worker.hostname}`,
+      `[${now}] Status: ${worker.status}`,
+      `[${now}] GPU: ${worker.gpuModel || 'N/A'} (${worker.gpuMemoryMB || 0}MB)`,
+      `[${now}] Active jobs: ${worker.activeJobs || 0}`,
+      `[${now}] Total processed: ${worker.totalProcessed || 0}`,
+      `[${now}] Last heartbeat: ${worker.lastHeartbeat?.toISOString() || 'N/A'}`,
+    ];
+
+    // Check for error info in metadata
+    const metadata = worker.metadata as Record<string, unknown> | null;
+    if (metadata?.lastError) {
+      logs.push(`[${now}] Last error: ${metadata.lastError}`);
+    }
+  }
 
   return c.json({
     workerId,
     hostname: worker.hostname,
     logs,
     lines: logs.length,
+    source,
   });
 });
 

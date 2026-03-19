@@ -6,6 +6,7 @@ import { AuthProvider } from '@/lib/auth-context';
 import { ThemeProvider } from '@/components/ThemeProvider';
 import { SidebarProvider, MobileHeader, MobileBottomNav } from '@/components/Sidebar';
 import { LoginModalProvider } from '@/components/LoginModal';
+import { MessagingProvider } from '@/components/messaging/MessagingProvider';
 import { Toaster } from 'react-hot-toast';
 
 export const Providers: FC<PropsWithChildren> = ({ children }) => {
@@ -29,16 +30,18 @@ export const Providers: FC<PropsWithChildren> = ({ children }) => {
         <ThemeProvider>
           <SidebarProvider>
             <LoginModalProvider>
-              <MobileHeader />
-              {children}
-              <MobileBottomNav />
-              <Toaster
-                position="bottom-center"
-                toastOptions={{
-                  className: 'bg-surface text-text-primary border border-border',
-                  duration: 3000,
-                }}
-              />
+              <MessagingProvider>
+                <MobileHeader />
+                {children}
+                <MobileBottomNav />
+                <Toaster
+                  position="bottom-center"
+                  toastOptions={{
+                    className: 'bg-surface text-text-primary border border-border',
+                    duration: 3000,
+                  }}
+                />
+              </MessagingProvider>
             </LoginModalProvider>
           </SidebarProvider>
         </ThemeProvider>

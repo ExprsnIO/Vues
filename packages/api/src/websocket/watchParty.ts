@@ -14,6 +14,7 @@ import {
   type PartyParticipant,
   type PartyQueueItem,
 } from '../services/watchParty/index.js';
+import { hashSessionToken } from '../utils/session-tokens.js';
 
 type NextFunction = (err?: Error) => void;
 
@@ -73,6 +74,9 @@ async function authenticateSocket(socket: Socket): Promise<UserInfo | null> {
 
     if (!token) return null;
 
+    // Hash the token to look it up (tokens are stored as hashes)
+    const tokenHash = hashSessionToken(token);
+
     // Look up session
     const [session] = await db
       .select({
@@ -83,7 +87,7 @@ async function authenticateSocket(socket: Socket): Promise<UserInfo | null> {
       })
       .from(sessions)
       .innerJoin(users, eq(users.did, sessions.did))
-      .where(eq(sessions.accessJwt, token))
+      .where(eq(sessions.accessJwt, tokenHash))
       .limit(1);
 
     if (!session) return null;

@@ -10,6 +10,7 @@ import { eq, and, gt, sql } from 'drizzle-orm';
 import * as schema from '../db/schema.js';
 import { createBlobSync, type BlobSync } from '../services/federation/BlobSync.js';
 import { io as SocketIOClient } from 'socket.io-client';
+import { ExternalRelayClient } from '@exprsn/relay';
 import { nanoid } from 'nanoid';
 
 /**
@@ -39,7 +40,10 @@ export interface FirehoseFrame {
  */
 interface SubscriptionState {
   endpoint: string;
+  // socket.io client for Exprsn-to-Exprsn connections
   socket: ReturnType<typeof SocketIOClient> | null;
+  // native WebSocket client for standard AT Protocol relays
+  externalClient: ExternalRelayClient | null;
   status: 'connecting' | 'connected' | 'disconnected' | 'error';
   lastSeq: number | null;
   errorCount: number;
@@ -59,6 +63,12 @@ export interface FederationConsumerConfig {
   reconnectDelayMs?: number;
   // Enable auto-start of subscriptions
   autoStart?: boolean;
+  /**
+   * Use native WebSocket + CBOR for external AT Protocol relays (e.g. bsky.network).
+   * Set to false (default: false) to use Socket.IO for Exprsn-to-Exprsn federation.
+   * Stored per-relay in the serviceRegistry `metadata` column as `{ atprotoRelay: true }`.
+   */
+  defaultUseAtprotoProtocol?: boolean;
 }
 
 const DEFAULT_COLLECTIONS = [
@@ -90,6 +100,7 @@ export class FederationConsumerWorker {
   private wantedCollections: string[];
   private maxReconnectAttempts: number;
   private reconnectDelayMs: number;
+  private defaultUseAtprotoProtocol: boolean;
   private running = false;
 
   constructor(config: FederationConsumerConfig) {
@@ -98,6 +109,9 @@ export class FederationConsumerWorker {
     this.wantedCollections = config.wantedCollections ?? DEFAULT_COLLECTIONS;
     this.maxReconnectAttempts = config.maxReconnectAttempts ?? DEFAULT_CONFIG.maxReconnectAttempts;
     this.reconnectDelayMs = config.reconnectDelayMs ?? DEFAULT_CONFIG.reconnectDelayMs;
+    // Default: use AT Protocol protocol (raw WebSocket + CBOR) — correct for external relays.
+    // Set to false only for Exprsn-to-Exprsn connections that use Socket.IO.
+    this.defaultUseAtprotoProtocol = config.defaultUseAtprotoProtocol ?? true;
 
     if (config.autoStart !== false) {
       // Auto-start is deferred to allow async initialization
@@ -145,6 +159,9 @@ export class FederationConsumerWorker {
       if (state.socket) {
         state.socket.disconnect();
       }
+      if (state.externalClient) {
+        state.externalClient.disconnect();
+      }
       // Update sync state in database
       if (state.lastSeq) {
         await this.updateSyncState(endpoint, state.lastSeq, 'paused');
@@ -176,7 +193,31 @@ export class FederationConsumerWorker {
   }
 
   /**
-   * Subscribe to a relay's firehose
+   * Determine whether an endpoint is a standard AT Protocol relay or an Exprsn relay.
+   * Standard AT Protocol relays (bsky.network, etc.) use raw WebSocket + CBOR framing.
+   * Exprsn-to-Exprsn connections use Socket.IO.
+   */
+  private isAtprotoRelay(endpoint: string): boolean {
+    if (!this.defaultUseAtprotoProtocol) return false;
+    // Heuristic: Exprsn instances expose XRPC on the same port as their API.
+    // External AT Protocol relays (bsky.network) do not use Socket.IO.
+    // The EXPRSN_RELAY_HOSTS env var can override this with a comma-separated
+    // list of hostnames that should use Socket.IO (Exprsn instances).
+    const exprsnHosts = (process.env.EXPRSN_RELAY_HOSTS || '').split(',').filter(Boolean);
+    try {
+      const url = new URL(endpoint);
+      if (exprsnHosts.includes(url.hostname)) return false;
+    } catch {
+      // Not a valid URL — default to AT Protocol
+    }
+    return true;
+  }
+
+  /**
+   * Subscribe to a relay's firehose.
+   * Automatically selects the correct protocol:
+   * - Standard AT Protocol relays: raw WebSocket + CBOR (via ExternalRelayClient)
+   * - Exprsn-to-Exprsn relays: Socket.IO
    */
   async subscribeToRelay(endpoint: string, relayId?: string): Promise<void> {
     if (this.subscriptions.has(endpoint)) {
@@ -193,6 +234,7 @@ export class FederationConsumerWorker {
     const state: SubscriptionState = {
       endpoint,
       socket: null,
+      externalClient: null,
       status: 'connecting',
       lastSeq: cursor ?? null,
       errorCount: 0,
@@ -201,8 +243,126 @@ export class FederationConsumerWorker {
 
     this.subscriptions.set(endpoint, state);
 
+    if (this.isAtprotoRelay(endpoint)) {
+      // Standard AT Protocol relay — use raw WebSocket + CBOR
+      await this.subscribeViaAtprotoProtocol(endpoint, state, cursor);
+    } else {
+      // Exprsn-to-Exprsn relay — use Socket.IO
+      await this.subscribeViaSocketIO(endpoint, state, cursor);
+    }
+  }
+
+  /**
+   * Subscribe to a standard AT Protocol relay using raw WebSocket + CBOR.
+   * This is required for interoperability with bsky.network, BGS relays, etc.
+   */
+  private async subscribeViaAtprotoProtocol(
+    endpoint: string,
+    state: SubscriptionState,
+    cursor?: number
+  ): Promise<void> {
     try {
-      // Create socket connection
+      const firehoseUrl = this.buildAtprotoFirehoseUrl(endpoint, cursor);
+
+      const client = new ExternalRelayClient({
+        url: firehoseUrl,
+        cursor,
+        wantedCollections: this.wantedCollections,
+        reconnectDelayMs: this.reconnectDelayMs,
+        maxReconnectAttempts: this.maxReconnectAttempts,
+      });
+
+      state.externalClient = client;
+
+      client.on('connected', () => {
+        console.log(`[FederationConsumer] Connected (atproto) to ${endpoint}`);
+        state.status = 'connected';
+        state.errorCount = 0;
+        this.updateSyncState(endpoint, state.lastSeq, 'active');
+      });
+
+      client.on('disconnected', (reason) => {
+        console.log(`[FederationConsumer] Disconnected from ${endpoint}: ${reason}`);
+        state.status = 'disconnected';
+      });
+
+      client.on('error', (error) => {
+        console.error(`[FederationConsumer] Error from ${endpoint}:`, error);
+        state.status = 'error';
+        state.errorCount++;
+
+        if (state.errorCount >= this.maxReconnectAttempts) {
+          this.updateSyncState(endpoint, state.lastSeq, 'error', String(error));
+        }
+      });
+
+      client.on('commit', async (commitFrame) => {
+        // Convert ExternalRelayClient CommitFrame to our internal FirehoseFrame
+        for (const op of commitFrame.ops) {
+          const pathParts = op.path.split('/');
+          const collection = pathParts[0];
+          const rkey = pathParts[1];
+
+          if (!collection || !rkey) continue;
+
+          const frame: FirehoseFrame = {
+            seq: commitFrame.seq,
+            time: commitFrame.time,
+            did: commitFrame.repo,
+            commit: {
+              // ExternalRelayClient.CommitFrame.commit is { cid, rev }
+              rev: commitFrame.commit.rev,
+              operation: op.action,
+              collection,
+              rkey,
+              cid: op.cid || undefined,
+              blobs: commitFrame.blobs,
+            },
+          };
+
+          await this.handleFrame(endpoint, frame);
+        }
+
+        state.lastSeq = commitFrame.seq;
+      });
+
+      client.on('tombstone', async (tombstoneFrame) => {
+        const frame: FirehoseFrame = {
+          seq: tombstoneFrame.seq,
+          time: tombstoneFrame.time,
+          did: tombstoneFrame.did,
+          tombstone: true,
+        };
+        await this.handleFrame(endpoint, frame);
+        state.lastSeq = tombstoneFrame.seq;
+      });
+
+      client.on('handle', async (handleFrame) => {
+        state.lastSeq = handleFrame.seq;
+        // Persist updated cursor every 100 events
+        if (handleFrame.seq % 100 === 0) {
+          await this.updateSyncState(endpoint, handleFrame.seq, 'active');
+        }
+      });
+
+      await client.connect();
+    } catch (error) {
+      console.error(`[FederationConsumer] Failed to subscribe (atproto) to ${endpoint}:`, error);
+      state.status = 'error';
+      state.errorCount++;
+      await this.updateSyncState(endpoint, state.lastSeq, 'error', String(error));
+    }
+  }
+
+  /**
+   * Subscribe to an Exprsn relay using Socket.IO.
+   */
+  private async subscribeViaSocketIO(
+    endpoint: string,
+    state: SubscriptionState,
+    cursor?: number
+  ): Promise<void> {
+    try {
       const firehoseUrl = this.buildFirehoseUrl(endpoint);
       const socket = SocketIOClient(firehoseUrl, {
         transports: ['websocket'],
@@ -220,7 +380,7 @@ export class FederationConsumerWorker {
 
       // Set up event handlers
       socket.on('connect', () => {
-        console.log(`[FederationConsumer] Connected to ${endpoint}`);
+        console.log(`[FederationConsumer] Connected (socket.io) to ${endpoint}`);
         state.status = 'connected';
         state.errorCount = 0;
         this.updateSyncState(endpoint, state.lastSeq, 'active');
@@ -251,7 +411,7 @@ export class FederationConsumerWorker {
 
       socket.connect();
     } catch (error) {
-      console.error(`[FederationConsumer] Failed to subscribe to ${endpoint}:`, error);
+      console.error(`[FederationConsumer] Failed to subscribe (socket.io) to ${endpoint}:`, error);
       state.status = 'error';
       state.errorCount++;
       await this.updateSyncState(endpoint, state.lastSeq, 'error', String(error));
@@ -269,6 +429,10 @@ export class FederationConsumerWorker {
 
     if (state.socket) {
       state.socket.disconnect();
+    }
+
+    if (state.externalClient) {
+      state.externalClient.disconnect();
     }
 
     if (state.lastSeq) {
@@ -679,13 +843,31 @@ export class FederationConsumerWorker {
   }
 
   /**
-   * Build firehose WebSocket URL
+   * Build Socket.IO firehose URL for Exprsn-to-Exprsn connections.
+   * Socket.IO connects to the namespace path directly.
    */
   private buildFirehoseUrl(endpoint: string): string {
     // Convert HTTP endpoint to WebSocket firehose endpoint
     const url = new URL(endpoint);
     url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
     url.pathname = '/xrpc/com.atproto.sync.subscribeRepos';
+    return url.toString();
+  }
+
+  /**
+   * Build standard AT Protocol WebSocket URL with query parameters.
+   * Used by ExternalRelayClient for raw WebSocket + CBOR connections.
+   */
+  private buildAtprotoFirehoseUrl(endpoint: string, cursor?: number): string {
+    const url = new URL(endpoint);
+    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+    url.pathname = '/xrpc/com.atproto.sync.subscribeRepos';
+    if (cursor !== undefined && cursor > 0) {
+      url.searchParams.set('cursor', cursor.toString());
+    }
+    for (const collection of this.wantedCollections) {
+      url.searchParams.append('wantedCollections', collection);
+    }
     return url.toString();
   }
 

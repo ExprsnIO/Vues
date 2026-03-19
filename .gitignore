@@ -62,3 +62,23 @@ data/
 *.db
 *.db-shm
 *.db-wal
+*.sqlite
+*.sqlite-journal
+
+# Redis
+dump.rdb
+
+# Production tarballs
+exprsn-production.tar.gz
+
+# Non-project artifacts
+output/
+Mockups/
+Markdowns/
+Exprsn/
+sprints/
+exprsn-competitive-brief.html
+exprsn-investor-pitch.html
+
+# Claude Code worktrees
+.claude/worktrees/

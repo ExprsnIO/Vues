@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { authMiddleware, optionalAuthMiddleware } from '../auth/middleware.js';
 import { db, videos, users, stitches, duets, shares, sounds, comments } from '../db/index.js';
-import { eq, desc, and, sql, like, ilike } from 'drizzle-orm';
+import { eq, desc, and, sql, like, ilike, lt } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import { badRequest, notFound, forbidden, videoNotFound } from '../utils/api-errors.js';
 
@@ -82,7 +82,7 @@ videoExtendedRouter.get('/io.exprsn.video.getStitches', optionalAuthMiddleware, 
   const conditions = [eq(stitches.originalVideoUri, uri)];
   if (cursor) {
     const cursorDate = new Date(cursor);
-    conditions.push(sql`${stitches.createdAt} < ${cursorDate}`);
+    conditions.push(lt(stitches.createdAt, cursorDate));
   }
 
   const results = await db
@@ -201,7 +201,7 @@ videoExtendedRouter.get('/io.exprsn.video.getDuets', optionalAuthMiddleware, asy
   const conditions = [eq(duets.originalVideoUri, uri)];
   if (cursor) {
     const cursorDate = new Date(cursor);
-    conditions.push(sql`${duets.createdAt} < ${cursorDate}`);
+    conditions.push(lt(duets.createdAt, cursorDate));
   }
 
   const results = await db
@@ -573,7 +573,7 @@ videoExtendedRouter.get('/io.exprsn.video.getCollabs', optionalAuthMiddleware, a
   const conditions = [eq(duets.originalVideoUri, uri)];
   if (cursor) {
     const cursorDate = new Date(cursor);
-    conditions.push(sql`${duets.createdAt} < ${cursorDate}`);
+    conditions.push(lt(duets.createdAt, cursorDate));
   }
 
   const results = await db
@@ -695,7 +695,7 @@ videoExtendedRouter.get('/io.exprsn.video.getLoops', optionalAuthMiddleware, asy
   const conditions = [eq(stitches.originalVideoUri, uri)];
   if (cursor) {
     const cursorDate = new Date(cursor);
-    conditions.push(sql`${stitches.createdAt} < ${cursorDate}`);
+    conditions.push(lt(stitches.createdAt, cursorDate));
   }
 
   const results = await db

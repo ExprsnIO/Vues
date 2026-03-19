@@ -1,5 +1,5 @@
 import { CronJob } from 'cron';
-import { dbType, executeRawSql } from '../db.js';
+import { executeRawSql } from '../db.js';
 import { sql } from 'drizzle-orm';
 
 export class TrendingSoundsCalculator {
@@ -22,12 +22,6 @@ export class TrendingSoundsCalculator {
 
   async calculate() {
     console.log('Calculating trending sounds...');
-
-    // SQLite doesn't support the PostgreSQL-specific SQL syntax used here
-    if (dbType === 'sqlite') {
-      console.log('Trending sounds calculation skipped (SQLite mode - use PostgreSQL for full functionality)');
-      return;
-    }
 
     try {
       // Calculate trending scores for sounds

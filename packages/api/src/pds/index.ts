@@ -9,6 +9,7 @@ import { createLocalBlobStore, createS3BlobStore, BlockStore, Repository } from 
 import { CID } from 'multiformats/cid';
 import { db } from '../db/index.js';
 import { actorRepos, repoCommits, repoRecords, blobs, repoBlocks, sessions } from '../db/schema.js';
+import { hashSessionToken, generateSessionTokens } from '../utils/session-tokens.js';
 
 export type { OnCommitCallback } from '@exprsn/pds';
 
@@ -142,33 +143,40 @@ function createAccountStore() {
 /**
  * Session store implementation
  * Implements SessionStore interface
+ * Note: Tokens are stored as SHA-256 hashes for security
  */
 function createSessionStore() {
   return {
     async createSession(did: string): Promise<{ accessJwt: string; refreshJwt: string }> {
-      const accessJwt = `exp_${crypto.randomUUID().replace(/-/g, '')}`;
-      const refreshJwt = `exp_refresh_${crypto.randomUUID().replace(/-/g, '')}`;
+      // Generate tokens with hashes for storage
+      const { accessToken, refreshToken, accessTokenHash, refreshTokenHash } = generateSessionTokens();
       const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
 
+      // Store hashes, not raw tokens
       await db.insert(sessions).values({
         id: crypto.randomUUID(),
         did,
-        accessJwt,
-        refreshJwt,
+        accessJwt: accessTokenHash,
+        refreshJwt: refreshTokenHash,
         expiresAt,
       });
 
-      return { accessJwt, refreshJwt };
+      // Return raw tokens to caller
+      return { accessJwt: accessToken, refreshJwt: refreshToken };
     },
 
     async validateAccessToken(token: string): Promise<{ did: string } | null> {
-      const result = await db.select().from(sessions).where(eq(sessions.accessJwt, token)).limit(1);
+      // Hash the token to look it up
+      const tokenHash = hashSessionToken(token);
+      const result = await db.select().from(sessions).where(eq(sessions.accessJwt, tokenHash)).limit(1);
       if (!result[0] || result[0].expiresAt < new Date()) return null;
       return { did: result[0].did };
     },
 
     async validateRefreshToken(token: string): Promise<{ did: string } | null> {
-      const result = await db.select().from(sessions).where(eq(sessions.refreshJwt, token)).limit(1);
+      // Hash the token to look it up
+      const tokenHash = hashSessionToken(token);
+      const result = await db.select().from(sessions).where(eq(sessions.refreshJwt, tokenHash)).limit(1);
       if (!result[0]) return null;
       return { did: result[0].did };
     },

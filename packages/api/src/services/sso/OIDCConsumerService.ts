@@ -44,6 +44,11 @@ export interface ExternalProvider {
   requiredEmailDomain?: string;
   status: string;
   priority: number;
+  // Exprsn-specific fields
+  allowedScopes?: string[];
+  scopePolicy?: 'inherit' | 'restrict' | 'expand';
+  roleMapping?: Record<string, string>;
+  defaultAccountType?: 'personal' | 'creator' | 'business';
 }
 
 export interface ExternalIdentity {
@@ -160,6 +165,26 @@ const PROVIDER_CONFIGS: Record<string, Partial<ExternalProvider>> = {
       picture: 'avatar',
     },
   },
+  exprsn: {
+    displayName: 'Exprsn',
+    type: 'oidc' as const,
+    // Endpoints are dynamically resolved from the issuer URL at registration time.
+    // These path templates are appended to the configured issuer during discovery.
+    authorizationEndpoint: '/sso/auth/authorize',
+    tokenEndpoint: '/sso/auth/token',
+    userinfoEndpoint: '/sso/auth/userinfo',
+    jwksUri: '/sso/auth/.well-known/jwks.json',
+    issuer: '', // Set from the remote instance URL at registration time
+    scopes: ['openid', 'profile', 'email'],
+    claimMapping: {
+      id: 'sub',
+      email: 'email',
+      name: 'name',
+      givenName: 'given_name',
+      familyName: 'family_name',
+      picture: 'picture',
+    },
+  },
 };
 
 class OIDCConsumerServiceImpl {
@@ -198,11 +223,23 @@ class OIDCConsumerServiceImpl {
     autoProvisionUsers?: boolean;
     defaultRole?: string;
     requiredEmailDomain?: string;
+    // Exprsn-specific
+    allowedScopes?: string[];
+    scopePolicy?: 'inherit' | 'restrict' | 'expand';
+    roleMapping?: Record<string, string>;
+    defaultAccountType?: 'personal' | 'creator' | 'business';
   }): Promise<ExternalProvider> {
     const id = nanoid();
 
     // Merge with known provider config if available
     const knownConfig = PROVIDER_CONFIGS[config.providerKey] || {};
+
+    // Build jitConfig, merging Exprsn-specific fields when present
+    const jitConfig: Record<string, unknown> = {};
+    if (config.allowedScopes !== undefined) jitConfig.allowedScopes = config.allowedScopes;
+    if (config.scopePolicy !== undefined) jitConfig.scopePolicy = config.scopePolicy;
+    if (config.roleMapping !== undefined) jitConfig.roleMapping = config.roleMapping;
+    if (config.defaultAccountType !== undefined) jitConfig.defaultAccountType = config.defaultAccountType;
 
     const [inserted] = await db
       .insert(externalIdentityProviders)
@@ -227,6 +264,7 @@ class OIDCConsumerServiceImpl {
         autoProvisionUsers: config.autoProvisionUsers ?? true,
         defaultRole: config.defaultRole || 'member',
         requiredEmailDomain: config.requiredEmailDomain,
+        jitConfig: Object.keys(jitConfig).length > 0 ? jitConfig : undefined,
         status: 'active',
       })
       .returning();
@@ -400,6 +438,14 @@ class OIDCConsumerServiceImpl {
     if (provider.providerKey === 'google') {
       authUrl.searchParams.set('access_type', 'offline');
       authUrl.searchParams.set('prompt', 'consent');
+    }
+
+    if (provider.providerKey === 'exprsn' || provider.providerKey.startsWith('exprsn:')) {
+      // Merge allowedScopes from provider config into the scope parameter
+      if (provider.allowedScopes?.length) {
+        const merged = Array.from(new Set([...provider.scopes, ...provider.allowedScopes]));
+        authUrl.searchParams.set('scope', merged.join(' '));
+      }
     }
 
     return { authUrl: authUrl.toString(), state };
@@ -768,6 +814,8 @@ class OIDCConsumerServiceImpl {
   // ==========================================
 
   private toProvider(p: typeof externalIdentityProviders.$inferSelect): ExternalProvider {
+    const jit = (p.jitConfig as Record<string, unknown> | null) || {};
+
     return {
       id: p.id,
       name: p.name,
@@ -791,6 +839,11 @@ class OIDCConsumerServiceImpl {
       requiredEmailDomain: p.requiredEmailDomain || undefined,
       status: p.status || 'active',
       priority: p.priority || 0,
+      // Exprsn-specific fields stored in jitConfig
+      allowedScopes: Array.isArray(jit.allowedScopes) ? (jit.allowedScopes as string[]) : undefined,
+      scopePolicy: (jit.scopePolicy as 'inherit' | 'restrict' | 'expand') || undefined,
+      roleMapping: jit.roleMapping ? (jit.roleMapping as Record<string, string>) : undefined,
+      defaultAccountType: (jit.defaultAccountType as 'personal' | 'creator' | 'business') || undefined,
     };
   }
 

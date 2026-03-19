@@ -7,6 +7,7 @@ import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import { eq, and, desc, gte, sql, inArray } from 'drizzle-orm';
 import * as schema from '../../db/schema.js';
 import { CronJob } from 'cron';
+import { nanoid } from 'nanoid';
 
 /**
  * Parsed hashtag from text
@@ -18,6 +19,11 @@ export interface ParsedHashtag {
 }
 
 /**
+ * Trending direction: whether the hashtag is gaining or losing momentum
+ */
+export type TrendingDirection = 'up' | 'down' | 'stable';
+
+/**
  * Trending hashtag
  */
 export interface TrendingHashtag {
@@ -26,6 +32,7 @@ export interface TrendingHashtag {
   viewCount: number;
   velocity: number;
   rank: number;
+  direction: TrendingDirection;
 }
 
 /**
@@ -35,6 +42,7 @@ export interface HashtagDetails {
   tag: string;
   videoCount: number;
   viewCount: number;
+  followerCount: number;
   createdAt?: Date;
   lastUsedAt?: Date;
 }
@@ -173,6 +181,7 @@ export class HashtagService {
       await this.db
         .insert(schema.videoHashtags)
         .values({
+          id: nanoid(),
           videoUri,
           tag,
           createdAt: new Date(),
@@ -225,6 +234,7 @@ export class HashtagService {
       tag: hashtag.tag,
       videoCount: hashtag.videoCount,
       viewCount: hashtag.viewCount,
+      followerCount: hashtag.followerCount,
       createdAt: hashtag.createdAt,
       lastUsedAt: hashtag.lastUsedAt || undefined,
     };
@@ -252,6 +262,7 @@ export class HashtagService {
       tag: h.tag,
       videoCount: h.videoCount,
       viewCount: h.viewCount,
+      followerCount: h.followerCount,
       createdAt: h.createdAt,
       lastUsedAt: h.lastUsedAt || undefined,
     }));
@@ -273,7 +284,24 @@ export class HashtagService {
       viewCount: t.viewCount,
       velocity: t.velocity,
       rank: t.rank,
+      direction: (t.direction as TrendingDirection) ?? 'stable',
     }));
+  }
+
+  /**
+   * Compute direction by comparing current velocity to previous period velocity
+   */
+  private computeDirection(
+    currentVelocity: number,
+    previousVelocity: number | null | undefined
+  ): TrendingDirection {
+    if (previousVelocity == null) return 'stable';
+    const delta = currentVelocity - previousVelocity;
+    // Use a 10% relative threshold to avoid noise on low-velocity tags
+    const threshold = Math.max(previousVelocity * 0.1, 0.01);
+    if (delta > threshold) return 'up';
+    if (delta < -threshold) return 'down';
+    return 'stable';
   }
 
   /**
@@ -284,6 +312,14 @@ export class HashtagService {
 
     const now = new Date();
     const velocityWindow = new Date(now.getTime() - this.velocityWindowHours * 60 * 60 * 1000);
+    // Previous period window: one full velocity window before the current window
+    const previousWindowStart = new Date(velocityWindow.getTime() - this.velocityWindowHours * 60 * 60 * 1000);
+
+    // Snapshot previous velocities before clearing the table
+    const previousTrending = await this.db
+      .select({ tag: schema.trendingHashtags.tag, velocity: schema.trendingHashtags.velocity })
+      .from(schema.trendingHashtags);
+    const previousVelocityMap = new Map(previousTrending.map((t) => [t.tag, t.velocity]));
 
     // Get hashtags with recent activity
     const hashtagsWithActivity = await this.db
@@ -297,23 +333,40 @@ export class HashtagService {
           WHERE vh.tag = ${schema.hashtags.tag}
           AND v.created_at >= ${velocityWindow}
         )`,
+        previousPeriodVideos: sql<number>`(
+          SELECT COUNT(*) FROM ${schema.videoHashtags} vh
+          JOIN ${schema.videos} v ON vh.video_uri = v.uri
+          WHERE vh.tag = ${schema.hashtags.tag}
+          AND v.created_at >= ${previousWindowStart}
+          AND v.created_at < ${velocityWindow}
+        )`,
       })
       .from(schema.hashtags)
       .where(gte(schema.hashtags.videoCount, this.minVideosForTrending));
 
-    // Calculate velocity and score
+    // Calculate velocity, direction, and score
     const scored = hashtagsWithActivity.map((h) => {
       const recentVideos = Number(h.recentVideos) || 0;
+      const previousVideos = Number(h.previousPeriodVideos) || 0;
       const velocity = recentVideos / this.velocityWindowHours;
+      // Use previous-period video count to derive a comparable previous velocity.
+      // Fall back to the last stored velocity if available (avoids cold-start issues).
+      const derivedPreviousVelocity = previousVideos > 0
+        ? previousVideos / this.velocityWindowHours
+        : (previousVelocityMap.get(h.tag) ?? null);
+
+      const direction = this.computeDirection(velocity, derivedPreviousVelocity);
 
       // Score combines total popularity with recent velocity
-      const score = (h.videoCount * 0.3 + h.viewCount * 0.3 + velocity * 100 * 0.4);
+      const score = h.videoCount * 0.3 + h.viewCount * 0.3 + velocity * 100 * 0.4;
 
       return {
         tag: h.tag,
         videoCount: h.videoCount,
         viewCount: h.viewCount,
         velocity,
+        previousVelocity: derivedPreviousVelocity,
+        direction,
         score,
       };
     });
@@ -332,6 +385,8 @@ export class HashtagService {
           videoCount: h.videoCount,
           viewCount: h.viewCount,
           velocity: h.velocity,
+          previousVelocity: h.previousVelocity,
+          direction: h.direction,
           rank: index + 1,
           calculatedAt: now,
         }))

@@ -290,6 +290,12 @@ export class StripeGateway extends BasePaymentGateway {
         expiryYear: pm.card?.exp_year,
       }));
     } catch (error) {
+      const stripeError = error as Error;
+      console.error('Stripe listPaymentMethods error:', {
+        customerId,
+        message: stripeError.message,
+        name: stripeError.name,
+      });
       return [];
     }
   }

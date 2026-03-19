@@ -2,7 +2,7 @@ import type { Metadata, ResolvingMetadata } from 'next';
 import { VideoPageClient } from './VideoPageClient';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3002';
-const APP_URL = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
+const APP_URL = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3001';
 
 interface VideoPageProps {
   params: Promise<{ uri: string }>;

@@ -39,6 +39,7 @@ export interface CertificateData {
 export interface CreateAccountResult extends LocalSession {
   didMethod?: string;
   certificate?: CertificateData;
+  apiToken?: string;
 }
 
 // =============================================================================
@@ -56,6 +57,7 @@ export async function createAccount(data: {
   password: string;
   displayName?: string;
   accountType?: AccountType;
+  didMethod?: 'plc' | 'web' | 'exprn';
 }): Promise<CreateAccountResult> {
   const response = await fetch(`${API_BASE}/xrpc/io.exprsn.auth.createAccount`, {
     method: 'POST',
@@ -83,11 +85,12 @@ export async function createAccount(data: {
     localStorage.setItem(USER_KEY, JSON.stringify(result.user));
   }
 
-  // Return result including certificate if present
+  // Return result including certificate and apiToken if present
   return {
     ...session,
     didMethod: result.didMethod,
     certificate: result.certificate,
+    apiToken: result.apiToken,
   };
 }
 

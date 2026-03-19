@@ -6,7 +6,7 @@
 import { Hono } from 'hono';
 import { db } from '../db/index.js';
 import { sounds, trendingSounds, soundUsageHistory, videos, users } from '../db/schema.js';
-import { eq, desc, like, and, gte, sql, ilike, or } from 'drizzle-orm';
+import { eq, desc, like, and, gte, sql, ilike, or, lt, gt } from 'drizzle-orm';
 import { optionalAuthMiddleware } from '../auth/middleware.js';
 
 const soundsRouter = new Hono();
@@ -225,20 +225,21 @@ soundsRouter.get('/io.exprsn.sound.getVideosUsing', optionalAuthMiddleware, asyn
       if (sort === 'popular') {
         conditions.push(
           or(
-            sql`${videos.likeCount} < ${parseInt(sortValue)}`,
+            lt(videos.likeCount, parseInt(sortValue)),
             and(
               eq(videos.likeCount, parseInt(sortValue)),
-              sql`${videos.uri} > ${cursorUri}`
+              gt(videos.uri, cursorUri)
             )
           )!
         );
       } else {
+        const cursorDate = new Date(sortValue);
         conditions.push(
           or(
-            sql`${videos.createdAt} < ${new Date(sortValue)}`,
+            lt(videos.createdAt, cursorDate),
             and(
-              eq(videos.createdAt, new Date(sortValue)),
-              sql`${videos.uri} > ${cursorUri}`
+              eq(videos.createdAt, cursorDate),
+              gt(videos.uri, cursorUri)
             )
           )!
         );

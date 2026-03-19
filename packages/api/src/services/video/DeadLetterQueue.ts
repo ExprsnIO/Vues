@@ -22,7 +22,7 @@ export interface DLQEntry {
   failureReason: string;
   failedAt: Date;
   attempts: number;
-  lastError: string;
+  lastError: string | null;
   jobData: Record<string, unknown>;
   canRequeue: boolean;
 }
@@ -124,8 +124,7 @@ export class DeadLetterQueueService {
       failureReason: errorType,
       failedAt: new Date(),
       attempts,
-      lastError: errorMessage,
-      stackTrace: error.stack,
+      lastError: error.stack ? `${errorMessage}\n${error.stack}` : errorMessage,
       jobData: job.data as Record<string, unknown>,
       canRequeue,
       createdAt: new Date(),

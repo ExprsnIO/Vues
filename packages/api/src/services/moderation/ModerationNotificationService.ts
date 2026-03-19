@@ -437,13 +437,13 @@ export class ModerationNotificationService {
    */
   async cleanupExpired(): Promise<number> {
     const now = new Date();
-    const result = await db
+    // Use returning() to get deleted rows and count them
+    const deleted = await db
       .delete(moderationNotifications)
-      .where(lt(moderationNotifications.expiresAt, now));
+      .where(lt(moderationNotifications.expiresAt, now))
+      .returning({ id: moderationNotifications.id });
 
-    // Note: drizzle-orm doesn't return affected rows count directly
-    // This is a placeholder - actual implementation may vary
-    return 0;
+    return deleted.length;
   }
 
   /**

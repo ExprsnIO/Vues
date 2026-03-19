@@ -165,7 +165,7 @@ export class SLATrackingService {
     }
 
     // Fall back to defaults
-    return DEFAULT_SLA_CONFIGS.find(c => c.priority === priority) || DEFAULT_SLA_CONFIGS[2];
+    return DEFAULT_SLA_CONFIGS.find(c => c.priority === priority) || DEFAULT_SLA_CONFIGS[2]!;
   }
 
   /**
@@ -262,20 +262,37 @@ export class SLATrackingService {
     const alerts: SLAAlert[] = [];
 
     // Check moderation reports
-    const pendingReports = await db.execute(sql`
+    // Note: The schema doesn't have domain_id, priority, or first_response_at columns.
+    // This service assumes an extended schema with SLA tracking columns.
+    // In production, you would need to add these columns via migration.
+    const pendingReportsResult = await db.execute<{
+      id: string;
+      domain_id: string;
+      priority: string;
+      created_at: string;
+      first_response_at: string | null;
+      resolved_at: string | null;
+      assigned_to: string | null;
+    }>(sql`
       SELECT
-        id, domain_id, priority, created_at,
-        first_response_at, resolved_at, assigned_to
+        id,
+        'default' as domain_id,
+        'medium' as priority,
+        created_at,
+        assigned_at as first_response_at,
+        resolved_at,
+        assigned_to
       FROM moderation_reports
-      WHERE status IN ('pending', 'in_progress', 'escalated')
+      WHERE status IN ('open', 'investigating', 'escalated')
     `);
+    const pendingReports = Array.isArray(pendingReportsResult) ? pendingReportsResult : [];
 
-    for (const report of pendingReports.rows as any[]) {
+    for (const report of pendingReports) {
       const status = this.calculateSLAStatus({
         id: report.id,
         type: 'report',
         priority: report.priority || 'medium',
-        domainId: report.domain_id,
+        domainId: report.domain_id || 'default',
         createdAt: new Date(report.created_at),
         firstResponseAt: report.first_response_at ? new Date(report.first_response_at) : null,
         resolvedAt: report.resolved_at ? new Date(report.resolved_at) : null,
@@ -333,20 +350,35 @@ export class SLATrackingService {
     }
 
     // Check appeals
-    const pendingAppeals = await db.execute(sql`
+    // Note: Appeals table also needs extended schema with SLA tracking columns
+    const pendingAppealsResult = await db.execute<{
+      id: string;
+      domain_id: string;
+      priority: string;
+      created_at: string;
+      first_response_at: string | null;
+      resolved_at: string | null;
+      assigned_to: string | null;
+    }>(sql`
       SELECT
-        id, domain_id, priority, created_at,
-        first_response_at, resolved_at, assigned_to
+        id,
+        'default' as domain_id,
+        'high' as priority,
+        created_at,
+        reviewed_at as first_response_at,
+        reviewed_at as resolved_at,
+        reviewed_by as assigned_to
       FROM moderation_appeals
-      WHERE status IN ('pending', 'in_review')
+      WHERE status IN ('pending', 'reviewing')
     `);
+    const pendingAppeals = Array.isArray(pendingAppealsResult) ? pendingAppealsResult : [];
 
-    for (const appeal of pendingAppeals.rows as any[]) {
+    for (const appeal of pendingAppeals) {
       const status = this.calculateSLAStatus({
         id: appeal.id,
         type: 'appeal',
         priority: appeal.priority || 'high',
-        domainId: appeal.domain_id,
+        domainId: appeal.domain_id || 'default',
         createdAt: new Date(appeal.created_at),
         firstResponseAt: appeal.first_response_at ? new Date(appeal.first_response_at) : null,
         resolvedAt: appeal.resolved_at ? new Date(appeal.resolved_at) : null,
@@ -412,30 +444,31 @@ export class SLATrackingService {
    * Get queue metrics for all domains
    */
   async getQueueMetrics(domainId?: string): Promise<QueueMetrics[]> {
-    const whereClause = domainId ? sql`WHERE domain_id = ${domainId}` : sql``;
+    // Note: Using 'default' domain since domain_id and priority columns don't exist in current schema
+    const whereClause = sql``;
 
     const result = await db.execute(sql`
       WITH report_stats AS (
         SELECT
-          domain_id,
-          COUNT(*) FILTER (WHERE status = 'pending') as pending,
-          COUNT(*) FILTER (WHERE status = 'in_progress') as in_progress,
-          COUNT(*) FILTER (WHERE priority = 'critical' AND status IN ('pending', 'in_progress')) as critical_count,
-          COUNT(*) FILTER (WHERE priority = 'high' AND status IN ('pending', 'in_progress')) as high_count,
-          COUNT(*) FILTER (WHERE priority = 'medium' AND status IN ('pending', 'in_progress')) as medium_count,
-          COUNT(*) FILTER (WHERE priority = 'low' AND status IN ('pending', 'in_progress')) as low_count,
+          'default' as domain_id,
+          COUNT(*) FILTER (WHERE status = 'open') as pending,
+          COUNT(*) FILTER (WHERE status = 'investigating') as in_progress,
+          0 as critical_count,
+          0 as high_count,
+          COUNT(*) FILTER (WHERE status IN ('open', 'investigating')) as medium_count,
+          0 as low_count,
           AVG(EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - created_at))/60)
-            FILTER (WHERE status IN ('pending', 'in_progress')) as avg_wait_minutes,
+            FILTER (WHERE status IN ('open', 'investigating')) as avg_wait_minutes,
           MAX(EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - created_at))/60)
-            FILTER (WHERE status IN ('pending', 'in_progress')) as oldest_minutes
+            FILTER (WHERE status IN ('open', 'investigating')) as oldest_minutes
         FROM moderation_reports
         ${whereClause}
-        GROUP BY domain_id
       )
       SELECT * FROM report_stats
     `);
 
-    return (result.rows as any[]).map(row => ({
+    const resultArray = Array.isArray(result) ? result : [];
+    return resultArray.map((row: any) => ({
       domainId: row.domain_id,
       pending: Number(row.pending) || 0,
       inProgress: Number(row.in_progress) || 0,
@@ -461,26 +494,20 @@ export class SLATrackingService {
     domainId?: string
   ): Promise<ModeratorMetrics> {
     const periodDays = period === 'day' ? 1 : period === 'week' ? 7 : 30;
-    const domainFilter = domainId ? sql`AND domain_id = ${domainId}` : sql``;
+    const domainFilter = sql``;
 
     const result = await db.execute(sql`
       WITH moderator_actions AS (
         SELECT
           COUNT(*) as total_assigned,
           COUNT(*) FILTER (WHERE status IN ('resolved', 'dismissed')) as total_resolved,
-          AVG(EXTRACT(EPOCH FROM (first_response_at - created_at))/60)
-            FILTER (WHERE first_response_at IS NOT NULL) as avg_response_time,
+          AVG(EXTRACT(EPOCH FROM (assigned_at - created_at))/60)
+            FILTER (WHERE assigned_at IS NOT NULL) as avg_response_time,
           AVG(EXTRACT(EPOCH FROM (resolved_at - created_at))/60)
             FILTER (WHERE resolved_at IS NOT NULL) as avg_resolution_time,
           COUNT(*) FILTER (WHERE
             resolved_at IS NOT NULL AND
-            EXTRACT(EPOCH FROM (resolved_at - created_at))/60 <=
-              CASE priority
-                WHEN 'critical' THEN 60
-                WHEN 'high' THEN 240
-                WHEN 'medium' THEN 1440
-                ELSE 4320
-              END
+            EXTRACT(EPOCH FROM (resolved_at - created_at))/60 <= 1440
           ) as sla_met_count,
           COUNT(*) FILTER (WHERE status = 'escalated') as escalated_count
         FROM moderation_reports
@@ -490,9 +517,10 @@ export class SLATrackingService {
       ),
       appeal_stats AS (
         SELECT
-          COUNT(*) FILTER (WHERE outcome = 'overturned' AND original_moderator = ${moderatorId}) as appeal_overturns
+          COUNT(*) FILTER (WHERE decision = 'approved') as appeal_overturns
         FROM moderation_appeals
-        WHERE created_at >= CURRENT_TIMESTAMP - INTERVAL '1 day' * ${periodDays}
+        WHERE reviewed_by = ${moderatorId}
+          AND created_at >= CURRENT_TIMESTAMP - INTERVAL '1 day' * ${periodDays}
           ${domainFilter}
       )
       SELECT
@@ -502,7 +530,8 @@ export class SLATrackingService {
       CROSS JOIN appeal_stats aps
     `);
 
-    const row = result.rows[0] as any;
+    const resultArray = Array.isArray(result) ? result : [];
+    const row = resultArray[0] as any;
     const totalResolved = Number(row?.total_resolved) || 0;
     const slaMet = Number(row?.sla_met_count) || 0;
     const appealOverturns = Number(row?.appeal_overturns) || 0;
@@ -640,7 +669,8 @@ export class SLATrackingService {
 
     const result = await db.execute(query);
 
-    return (result.rows as any[]).map(row => ({
+    const resultArray = Array.isArray(result) ? result : [];
+    return resultArray.map((row: any) => ({
       id: row.id,
       type: row.type,
       severity: row.severity,

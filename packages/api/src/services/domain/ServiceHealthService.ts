@@ -126,15 +126,19 @@ export class ServiceHealthService {
       .values({
         id,
         domainId,
-        type: service.type,
-        name: service.name,
-        description: service.description,
+        serviceType: service.type,
         endpoint: service.endpoint,
-        healthEndpoint: service.healthEndpoint || `${service.endpoint}/health`,
         status: 'unknown',
-        metadata: service.metadata || {},
-        config: service.config || {},
-        priority: service.priority || 0,
+        config: {
+          ...(service.config || {}),
+          customSettings: {
+            name: service.name,
+            description: service.description,
+            healthEndpoint: service.healthEndpoint || `${service.endpoint}/health`,
+            metadata: service.metadata || {},
+            priority: service.priority || 0,
+          },
+        },
         enabled: true,
         createdAt: new Date(),
         updatedAt: new Date(),
@@ -166,7 +170,7 @@ export class ServiceHealthService {
       .select()
       .from(schema.domainServices)
       .where(eq(schema.domainServices.domainId, domainId))
-      .orderBy(desc(schema.domainServices.priority));
+      .orderBy(desc(schema.domainServices.createdAt));
 
     if (type) {
       query = this.db
@@ -175,10 +179,10 @@ export class ServiceHealthService {
         .where(
           and(
             eq(schema.domainServices.domainId, domainId),
-            eq(schema.domainServices.type, type)
+            eq(schema.domainServices.serviceType, type)
           )
         )
-        .orderBy(desc(schema.domainServices.priority));
+        .orderBy(desc(schema.domainServices.createdAt));
     }
 
     const services = await query;
@@ -201,10 +205,31 @@ export class ServiceHealthService {
       enabled: boolean;
     }>
   ): Promise<Service | null> {
+    // Get current service to merge config
+    const current = await this.getService(serviceId);
+    if (!current) return null;
+
+    const currentConfig = (current.config || {}) as Record<string, unknown>;
+    const customSettings = (currentConfig.customSettings as Record<string, unknown>) || {};
+
+    if (updates.name !== undefined) customSettings.name = updates.name;
+    if (updates.description !== undefined) customSettings.description = updates.description;
+    if (updates.healthEndpoint !== undefined) customSettings.healthEndpoint = updates.healthEndpoint;
+    if (updates.metadata !== undefined) customSettings.metadata = updates.metadata;
+    if (updates.priority !== undefined) customSettings.priority = updates.priority;
+
+    const configUpdates = {
+      ...currentConfig,
+      ...(updates.config || {}),
+      customSettings,
+    };
+
     const [updated] = await this.db
       .update(schema.domainServices)
       .set({
-        ...updates,
+        ...(updates.endpoint !== undefined && { endpoint: updates.endpoint }),
+        ...(updates.enabled !== undefined && { enabled: updates.enabled }),
+        config: configUpdates,
         updatedAt: new Date(),
       })
       .where(eq(schema.domainServices.id, serviceId))
@@ -389,17 +414,30 @@ export class ServiceHealthService {
   ): Promise<ServiceMetrics> {
     const periodStart = new Date(Date.now() - periodHours * 60 * 60 * 1000);
 
-    // Get health check history
+    // Get the service to find its domain
+    const service = await this.getService(serviceId);
+    if (!service) {
+      return {
+        serviceId,
+        uptime: 100,
+        avgResponseTime: 0,
+        errorRate: 0,
+        requestsPerMinute: 0,
+        lastHour: [],
+      };
+    }
+
+    // Get health check history from domainHealthChecks
     const checks = await this.db
       .select()
-      .from(schema.serviceHealthChecks)
+      .from(schema.domainHealthChecks)
       .where(
         and(
-          eq(schema.serviceHealthChecks.serviceId, serviceId),
-          gte(schema.serviceHealthChecks.checkedAt, periodStart)
+          eq(schema.domainHealthChecks.domainId, service.domainId),
+          gte(schema.domainHealthChecks.checkedAt, periodStart)
         )
       )
-      .orderBy(schema.serviceHealthChecks.checkedAt);
+      .orderBy(schema.domainHealthChecks.checkedAt);
 
     if (checks.length === 0) {
       return {
@@ -505,15 +543,15 @@ export class ServiceHealthService {
       throw new Error('Domain not found');
     }
 
-    const settings = (domain.settings as Record<string, unknown>) || {};
-    const failoverConfigs = (settings.failover as Record<string, FailoverConfig>) || {};
+    const federationConfig = domain.federationConfig as unknown as Record<string, unknown>;
+    const failoverConfigs = (federationConfig?.failover as Record<string, FailoverConfig>) || {};
 
     failoverConfigs[serviceType] = config;
 
     await this.db
       .update(schema.domains)
       .set({
-        settings: { ...settings, failover: failoverConfigs },
+        federationConfig: { ...federationConfig, failover: failoverConfigs } as any,
         updatedAt: new Date(),
       })
       .where(eq(schema.domains.id, domainId));
@@ -534,8 +572,8 @@ export class ServiceHealthService {
       return null;
     }
 
-    const settings = (domain.settings as Record<string, unknown>) || {};
-    const failoverConfigs = (settings.failover as Record<string, FailoverConfig>) || {};
+    const federationConfig = domain.federationConfig as unknown as Record<string, unknown>;
+    const failoverConfigs = (federationConfig?.failover as Record<string, FailoverConfig>) || {};
 
     return failoverConfigs[serviceType] || null;
   }
@@ -603,21 +641,24 @@ export class ServiceHealthService {
   // ==========================================
 
   private toService(s: typeof schema.domainServices.$inferSelect): Service {
+    const config = (s.config as Record<string, unknown>) || {};
+    const customSettings = (config.customSettings as Record<string, unknown>) || {};
+
     return {
       id: s.id,
       domainId: s.domainId,
-      type: s.type as ServiceType,
-      name: s.name,
-      description: s.description || undefined,
-      endpoint: s.endpoint,
-      healthEndpoint: s.healthEndpoint || undefined,
+      type: s.serviceType as ServiceType,
+      name: (customSettings.name as string) || s.serviceType,
+      description: (customSettings.description as string) || undefined,
+      endpoint: s.endpoint || '',
+      healthEndpoint: (customSettings.healthEndpoint as string) || undefined,
       status: (s.status as ServiceStatus) || 'unknown',
-      lastCheckedAt: s.lastCheckedAt || undefined,
-      lastHealthyAt: s.lastHealthyAt || undefined,
+      lastCheckedAt: s.lastHealthCheck || undefined,
+      lastHealthyAt: undefined, // Not stored in schema
       errorMessage: s.errorMessage || undefined,
-      metadata: (s.metadata as Record<string, unknown>) || undefined,
-      config: (s.config as Record<string, unknown>) || undefined,
-      priority: s.priority || 0,
+      metadata: (customSettings.metadata as Record<string, unknown>) || undefined,
+      config: config,
+      priority: (customSettings.priority as number) || 0,
       enabled: s.enabled ?? true,
     };
   }
@@ -629,14 +670,10 @@ export class ServiceHealthService {
   ): Promise<void> {
     const updates: Partial<typeof schema.domainServices.$inferInsert> = {
       status,
-      lastCheckedAt: new Date(),
+      lastHealthCheck: new Date(),
       errorMessage: error,
       updatedAt: new Date(),
     };
-
-    if (status === 'healthy') {
-      updates.lastHealthyAt = new Date();
-    }
 
     await this.db
       .update(schema.domainServices)
@@ -652,13 +689,17 @@ export class ServiceHealthService {
     error?: string
   ): Promise<void> {
     try {
-      await this.db.insert(schema.serviceHealthChecks).values({
+      const service = await this.getService(serviceId);
+      if (!service) return;
+
+      await this.db.insert(schema.domainHealthChecks).values({
         id: nanoid(),
-        serviceId,
+        domainId: service.domainId,
+        checkType: service.type,
         status,
         responseTime,
+        errorMessage: error,
         details: details || {},
-        error,
         checkedAt: new Date(),
       });
     } catch (err) {
@@ -673,8 +714,8 @@ export class ServiceHealthService {
     const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
 
     const result = await this.db
-      .delete(schema.serviceHealthChecks)
-      .where(sql`${schema.serviceHealthChecks.checkedAt} < ${cutoff}`)
+      .delete(schema.domainHealthChecks)
+      .where(sql`${schema.domainHealthChecks.checkedAt} < ${cutoff}`)
       .returning();
 
     return result.length;

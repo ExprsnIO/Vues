@@ -35,9 +35,59 @@ export function createWellKnownRouter(config: WellKnownConfig) {
 
   /**
    * /.well-known/atproto-did
-   * Return the service DID for this server
+   *
+   * AT Protocol handle verification via HTTP.
+   * When a client resolves handle `alice.exprsn.io`, it fetches
+   * `https://alice.exprsn.io/.well-known/atproto-did` and expects the user's DID.
+   *
+   * If the request Host matches the service domain exactly, return the service DID.
+   * Otherwise attempt a handle lookup so user subdomains (alice.exprsn.io) resolve
+   * to the individual user's DID.
    */
-  router.get('/atproto-did', (c) => {
+  router.get('/atproto-did', async (c) => {
+    const host = c.req.header('host') || '';
+    // Strip port if present for comparison
+    const hostWithoutPort = host.split(':')[0] || host;
+    const serviceHostWithoutPort = config.domain.split(':')[0] || config.domain;
+
+    // Exact match — return the service DID
+    if (hostWithoutPort === serviceHostWithoutPort) {
+      return c.text(config.serviceDid);
+    }
+
+    // Sub-domain handle resolution: alice.exprsn.io -> look up alice
+    if (hostWithoutPort.endsWith(`.${serviceHostWithoutPort}`)) {
+      const handle = hostWithoutPort.slice(0, -(serviceHostWithoutPort.length + 1));
+      if (handle) {
+        try {
+          // Lazy import to avoid circular dependency
+          const { db } = await import('../db/index.js');
+          const { actorRepos } = await import('../db/schema.js');
+          const { eq } = await import('drizzle-orm');
+          const result = await (db as import('drizzle-orm/postgres-js').PostgresJsDatabase<typeof import('../db/schema.js')>)
+            .select({ did: actorRepos.did })
+            .from(actorRepos)
+            .where(eq(actorRepos.handle, `${handle}.${serviceHostWithoutPort}`))
+            .limit(1);
+          if (result[0]?.did) {
+            return c.text(result[0].did);
+          }
+          // Also try bare handle (without domain suffix) for legacy handles
+          const result2 = await (db as import('drizzle-orm/postgres-js').PostgresJsDatabase<typeof import('../db/schema.js')>)
+            .select({ did: actorRepos.did })
+            .from(actorRepos)
+            .where(eq(actorRepos.handle, handle))
+            .limit(1);
+          if (result2[0]?.did) {
+            return c.text(result2[0].did);
+          }
+        } catch {
+          // DB unavailable — fall through to service DID
+        }
+      }
+    }
+
+    // Default: return service DID
     return c.text(config.serviceDid);
   });
 
@@ -70,7 +120,8 @@ export function createWellKnownRouter(config: WellKnownConfig) {
 
     if (config.pdsEndpoint) {
       services.push({
-        id: `${config.serviceDid}#atproto_pds`,
+        // Short-form ID required by AT Protocol DID document spec
+        id: '#atproto_pds',
         type: 'AtprotoPersonalDataServer',
         serviceEndpoint: config.pdsEndpoint,
       });
@@ -78,7 +129,7 @@ export function createWellKnownRouter(config: WellKnownConfig) {
 
     if (config.relayEndpoint) {
       services.push({
-        id: `${config.serviceDid}#atproto_relay`,
+        id: '#atproto_relay',
         type: 'AtprotoRelay',
         serviceEndpoint: config.relayEndpoint,
       });
@@ -86,7 +137,7 @@ export function createWellKnownRouter(config: WellKnownConfig) {
 
     if (config.appviewEndpoint) {
       services.push({
-        id: `${config.serviceDid}#atproto_appview`,
+        id: '#atproto_appview',
         type: 'AtprotoAppView',
         serviceEndpoint: config.appviewEndpoint,
       });
@@ -538,16 +589,32 @@ export function createOCSPRouter() {
  * Create well-known routes with environment-based configuration
  */
 export function createWellKnownRouterFromEnv() {
-  const domain = process.env.DOMAIN || 'localhost:3000';
+  const domain = process.env.DOMAIN || process.env.PDS_DOMAIN || 'localhost:3000';
   const appUrl = process.env.APP_URL || `https://${domain}`;
+  // SERVICE_DID takes precedence; fall back to did:web derived from domain.
+  // Colons in the domain must be percent-encoded in did:web identifiers.
   const serviceDid =
     process.env.SERVICE_DID || `did:web:${domain.replace(/:/g, '%3A')}`;
+
+  // PDS endpoint: either an explicit override or the instance's /xrpc path.
+  // Only advertise if PDS_ENABLED is true or an explicit PDS_ENDPOINT is set.
+  const pdsEnabled = process.env.PDS_ENABLED === 'true';
+  const pdsEndpoint =
+    process.env.PDS_ENDPOINT || (pdsEnabled ? `${appUrl}` : undefined);
+
+  // Relay endpoint: only advertise if RELAY_ENABLED is true or explicitly set.
+  const relayEnabled = process.env.RELAY_ENABLED === 'true';
+  const relayEndpoint =
+    process.env.RELAY_ENDPOINT ||
+    (relayEnabled
+      ? `${appUrl.replace(/^http/, 'ws')}/xrpc/com.atproto.sync.subscribeRepos`
+      : undefined);
 
   return createWellKnownRouter({
     serviceDid,
     domain,
-    pdsEndpoint: process.env.PDS_ENDPOINT || `${appUrl}/xrpc`,
-    relayEndpoint: process.env.RELAY_ENDPOINT,
+    pdsEndpoint,
+    relayEndpoint,
     appviewEndpoint: process.env.APPVIEW_ENDPOINT,
     oauthConfig: process.env.OAUTH_ENABLED
       ? {

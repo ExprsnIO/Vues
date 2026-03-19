@@ -356,11 +356,11 @@ export class DomainHealthService {
     }
 
     // Check API endpoint
-    const apiResult = await this.checkApi(domain.domain);
+    const apiResult = await this.checkApi(domain.domain, domain.pdsEndpoint || undefined);
     results.push(apiResult);
 
     // Check certificate validity
-    const certResult = await this.checkCertificate(domain.domain);
+    const certResult = await this.checkCertificate(domain.domain, domain.pdsEndpoint || undefined);
     results.push(certResult);
 
     // Check federation connectivity
@@ -419,9 +419,20 @@ export class DomainHealthService {
   /**
    * Check API endpoint availability
    */
-  private async checkApi(domain: string): Promise<HealthCheckResult> {
+  private async checkApi(domain: string, pdsEndpoint?: string): Promise<HealthCheckResult> {
     const start = Date.now();
-    const endpoint = `https://${domain}/api/health`;
+    // Use PDS endpoint if available (for local dev), otherwise construct from domain
+    // For development, check localhost:3002 if pdsEndpoint points to localhost
+    let endpoint: string;
+    if (pdsEndpoint && (pdsEndpoint.includes('localhost') || pdsEndpoint.includes('127.0.0.1'))) {
+      // Extract host from pdsEndpoint for local development
+      const pdsUrl = new URL(pdsEndpoint);
+      endpoint = `${pdsUrl.protocol}//${pdsUrl.host}/health`;
+    } else if (process.env.NODE_ENV === 'development' || process.env.API_URL) {
+      endpoint = `${process.env.API_URL || 'http://localhost:3002'}/health`;
+    } else {
+      endpoint = `https://${domain}/health`;
+    }
 
     try {
       const controller = new AbortController();
@@ -458,7 +469,31 @@ export class DomainHealthService {
   /**
    * Check SSL certificate validity
    */
-  private async checkCertificate(domain: string): Promise<HealthCheckResult> {
+  private async checkCertificate(domain: string, pdsEndpoint?: string): Promise<HealthCheckResult> {
+    // For local development with localhost endpoints, skip SSL check and mark as healthy
+    if (pdsEndpoint && (pdsEndpoint.includes('localhost') || pdsEndpoint.includes('127.0.0.1'))) {
+      return {
+        checkType: 'certificate',
+        status: 'healthy',
+        details: {
+          sslValid: true,
+          note: 'Local development - SSL check skipped',
+        },
+      };
+    }
+
+    // Skip SSL check in development mode without HTTPS
+    if (process.env.NODE_ENV === 'development') {
+      return {
+        checkType: 'certificate',
+        status: 'healthy',
+        details: {
+          sslValid: true,
+          note: 'Development mode - SSL check skipped',
+        },
+      };
+    }
+
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 5000);

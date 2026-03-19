@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { authMiddleware, optionalAuthMiddleware } from '../auth/middleware.js';
 import { db, users, follows, lists, listItems } from '../db/index.js';
-import { eq, desc, and, sql, or } from 'drizzle-orm';
+import { eq, desc, and, sql, or, lt, inArray } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import { getNotificationService } from '../services/notifications/index.js';
 import { badRequest, notFound, conflict, forbidden, userNotFound, validationError } from '../utils/api-errors.js';
@@ -147,7 +147,7 @@ graphRouter.get('/io.exprsn.graph.getFollowers', optionalAuthMiddleware, async (
   const conditions = [eq(follows.followeeDid, did)];
   if (cursor) {
     const cursorDate = new Date(cursor);
-    conditions.push(sql`${follows.createdAt} < ${cursorDate}`);
+    conditions.push(lt(follows.createdAt, cursorDate));
   }
 
   const results = await db
@@ -163,17 +163,15 @@ graphRouter.get('/io.exprsn.graph.getFollowers', optionalAuthMiddleware, async (
 
   // If viewer is logged in, check if they follow each user
   let viewerFollows: Set<string> = new Set();
-  if (viewerDid) {
+  if (viewerDid && results.length > 0) {
+    const userDids = results.map((r) => r.user.did);
     const viewerFollowsQuery = await db
       .select({ followeeDid: follows.followeeDid })
       .from(follows)
       .where(
         and(
           eq(follows.followerDid, viewerDid),
-          sql`${follows.followeeDid} IN (${sql.join(
-            results.map((r) => sql`${r.user.did}`),
-            sql`, `
-          )})`
+          inArray(follows.followeeDid, userDids)
         )
       );
     viewerFollows = new Set(viewerFollowsQuery.map((f) => f.followeeDid));
@@ -235,7 +233,7 @@ graphRouter.get('/io.exprsn.graph.getFollowing', optionalAuthMiddleware, async (
   const followingConditions = [eq(follows.followerDid, did)];
   if (cursor) {
     const cursorDate = new Date(cursor);
-    followingConditions.push(sql`${follows.createdAt} < ${cursorDate}`);
+    followingConditions.push(lt(follows.createdAt, cursorDate));
   }
 
   const results = await db
@@ -252,16 +250,14 @@ graphRouter.get('/io.exprsn.graph.getFollowing', optionalAuthMiddleware, async (
   // If viewer is logged in, check if they follow each user
   let viewerFollows: Set<string> = new Set();
   if (viewerDid && results.length > 0) {
+    const userDids = results.map((r) => r.user.did);
     const viewerFollowsQuery = await db
       .select({ followeeDid: follows.followeeDid })
       .from(follows)
       .where(
         and(
           eq(follows.followerDid, viewerDid),
-          sql`${follows.followeeDid} IN (${sql.join(
-            results.map((r) => sql`${r.user.did}`),
-            sql`, `
-          )})`
+          inArray(follows.followeeDid, userDids)
         )
       );
     viewerFollows = new Set(viewerFollowsQuery.map((f) => f.followeeDid));
@@ -431,7 +427,7 @@ graphRouter.get('/io.exprsn.graph.getLists', optionalAuthMiddleware, async (c) =
   const listConditions = [eq(lists.authorDid, did)];
   if (cursor) {
     const cursorDate = new Date(cursor);
-    listConditions.push(sql`${lists.createdAt} < ${cursorDate}`);
+    listConditions.push(lt(lists.createdAt, cursorDate));
   }
 
   const results = await db
@@ -496,7 +492,7 @@ graphRouter.get('/io.exprsn.graph.getList', optionalAuthMiddleware, async (c) =>
   const itemConditions = [eq(listItems.listUri, uri)];
   if (cursor) {
     const cursorDate = new Date(cursor);
-    itemConditions.push(sql`${listItems.createdAt} < ${cursorDate}`);
+    itemConditions.push(lt(listItems.createdAt, cursorDate));
   }
 
   const members = await db
@@ -581,7 +577,7 @@ graphRouter.post('/io.exprsn.graph.addListItem', authMiddleware, async (c) => {
   });
 
   if (!subjectUser) {
-    throw userNotFound(did);
+    throw userNotFound(subjectDid);
   }
 
   // Check if already in list

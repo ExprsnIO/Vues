@@ -2,18 +2,20 @@
 
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useRouter } from 'next/navigation';
 import { api, type VideoView } from '@/lib/api';
 import { formatCount } from '@/lib/utils';
 import { useAuth } from '@/lib/auth-context';
 import { useLoginModal } from './LoginModal';
 import { CommentThread } from './comments/CommentThread';
-import { CollabLoopModal } from './CollabLoopModal';
 import { ReportModal } from './ReportModal';
 import { ReactionPicker } from './ReactionPicker';
 import { TipModal } from './TipModal';
 import { ShareModal } from './ShareModal';
 import { useVideoShare } from '@/hooks/useVideoShare';
 import toast from 'react-hot-toast';
+import { useMessagingStore } from '@/stores/messaging-store';
+import { ModerationActionMenu } from './moderation/ModerationActionMenu';
 
 interface VideoActionsProps {
   video: VideoView;
@@ -21,13 +23,13 @@ interface VideoActionsProps {
 }
 
 export function VideoActions({ video, onEngagement }: VideoActionsProps) {
-  const { user } = useAuth();
+  const { user, isModerator } = useAuth();
   const { open: openLoginModal } = useLoginModal();
   const queryClient = useQueryClient();
+  const router = useRouter();
   const [isLiked, setIsLiked] = useState(video.viewer?.liked ?? false);
   const [likeCount, setLikeCount] = useState(video.likeCount);
   const [showComments, setShowComments] = useState(false);
-  const [collabLoopModal, setCollabLoopModal] = useState<'collab' | 'loop' | null>(null);
   const [showReportModal, setShowReportModal] = useState(false);
   const [showMoreMenu, setShowMoreMenu] = useState(false);
   const [showTipModal, setShowTipModal] = useState(false);
@@ -41,6 +43,8 @@ export function VideoActions({ video, onEngagement }: VideoActionsProps) {
     user,
     onShared: () => onEngagement?.('shared'),
   });
+
+  const openNewConversation = useMessagingStore((state) => state.openNewConversation);
 
   // Check if current user owns this video
   const isOwnVideo = user?.did === video.author.did;
@@ -64,8 +68,23 @@ export function VideoActions({ video, onEngagement }: VideoActionsProps) {
     },
     onSuccess: () => {
       setIsHidden(true);
-      toast.success('Video hidden from your feed');
       queryClient.invalidateQueries({ queryKey: ['feed'] });
+      toast.custom((t) => (
+        <div
+          className={`${t.visible ? 'animate-in slide-in-from-bottom' : 'animate-out fade-out'} bg-surface border border-border rounded-lg shadow-lg px-4 py-3 flex items-center gap-3 max-w-sm`}
+        >
+          <span className="text-sm text-text-primary">Got it. We'll show fewer like this.</span>
+          <button
+            onClick={() => {
+              api.removeFeedback({ targetType: 'video', targetId: video.uri }).catch(() => {});
+              toast.dismiss(t.id);
+            }}
+            className="text-sm text-accent font-medium hover:underline whitespace-nowrap"
+          >
+            Undo
+          </button>
+        </div>
+      ), { duration: 5000, position: 'bottom-center' });
     },
     onError: () => {
       toast.error('Failed to update preferences');
@@ -134,19 +153,19 @@ export function VideoActions({ video, onEngagement }: VideoActionsProps) {
 
   const handleCollab = useCallback(() => {
     if (!user) {
-      openLoginModal('Log in to create a collab');
+      openLoginModal('Log in to create a duet');
       return;
     }
-    setCollabLoopModal('collab');
-  }, [user, openLoginModal]);
+    router.push(`/create/duet/${encodeURIComponent(video.uri)}`);
+  }, [user, openLoginModal, router, video.uri]);
 
   const handleLoop = useCallback(() => {
     if (!user) {
-      openLoginModal('Log in to create a loop');
+      openLoginModal('Log in to create a stitch');
       return;
     }
-    setCollabLoopModal('loop');
-  }, [user, openLoginModal]);
+    router.push(`/create/stitch/${encodeURIComponent(video.uri)}`);
+  }, [user, openLoginModal, router, video.uri]);
 
   const handleReport = useCallback(() => {
     if (!user) {
@@ -165,6 +184,14 @@ export function VideoActions({ video, onEngagement }: VideoActionsProps) {
     setShowMoreMenu(false);
     notInterestedMutation.mutate();
   }, [user, openLoginModal, notInterestedMutation]);
+
+  const handleSendDm = useCallback(() => {
+    if (!user) {
+      openLoginModal('Log in to send a message');
+      return;
+    }
+    setShowShareModal(true);
+  }, [user, openLoginModal]);
 
   const handleTip = useCallback(() => {
     if (!user) {
@@ -188,7 +215,7 @@ export function VideoActions({ video, onEngagement }: VideoActionsProps) {
     <>
       <div className="absolute right-3 bottom-20 flex flex-col items-center gap-5">
         {/* Author avatar */}
-        <button className="relative">
+        <button className="relative" aria-label={`View ${video.author.handle}'s profile`}>
           <div className="w-12 h-12 rounded-full border-2 border-white overflow-hidden bg-gray-800">
             {video.author.avatar ? (
               <img
@@ -212,6 +239,8 @@ export function VideoActions({ video, onEngagement }: VideoActionsProps) {
           onClick={handleLike}
           className="flex flex-col items-center"
           disabled={likeMutation.isPending}
+          aria-label={`Like, ${formatCount(likeCount)} likes`}
+          aria-pressed={isLiked}
         >
           <div
             className={`p-2 rounded-full ${isLiked ? 'text-primary-500' : 'text-white'}`}
@@ -227,7 +256,11 @@ export function VideoActions({ video, onEngagement }: VideoActionsProps) {
         <ReactionPicker videoUri={video.uri} />
 
         {/* Comment */}
-        <button onClick={handleComment} className="flex flex-col items-center">
+        <button
+          onClick={handleComment}
+          className="flex flex-col items-center"
+          aria-label={`Comment, ${formatCount(video.commentCount)} comments`}
+        >
           <div className="p-2 rounded-full text-white">
             <CommentIcon className="w-8 h-8" />
           </div>
@@ -237,7 +270,11 @@ export function VideoActions({ video, onEngagement }: VideoActionsProps) {
         </button>
 
         {/* Share */}
-        <button onClick={() => setShowShareModal(true)} className="flex flex-col items-center">
+        <button
+          onClick={() => setShowShareModal(true)}
+          className="flex flex-col items-center"
+          aria-label={`Share video, ${formatCount(shareCount)} shares`}
+        >
           <div className={`p-2 rounded-full ${shareState === 'shared' ? 'text-accent' : 'text-white'}`}>
             <ShareIcon className="w-8 h-8" />
           </div>
@@ -246,24 +283,32 @@ export function VideoActions({ video, onEngagement }: VideoActionsProps) {
           </span>
         </button>
 
-        {/* Collab */}
-        <button onClick={handleCollab} className="flex flex-col items-center">
+        {/* Send via DM */}
+        <button onClick={handleSendDm} className="flex flex-col items-center" aria-label="Send via direct message">
+          <div className="p-2 rounded-full text-white hover:text-blue-400 transition-colors">
+            <DmIcon className="w-8 h-8" />
+          </div>
+          <span className="text-xs text-white font-medium">Send</span>
+        </button>
+
+        {/* Duet */}
+        <button onClick={handleCollab} className="flex flex-col items-center" aria-label="Create a duet with this video">
           <div className="p-2 rounded-full text-white">
             <CollabIcon className="w-8 h-8" />
           </div>
-          <span className="text-xs text-white font-medium">Collab</span>
+          <span className="text-xs text-white font-medium">Duet</span>
         </button>
 
-        {/* Loop */}
-        <button onClick={handleLoop} className="flex flex-col items-center">
+        {/* Stitch */}
+        <button onClick={handleLoop} className="flex flex-col items-center" aria-label="Create a stitch with this video">
           <div className="p-2 rounded-full text-white">
             <LoopIcon className="w-8 h-8" />
           </div>
-          <span className="text-xs text-white font-medium">Loop</span>
+          <span className="text-xs text-white font-medium">Stitch</span>
         </button>
 
         {/* Tip */}
-        <button onClick={handleTip} className="flex flex-col items-center">
+        <button onClick={handleTip} className="flex flex-col items-center" aria-label={`Tip ${video.author.handle}`}>
           <div className="p-2 rounded-full text-white hover:text-yellow-400 transition-colors">
             <GiftIcon className="w-8 h-8" />
           </div>
@@ -275,6 +320,8 @@ export function VideoActions({ video, onEngagement }: VideoActionsProps) {
           <button
             onClick={() => setShowMoreMenu(!showMoreMenu)}
             className="flex flex-col items-center"
+            aria-label="More options"
+            aria-expanded={showMoreMenu}
           >
             <div className="p-2 rounded-full text-white hover:text-gray-300 transition-colors">
               <MoreIcon className="w-7 h-7" />
@@ -311,6 +358,11 @@ export function VideoActions({ video, onEngagement }: VideoActionsProps) {
           )}
         </div>
 
+        {/* Moderation (moderators only) */}
+        {isModerator && (
+          <ModerationActionMenu videoUri={video.uri} videoCid={video.cid} />
+        )}
+
         {/* Sound */}
         {video.tags && video.tags.length > 0 && (
           <button className="w-10 h-10 rounded-full bg-gray-800 border-2 border-gray-600 overflow-hidden animate-spin-slow">
@@ -325,16 +377,6 @@ export function VideoActions({ video, onEngagement }: VideoActionsProps) {
           videoUri={video.uri}
           videoAuthorDid={video.author.did}
           onClose={() => setShowComments(false)}
-        />
-      )}
-
-      {/* Collab/Loop modal */}
-      {collabLoopModal && (
-        <CollabLoopModal
-          video={video}
-          type={collabLoopModal}
-          isOpen={true}
-          onClose={() => setCollabLoopModal(null)}
         />
       )}
 
@@ -604,6 +646,24 @@ function TrashIcon({ className }: { className?: string }) {
         strokeLinecap="round"
         strokeLinejoin="round"
         d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0"
+      />
+    </svg>
+  );
+}
+
+function DmIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.5}
+      viewBox="0 0 24 24"
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5"
       />
     </svg>
   );

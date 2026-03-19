@@ -4,6 +4,7 @@ import { useInfiniteQuery } from '@tanstack/react-query';
 import Link from 'next/link';
 import { Sidebar } from '@/components/Sidebar';
 import { api } from '@/lib/api';
+import { ListSkeleton } from '@/components/skeletons';
 import { useAuth } from '@/lib/auth-context';
 import { formatCount } from '@/lib/utils';
 
@@ -33,9 +34,7 @@ export default function BookmarksPage() {
       <div className="flex min-h-screen bg-background">
         <Sidebar />
         <main className="flex-1 ml-0 lg:ml-60 pt-14 lg:pt-0 pb-16 lg:pb-0">
-          <div className="flex items-center justify-center py-20">
-            <div className="w-8 h-8 border-3 border-accent border-t-transparent rounded-full animate-spin" />
-          </div>
+          <ListSkeleton count={8} />
         </main>
       </div>
     );
@@ -86,11 +85,7 @@ export default function BookmarksPage() {
           </div>
 
           {isLoading ? (
-            <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-5 gap-4">
-              {[...Array(10)].map((_, i) => (
-                <div key={i} className="aspect-[9/16] bg-surface rounded-lg animate-pulse" />
-              ))}
-            </div>
+            <ListSkeleton count={10} />
           ) : videos.length === 0 ? (
             <div className="text-center py-20">
               <BookmarkIcon className="w-16 h-16 text-text-muted mx-auto mb-4" />

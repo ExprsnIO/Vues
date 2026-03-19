@@ -2,7 +2,6 @@ import { serve } from '@hono/node-server';
 import { compress } from 'hono/compress';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
-import { logger } from 'hono/logger';
 import { prettyJSON } from 'hono/pretty-json';
 import { secureHeaders } from 'hono/secure-headers';
 import { createReadStream, statSync, existsSync } from 'fs';
@@ -16,6 +15,7 @@ import { xrpcRouter } from './routes/xrpc.js';
 import { oauthRouter } from './routes/oauth.js';
 import { settingsRouter } from './routes/settings.js';
 import { adminRouter } from './routes/admin.js';
+import { inviteCodeRouter } from './routes/invite-codes.js';
 import { socialRouter } from './routes/social.js';
 import { chatRouter } from './routes/chat.js';
 import { actorRouter } from './routes/actor.js';
@@ -39,6 +39,7 @@ import { initializeRenderProgressWebSocket } from './websocket/renderProgress.js
 import { initializeAdminWebSocket } from './websocket/admin.js';
 import { initializeWatchPartyWebSocket } from './websocket/watchParty.js';
 import { initializeLiveChatWebSocket } from './websocket/liveChat.js';
+import { initializeTranscodeProgressWebSocket } from './websocket/transcodeProgress.js';
 import { createWellKnownRouterFromEnv, createOCSPRouter } from './routes/well-known.js';
 import { tokenRouter } from './routes/tokens.js';
 import { certAuthRouter } from './routes/auth-certificate.js';
@@ -67,6 +68,12 @@ import { presetsRouter } from './routes/presets.js';
 import { clusterAdminRouter } from './routes/cluster-admin.js';
 import { gpuAdminRouter } from './routes/gpu-admin.js';
 import { adminPlatformRouter } from './routes/admin-platform.js';
+import { adminTokensRouter } from './routes/admin-tokens.js';
+import { adminThemesRouter } from './routes/admin-themes.js';
+import { adminPrefetchRouter } from './routes/admin-prefetch.js';
+import { adminWorkersRouter } from './routes/admin-workers.js';
+import { adminRelayRouter } from './routes/admin-relay.js';
+import adminSSOExprsnRouter from './routes/admin-sso-exprsn.js';
 import { studioRouter } from './routes/studio.js';
 import { effectsRouter } from './routes/effects.js';
 import soundsRouter from './routes/sounds.js';
@@ -80,18 +87,28 @@ import { userModerationRouter } from './routes/user-moderation.js';
 import { searchRouter } from './routes/search.js';
 import { pushRouter } from './routes/push.js';
 import { analyticsRouter } from './routes/analytics.js';
+import streamingRouter from './routes/streaming.js';
+import renderQueueRouter from './routes/render-queue.js';
 import { initializeIdentityService } from './services/identity/index.js';
 import { cronService } from './services/cron/index.js';
 import { oauthAgent } from './services/oauth/OAuthAgent.js';
 import { db } from './db/index.js';
 import * as schema from './db/schema.js';
-import { gte, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, sql } from 'drizzle-orm';
 import { scopeExtractMiddleware, domainContextMiddleware, configBasedRateLimit } from './auth/scope-middleware.js';
 import { Redis } from 'ioredis';
 import { RelayService, CommitEvent as RelayCommitEvent } from '@exprsn/relay';
 import { initializeRenderService, S3StorageProvider } from './services/studio/RenderService.js';
 import { setRelayService } from './services/relay/index.js';
 import { globalErrorHandler, notFoundHandler } from './middleware/error-handler.js';
+import { requestLogger } from './middleware/logger.js';
+import { DirectorySyncService } from './services/platform/DirectorySyncService.js';
+import { initializeTranscodeWebhooks } from './services/video/TranscodeWebhooks.js';
+import { adaptiveTranscodeService } from './services/streaming/index.js';
+import { emailService } from './services/email/index.js';
+import { WebSocketServer, WebSocket } from 'ws';
+import { syncService } from './services/sync/index.js';
+import { initRelayBridge } from './services/relay-bridge.js';
 
 // Global relay service reference for use by PDS
 let relayService: RelayService | null = null;
@@ -115,9 +132,22 @@ app.use('*', cors({
   },
   credentials: true,
   allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowHeaders: ['Content-Type', 'Authorization', 'X-Dev-Admin'],
+  allowHeaders: [
+    'Content-Type',
+    'Authorization',
+    'X-Dev-Admin',
+    'X-Request-ID',
+    // Service-to-service authentication headers for AT Protocol federation
+    'X-Exprsn-Certificate',
+    'X-Exprsn-Signature',
+    'X-Exprsn-Timestamp',
+    'X-Exprsn-Nonce',
+    // Standard ATProto headers
+    'Atproto-Proxy',
+    'Atproto-Accept-Labelers',
+  ],
 }));
-app.use('*', logger());
+app.use('*', requestLogger);
 app.use('*', prettyJSON());
 app.use('*', secureHeaders({
   crossOriginResourcePolicy: false, // Disable CORP to allow cross-origin video loading
@@ -154,6 +184,15 @@ app.get('/health/live', (c) => {
 app.get('/health/ready', async (c) => {
   const readiness = await checkReadiness();
   return c.json(readiness, readiness.ready ? 200 : 503);
+});
+
+// AT Protocol XRPC health endpoint
+app.get('/xrpc/_health', async (c) => {
+  const health = await performHealthCheck();
+  return c.json({
+    version: health.version,
+    status: health.status,
+  });
 });
 
 // Client metadata for OAuth
@@ -288,6 +327,7 @@ app.route('/', syncRouter); // Sync routes for federation
 app.route('/xrpc', atprotoRouter);
 // Admin routes (must be before PLC to avoid /:did catch-all)
 app.route('/xrpc', adminRouter);
+app.route('/xrpc', inviteCodeRouter);
 app.route('/xrpc', announcementsRouter);
 app.route('/xrpc', paymentsAdminRouter);
 app.route('/xrpc', liveAdminRouter);
@@ -299,6 +339,11 @@ app.route('/xrpc', adminDomainAuthRouter); // Admin domain OAuth and MFA setting
 app.route('/xrpc', adminDomainAppealsRouter); // Admin domain appeals workflow
 app.route('/xrpc', adminDomainTransfersRouter); // Admin domain transfers
 app.route('/xrpc', adminPaymentsRouter); // Admin payment provider management
+app.route('/xrpc', adminThemesRouter); // Admin theme configuration
+app.route('/xrpc', adminPrefetchRouter); // Prefetch engine admin
+app.route('/xrpc', adminWorkersRouter); // Worker monitoring & control
+app.route('/xrpc', adminRelayRouter); // Relay protocol admin
+app.route('/xrpc', adminSSOExprsnRouter); // Exprsn SSO provider management
 app.route('/xrpc', renderAdminRouter); // Render pipeline admin
 // NOTE: presetsRouter and clusterAdminRouter are mounted in main() after setup wizard
 // because clusterAdminRouter.use('*', adminAuthMiddleware) would intercept /first-run
@@ -308,6 +353,8 @@ app.route('/xrpc', userModerationRouter); // User-facing moderation (reports, sa
 app.route('/xrpc', searchRouter); // Search across videos, users, sounds
 app.route('/', pushRouter); // Push notification token management
 app.route('/', analyticsRouter); // Creator analytics dashboard
+app.route('/streaming', streamingRouter); // Adaptive streaming (HLS/DASH) endpoints
+app.route('/render', renderQueueRouter); // Render job queue management
 // PLC routes - standard directory at /plc, XRPC routes already have /xrpc prefix
 app.route('/plc', plcRouter); // Standard PLC directory endpoints (did:plc resolution)
 // NOTE: plcRouter at '/' is mounted in main() after setup wizard to avoid /:did catching /first-run
@@ -365,6 +412,140 @@ function createRelayBridge(): OnCommitCallback {
   };
 }
 
+/**
+ * Handle a raw WebSocket connection to the AT Protocol firehose.
+ * Sends DAG-CBOR encoded frames for each commit event, matching the
+ * format expected by standard atproto clients.
+ */
+async function handleFirehoseConnection(ws: WebSocket, url: URL): Promise<void> {
+  const cursorParam = url.searchParams.get('cursor');
+  const wantedCollections = url.searchParams.getAll('wantedCollections');
+  const startSeq = cursorParam ? parseInt(cursorParam, 10) : 0;
+
+  // Send historical events for backfill when cursor is supplied
+  if (startSeq > 0) {
+    try {
+      const { db: dbInstance } = await import('./db/index.js');
+      const { syncEvents } = await import('./db/schema.js');
+      const { gt } = await import('drizzle-orm');
+      const { encode: encodeCbor } = await import('@ipld/dag-cbor');
+
+      const historical = await dbInstance
+        .select()
+        .from(syncEvents)
+        .where(gt(syncEvents.seq, startSeq))
+        .orderBy(syncEvents.seq)
+        .limit(1000);
+
+      for (const ev of historical) {
+        if (ws.readyState !== WebSocket.OPEN) break;
+        try {
+          const frame = buildCborFrame(ev);
+          ws.send(encodeCbor(frame));
+        } catch {
+          // Skip malformed historical events
+        }
+      }
+    } catch (err) {
+      console.warn('[firehose-ws] backfill error:', err);
+    }
+  }
+
+  // Subscribe to live events
+  const listener = async (event: any) => {
+    if (ws.readyState !== WebSocket.OPEN) return;
+
+    // Filter by wantedCollections when specified
+    if (wantedCollections.length > 0) {
+      const firstOp = event.ops?.[0];
+      const collection = firstOp?.path?.split('/')[0];
+      if (collection && !wantedCollections.includes(collection)) return;
+    }
+
+    try {
+      const { encode: encodeCbor } = await import('@ipld/dag-cbor');
+      const frame = buildCborFrame(event);
+      ws.send(encodeCbor(frame));
+    } catch (err) {
+      console.error('[firehose-ws] encode error:', err);
+    }
+  };
+
+  syncService.onFirehoseEvent(listener);
+
+  ws.on('close', () => syncService.offFirehoseEvent(listener));
+  ws.on('error', () => syncService.offFirehoseEvent(listener));
+}
+
+/**
+ * Build the DAG-CBOR frame object for a firehose event.
+ */
+function buildCborFrame(event: any): Record<string, unknown> {
+  return {
+    $type: 'com.atproto.sync.subscribeRepos#commit',
+    seq: event.seq ?? 0,
+    rebase: event.rebase ?? false,
+    tooBig: event.tooBig ?? false,
+    repo: event.did ?? '',
+    commit: event.commit ?? '',
+    prev: null,
+    rev: String(event.seq ?? Date.now()),
+    since: null,
+    blocks: new Uint8Array(0),
+    ops: (event.ops ?? []).map((op: any) => ({
+      action: op.action,
+      path: op.path,
+      cid: op.cid ?? null,
+    })),
+    blobs: [],
+    time: new Date().toISOString(),
+  };
+}
+
+/**
+ * Handle a Jetstream-compatible JSON WebSocket connection.
+ * Sends events in the same JSON format as the Bluesky Jetstream service so
+ * that the feed generator's JetstreamConsumer can point at this local endpoint.
+ */
+function handleJetstreamConnection(ws: WebSocket, url: URL): void {
+  const wantedCollections = url.searchParams.getAll('wantedCollections');
+
+  const listener = (event: any) => {
+    if (ws.readyState !== WebSocket.OPEN) return;
+
+    // Filter by wantedCollections when specified
+    if (wantedCollections.length > 0) {
+      const firstOp = event.ops?.[0];
+      const collection = firstOp?.path?.split('/')[0];
+      if (collection && !wantedCollections.includes(collection)) return;
+    }
+
+    const firstOp = event.ops?.[0];
+    const jetstreamEvent = {
+      did: event.did ?? '',
+      time_us: Date.now() * 1000,
+      kind: (event.eventType as string) ?? 'commit',
+      commit: firstOp
+        ? {
+            rev: String(event.seq ?? Date.now()),
+            operation: firstOp.action as 'create' | 'update' | 'delete',
+            collection: firstOp.path?.split('/')[0] ?? '',
+            rkey: firstOp.path?.split('/')[1] ?? '',
+            cid: firstOp.cid ?? undefined,
+            record: event.record ?? undefined,
+          }
+        : undefined,
+    };
+
+    ws.send(JSON.stringify(jetstreamEvent));
+  };
+
+  syncService.onFirehoseEvent(listener);
+
+  ws.on('close', () => syncService.offFirehoseEvent(listener));
+  ws.on('error', () => syncService.offFirehoseEvent(listener));
+}
+
 // Initialize and start server
 async function main() {
   const port = parseInt(process.env.PORT || '3000', 10);
@@ -391,7 +572,16 @@ async function main() {
   app.route('/', clusterAdminRouter);
   app.route('/', gpuAdminRouter);
   app.route('/', adminPlatformRouter);
+  app.route('/', adminTokensRouter);
   app.route('/', plcRouter);
+
+  // Initialize email service (nodemailer + MailHog in dev)
+  try {
+    emailService.initialize();
+    console.log('Email service initialized');
+  } catch (err) {
+    console.warn('Email service failed to initialize:', err);
+  }
 
   // Initialize OAuth client
   const appUrl = process.env.APP_URL || `http://localhost:${port}`;
@@ -430,7 +620,13 @@ async function main() {
     try {
       relayService = new RelayService({
         redis,
+        enableSocketIO: process.env.RELAY_SOCKETIO !== 'false',
+        enableWebSocket: process.env.RELAY_WEBSOCKET !== 'false',
+        enableJetstream: process.env.RELAY_JETSTREAM !== 'false',
+        maxWsSubscribers: parseInt(process.env.RELAY_MAX_WS_SUBSCRIBERS || '1000', 10),
+        maxJetstreamSubscribers: parseInt(process.env.RELAY_MAX_JETSTREAM_SUBSCRIBERS || '5000', 10),
         maxBackfillEvents: parseInt(process.env.RELAY_MAX_BACKFILL || '10000', 10),
+        verifySignatures: process.env.RELAY_VERIFY_SIGNATURES === 'true',
       });
 
       // Set global relay service accessor for use by routes
@@ -461,6 +657,59 @@ async function main() {
       console.log('RenderService initialized');
     } catch (err) {
       console.warn('Failed to initialize RenderService:', err);
+    }
+
+    // Initialize DirectorySyncService for platform directory management
+    try {
+      const directorySyncService = DirectorySyncService.initialize(redis);
+      const directorySyncConcurrency = parseInt(process.env.DIRECTORY_SYNC_CONCURRENCY || '2', 10);
+      directorySyncService.startWorker(directorySyncConcurrency);
+      console.log('DirectorySyncService initialized');
+    } catch (err) {
+      console.warn('Failed to initialize DirectorySyncService:', err);
+    }
+
+    // Initialize TranscodeWebhooks with BullMQ for reliable retry handling
+    try {
+      initializeTranscodeWebhooks(redis);
+      console.log('TranscodeWebhooks initialized with BullMQ');
+    } catch (err) {
+      console.warn('Failed to initialize TranscodeWebhooks:', err);
+    }
+
+    // Initialize Adaptive Transcode Worker for HLS/DASH streaming
+    const transcodeWorkerEnabled = process.env.TRANSCODE_WORKER_ENABLED !== 'false';
+    if (transcodeWorkerEnabled) {
+      try {
+        await adaptiveTranscodeService.startWorker();
+        console.log('AdaptiveTranscodeService worker started');
+      } catch (err) {
+        console.warn('Failed to start AdaptiveTranscodeService worker:', err);
+      }
+    }
+
+    // Initialize Stream Events Worker for webhooks and notifications
+    const streamEventsWorkerEnabled = process.env.STREAM_EVENTS_WORKER_ENABLED !== 'false';
+    if (streamEventsWorkerEnabled) {
+      try {
+        const { startStreamEventsWorker } = await import('./services/streaming/StreamEventsQueue.js');
+        startStreamEventsWorker();
+        console.log('StreamEventsWorker started');
+      } catch (err) {
+        console.warn('Failed to start StreamEventsWorker:', err);
+      }
+    }
+  }
+
+  // Initialize prefetch job producer
+  const prefetchProducerEnabled = process.env.PREFETCH_PRODUCER_ENABLED !== 'false';
+  if (prefetchProducerEnabled) {
+    try {
+      const { initializePrefetchProducer } = await import('./services/prefetch/producer.js');
+      initializePrefetchProducer();
+      console.log('Prefetch producer initialized');
+    } catch (err) {
+      console.warn('Failed to initialize prefetch producer:', err);
     }
   }
 
@@ -605,6 +854,115 @@ async function main() {
       });
       console.log('Creator fund cron job registered');
     }
+
+    // Register weekly digest email job (runs daily, fires on Mondays at ~9am UTC)
+    const digestEnabled = process.env.EMAIL_DIGEST_ENABLED !== 'false';
+    if (digestEnabled) {
+      // Check every hour; actually send only on Monday between 09:00–10:00 UTC
+      cronService.register('weekly-digest', 60 * 60 * 1000, async () => {
+        const now = new Date();
+        // getDay() returns 1 for Monday (UTC); only run during the 09:xx UTC hour
+        if (now.getUTCDay() !== 1 || now.getUTCHours() !== 9) {
+          return;
+        }
+
+        console.log('[digest] Starting weekly digest run...');
+
+        try {
+          // Find users who have opted into a weekly digest via their notification settings
+          // emailDigest is stored as a jsonb column on user_settings
+          const weeklyUsers = await db
+            .select({
+              did: schema.userSettings.userDid,
+            })
+            .from(schema.userSettings)
+            .where(
+              sql`${schema.userSettings.notifications}->>'emailDigest' = 'weekly'`
+            );
+
+          console.log(`[digest] Sending to ${weeklyUsers.length} weekly-digest users`);
+
+          const oneWeekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+
+          for (const { did } of weeklyUsers) {
+            try {
+              // Fetch the user record to get email and handle
+              const account = await db.query.actorRepos.findFirst({
+                where: eq(schema.actorRepos.did, did),
+              });
+
+              if (!account?.email) continue;
+
+              // Compute new followers this week (use indexedAt — db-managed, always present)
+              const [followerRow] = await db
+                .select({ count: sql<number>`COUNT(*)::int` })
+                .from(schema.follows)
+                .where(
+                  and(
+                    eq(schema.follows.followeeDid, did),
+                    gte(schema.follows.indexedAt, oneWeekAgo)
+                  )
+                );
+
+              // Compute new likes this week across all the user's videos
+              const [likeRow] = await db
+                .select({ count: sql<number>`COUNT(*)::int` })
+                .from(schema.likes)
+                .innerJoin(schema.videos, eq(schema.likes.videoUri, schema.videos.uri))
+                .where(
+                  and(
+                    eq(schema.videos.authorDid, did),
+                    gte(schema.likes.indexedAt, oneWeekAgo)
+                  )
+                );
+
+              // Compute new comments this week
+              const [commentRow] = await db
+                .select({ count: sql<number>`COUNT(*)::int` })
+                .from(schema.comments)
+                .innerJoin(schema.videos, eq(schema.comments.videoUri, schema.videos.uri))
+                .where(
+                  and(
+                    eq(schema.videos.authorDid, did),
+                    gte(schema.comments.indexedAt, oneWeekAgo)
+                  )
+                );
+
+              // Find the top video by view count published this week
+              const [topVideo] = await db
+                .select({
+                  caption: schema.videos.caption,
+                  views: schema.videos.viewCount,
+                })
+                .from(schema.videos)
+                .where(
+                  and(
+                    eq(schema.videos.authorDid, did),
+                    gte(schema.videos.indexedAt, oneWeekAgo)
+                  )
+                )
+                .orderBy(desc(schema.videos.viewCount))
+                .limit(1);
+
+              await emailService.sendDigest(account.email, account.handle, {
+                newFollowers: followerRow?.count ?? 0,
+                newLikes: likeRow?.count ?? 0,
+                newComments: commentRow?.count ?? 0,
+                topVideoCaption: topVideo?.caption ?? undefined,
+                topVideoViews: topVideo?.views ?? undefined,
+              });
+            } catch (userErr) {
+              console.error(`[digest] Failed for ${did}:`, userErr);
+            }
+          }
+
+          console.log('[digest] Weekly digest run complete');
+        } catch (err) {
+          console.error('[digest] Weekly digest failed:', err);
+        }
+      });
+      console.log('Weekly digest cron job registered');
+    }
   }
 
   // Initialize OAuth agent for automated token management
@@ -612,6 +970,10 @@ async function main() {
   if (oauthAgentEnabled) {
     await oauthAgent.initialize();
   }
+
+  // Initialize moderation workflow event handlers
+  const { initializeWorkflowEventHandlers } = await import('./services/moderation/WorkflowEventHandlers.js');
+  initializeWorkflowEventHandlers();
 
   // Mount PDS routes with relay callback
   if (pdsConfig.enabled) {
@@ -624,12 +986,72 @@ async function main() {
     }
   }
 
+  // Wire up relay bridge so write paths can emit federation events without
+  // importing the relay service directly.
+  initRelayBridge(relayService, syncService);
+  console.log('Relay bridge initialized');
+
   console.log(`Starting Exprsn API server on ${host}:${port}`);
 
   const server = serve({
     fetch: app.fetch,
     port,
     hostname: host,
+  });
+
+  // ------------------------------------------------------------------
+  // Raw WebSocket server for AT Protocol firehose endpoints.
+  // This runs alongside Socket.IO so that standard atproto clients
+  // (which expect plain WebSocket, not Socket.IO) can connect.
+  // ------------------------------------------------------------------
+  const wss = new WebSocketServer({ noServer: true });
+
+  (server as any).on('upgrade', (request: any, socket: any, head: any) => {
+    try {
+      const urlStr = request.url || '/';
+      const baseUrl = `http://${request.headers.host || 'localhost'}`;
+      const url = new URL(urlStr, baseUrl);
+
+      if (url.pathname === '/xrpc/com.atproto.sync.subscribeRepos') {
+        wss.handleUpgrade(request, socket, head, (ws: WebSocket) => {
+          // Delegate to relay service's proper WS firehose when available
+          const wsFirehose = relayService?.getWsFirehose();
+          if (wsFirehose) {
+            wsFirehose.handleConnection(ws, url).catch((err) => {
+              console.error('[ws-firehose] unhandled error:', err);
+              ws.close();
+            });
+          } else {
+            // Fallback to legacy shim
+            handleFirehoseConnection(ws, url).catch((err) => {
+              console.error('[firehose-ws] unhandled error:', err);
+              ws.close();
+            });
+          }
+        });
+      } else if (
+        url.pathname === '/jetstream/subscribe' ||
+        url.pathname === '/xrpc/io.exprsn.sync.subscribeJetstream'
+      ) {
+        wss.handleUpgrade(request, socket, head, (ws: WebSocket) => {
+          // Delegate to relay service's Jetstream server when available
+          const jsServer = relayService?.getJetstreamServer();
+          if (jsServer) {
+            jsServer.handleConnection(ws, url).catch((err) => {
+              console.error('[jetstream] unhandled error:', err);
+              ws.close();
+            });
+          } else {
+            // Fallback to legacy shim
+            handleJetstreamConnection(ws, url);
+          }
+        });
+      }
+      // All other upgrade requests (Socket.IO) are left for Socket.IO to
+      // handle — we must NOT destroy the socket here.
+    } catch (err) {
+      console.error('[ws-upgrade] error parsing upgrade request:', err);
+    }
   });
 
   // Initialize Socket.IO
@@ -649,6 +1071,7 @@ async function main() {
   initializeAdminWebSocket(io);
   initializeWatchPartyWebSocket(io);
   initializeLiveChatWebSocket(io);
+  initializeTranscodeProgressWebSocket(io);
 
   // Initialize relay firehose WebSocket if enabled
   if (relayEnabled && relayService) {
@@ -676,7 +1099,8 @@ async function main() {
   }
 
   console.log(`Server running at http://${host}:${port}`);
-  console.log('WebSocket namespaces: /chat, /editor-collab, /render-progress, /admin, /watch-party' + (relayEnabled ? ', /xrpc/com.atproto.sync.subscribeRepos' : ''));
+  console.log('Raw WebSocket endpoints: /xrpc/com.atproto.sync.subscribeRepos (DAG-CBOR firehose), /jetstream/subscribe (Jetstream JSON)');
+  console.log('WebSocket namespaces: /chat, /editor-collab, /render-progress, /transcode-progress, /admin, /watch-party' + (relayEnabled ? ', /xrpc/com.atproto.sync.subscribeRepos (Socket.IO)' : ''));
   console.log('Well-known endpoints: /.well-known/atproto-did, /.well-known/did.json, /.well-known/openid-configuration, /.well-known/exprsn-services, /.well-known/crl.pem');
   console.log('CA/Token endpoints: /ocsp, /xrpc/io.exprsn.token.*, /xrpc/io.exprsn.auth.*, /xrpc/io.exprsn.cert.*, /xrpc/io.exprsn.security.*');
   console.log('SSO endpoints: /sso/oauth/authorize, /sso/oauth/token, /sso/oauth/userinfo, /sso/oauth/jwks');
@@ -724,8 +1148,7 @@ async function main() {
       // Wait for server to fully close
       await new Promise<void>((resolve) => {
         const checkClosed = setInterval(() => {
-          // @ts-expect-error - connections is internal
-          if (!server.connections || server.connections === 0) {
+          if (!(server as any).connections || (server as any).connections === 0) {
             clearInterval(checkClosed);
             resolve();
           }

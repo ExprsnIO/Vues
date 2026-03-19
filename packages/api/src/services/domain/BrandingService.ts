@@ -8,15 +8,21 @@ import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import { eq, and } from 'drizzle-orm';
 import * as schema from '../../db/schema.js';
 
+// Re-export DomainBranding from schema
+export type { DomainBranding } from '../../db/schema.js';
+
 /**
- * Domain branding configuration
+ * Extended domain branding configuration
+ * Extends the schema DomainBranding with additional fields
  */
-export interface DomainBranding {
+export interface ExtendedDomainBranding {
   domainId: string;
   // Logos
+  logo?: string;
   logoUrl?: string;
   logoLightUrl?: string;
   logoDarkUrl?: string;
+  favicon?: string;
   faviconUrl?: string;
   // Colors
   primaryColor: string;
@@ -40,6 +46,7 @@ export interface DomainBranding {
   copyrightText?: string;
   supportEmail?: string;
   supportUrl?: string;
+  [key: string]: unknown; // Allow dynamic properties
 }
 
 /**
@@ -60,7 +67,7 @@ export interface ThemePreset {
   isDefault?: boolean;
 }
 
-const DEFAULT_BRANDING: Partial<DomainBranding> = {
+const DEFAULT_BRANDING: Partial<ExtendedDomainBranding> = {
   primaryColor: '#6366f1', // Indigo
   accentColor: '#8b5cf6', // Purple
   backgroundColor: '#0f0f0f',
@@ -118,24 +125,23 @@ export class BrandingService {
   /**
    * Get branding for a domain
    */
-  async getBranding(domainId: string): Promise<DomainBranding> {
+  async getBranding(domainId: string): Promise<ExtendedDomainBranding> {
     const domain = await this.db.query.domains.findFirst({
       where: eq(schema.domains.id, domainId),
     });
 
     if (!domain) {
-      return { domainId, ...DEFAULT_BRANDING } as DomainBranding;
+      return { domainId, ...DEFAULT_BRANDING } as ExtendedDomainBranding;
     }
 
-    // Parse branding from domain settings
-    const settings = (domain.settings as Record<string, unknown>) || {};
-    const branding = (settings.branding as Partial<DomainBranding>) || {};
+    // Parse branding from domain
+    const branding = (domain.branding as Partial<ExtendedDomainBranding>) || {};
 
     return {
       domainId,
       ...DEFAULT_BRANDING,
       ...branding,
-    } as DomainBranding;
+    } as ExtendedDomainBranding;
   }
 
   /**
@@ -143,9 +149,9 @@ export class BrandingService {
    */
   async updateBranding(
     domainId: string,
-    updates: Partial<DomainBranding>
-  ): Promise<DomainBranding> {
-    // Get existing settings
+    updates: Partial<ExtendedDomainBranding>
+  ): Promise<ExtendedDomainBranding> {
+    // Get existing branding
     const domain = await this.db.query.domains.findFirst({
       where: eq(schema.domains.id, domainId),
     });
@@ -154,14 +160,13 @@ export class BrandingService {
       throw new Error('Domain not found');
     }
 
-    const settings = (domain.settings as Record<string, unknown>) || {};
-    const existingBranding = (settings.branding as Record<string, unknown>) || {};
+    const existingBranding = (domain.branding as ExtendedDomainBranding) || {};
 
     // Merge updates
-    const newBranding = {
+    const newBranding: ExtendedDomainBranding = {
       ...existingBranding,
       ...updates,
-    };
+    } as ExtendedDomainBranding;
 
     // Remove undefined values
     Object.keys(newBranding).forEach((key) => {
@@ -170,14 +175,11 @@ export class BrandingService {
       }
     });
 
-    // Update domain settings
+    // Update domain branding (cast to unknown first to satisfy TypeScript)
     await this.db
       .update(schema.domains)
       .set({
-        settings: {
-          ...settings,
-          branding: newBranding,
-        },
+        branding: newBranding as unknown as schema.DomainBranding,
         updatedAt: new Date(),
       })
       .where(eq(schema.domains.id, domainId));
@@ -188,7 +190,7 @@ export class BrandingService {
   /**
    * Apply a theme preset to a domain
    */
-  async applyThemePreset(domainId: string, presetId: string): Promise<DomainBranding> {
+  async applyThemePreset(domainId: string, presetId: string): Promise<ExtendedDomainBranding> {
     const preset = THEME_PRESETS.find((p) => p.id === presetId);
     if (!preset) {
       throw new Error('Theme preset not found');
@@ -218,8 +220,8 @@ export class BrandingService {
     domainId: string,
     logoType: 'logo' | 'logoLight' | 'logoDark' | 'favicon',
     url: string
-  ): Promise<DomainBranding> {
-    const fieldMap: Record<string, keyof DomainBranding> = {
+  ): Promise<ExtendedDomainBranding> {
+    const fieldMap: Record<string, keyof ExtendedDomainBranding> = {
       logo: 'logoUrl',
       logoLight: 'logoLightUrl',
       logoDark: 'logoDarkUrl',
@@ -233,7 +235,7 @@ export class BrandingService {
 
     return this.updateBranding(domainId, {
       [field]: url,
-    } as Partial<DomainBranding>);
+    } as Partial<ExtendedDomainBranding>);
   }
 
   /**
@@ -246,7 +248,7 @@ export class BrandingService {
       title?: string;
       description?: string;
     }
-  ): Promise<DomainBranding> {
+  ): Promise<ExtendedDomainBranding> {
     return this.updateBranding(domainId, {
       socialPreviewImage: preview.imageUrl,
       socialPreviewTitle: preview.title,
@@ -257,7 +259,7 @@ export class BrandingService {
   /**
    * Set custom CSS
    */
-  async setCustomCss(domainId: string, css: string): Promise<DomainBranding> {
+  async setCustomCss(domainId: string, css: string): Promise<ExtendedDomainBranding> {
     // Basic CSS sanitization - remove potentially dangerous properties
     const sanitizedCss = this.sanitizeCss(css);
     return this.updateBranding(domainId, { customCss: sanitizedCss });
@@ -266,7 +268,7 @@ export class BrandingService {
   /**
    * Generate CSS variables from branding
    */
-  generateCssVariables(branding: DomainBranding): string {
+  generateCssVariables(branding: ExtendedDomainBranding): string {
     const vars: Record<string, string> = {
       '--brand-primary': branding.primaryColor,
     };
@@ -288,7 +290,7 @@ export class BrandingService {
   /**
    * Reset branding to defaults
    */
-  async resetBranding(domainId: string): Promise<DomainBranding> {
+  async resetBranding(domainId: string): Promise<ExtendedDomainBranding> {
     const domain = await this.db.query.domains.findFirst({
       where: eq(schema.domains.id, domainId),
     });
@@ -297,13 +299,10 @@ export class BrandingService {
       throw new Error('Domain not found');
     }
 
-    const settings = (domain.settings as Record<string, unknown>) || {};
-    delete settings.branding;
-
     await this.db
       .update(schema.domains)
       .set({
-        settings,
+        branding: undefined,
         updatedAt: new Date(),
       })
       .where(eq(schema.domains.id, domainId));

@@ -17,6 +17,7 @@ import {
 import { eq, and, desc } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import { getOAuthClient } from '../auth/oauth-client.js';
+import { hashSessionToken } from '../utils/session-tokens.js';
 
 // Types
 interface UserInfo {
@@ -92,8 +93,10 @@ async function verifySession(token: string): Promise<UserInfo | null> {
   } catch {
     // Fallback to simple session lookup
     try {
+      // Hash the token to look it up (tokens are stored as hashes)
+      const tokenHash = hashSessionToken(token);
       const sessionRecord = await db.query.sessions.findFirst({
-        where: eq(sessions.accessJwt, token),
+        where: eq(sessions.accessJwt, tokenHash),
       });
 
       if (!sessionRecord) return null;

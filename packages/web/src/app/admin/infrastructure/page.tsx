@@ -338,12 +338,74 @@ export default function InfrastructurePage() {
           <h1 className="text-2xl font-bold text-text-primary">Infrastructure</h1>
           <p className="text-text-muted mt-1">System health and render cluster management</p>
         </div>
-        <button
-          onClick={() => setShowAddModal(true)}
-          className="px-4 py-2 bg-accent hover:bg-accent-hover text-text-inverse rounded-lg transition-colors"
+        <div className="flex gap-3">
+          <Link
+            href="/admin/infrastructure/clusters"
+            className="px-4 py-2 bg-surface border border-border hover:border-accent text-text-primary rounded-lg transition-colors"
+          >
+            Manage Clusters
+          </Link>
+          <button
+            onClick={() => setShowAddModal(true)}
+            className="px-4 py-2 bg-accent hover:bg-accent-hover text-text-inverse rounded-lg transition-colors"
+          >
+            Add Cluster
+          </button>
+        </div>
+      </div>
+
+      {/* Quick Navigation */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <Link
+          href="/admin/infrastructure/clusters"
+          className="p-4 bg-surface border border-border hover:border-accent rounded-lg transition-colors"
         >
-          Add Cluster
-        </button>
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-accent/10 rounded-lg flex items-center justify-center">
+              <span className="text-2xl">⎈</span>
+            </div>
+            <div>
+              <div className="font-semibold text-text-primary">Cluster Configuration</div>
+              <div className="text-sm text-text-muted">Docker & Kubernetes clusters</div>
+            </div>
+          </div>
+        </Link>
+
+        <Link
+          href="/admin/infrastructure/gpu"
+          className="p-4 bg-surface border border-border hover:border-accent rounded-lg transition-colors"
+        >
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-yellow-500/10 rounded-lg flex items-center justify-center">
+              <svg className="w-6 h-6 text-yellow-400" fill="currentColor" viewBox="0 0 20 20">
+                <path d="M13 7H7v6h6V7z" />
+                <path
+                  fillRule="evenodd"
+                  d="M7 2a1 1 0 012 0v1h2V2a1 1 0 112 0v1h2a2 2 0 012 2v2h1a1 1 0 110 2h-1v2h1a1 1 0 110 2h-1v2a2 2 0 01-2 2h-2v1a1 1 0 11-2 0v-1H9v1a1 1 0 11-2 0v-1H5a2 2 0 01-2-2v-2H2a1 1 0 110-2h1V9H2a1 1 0 010-2h1V5a2 2 0 012-2h2V2zM5 5h10v10H5V5z"
+                  clipRule="evenodd"
+                />
+              </svg>
+            </div>
+            <div>
+              <div className="font-semibold text-text-primary">GPU Management</div>
+              <div className="text-sm text-text-muted">GPU allocation & monitoring</div>
+            </div>
+          </div>
+        </Link>
+
+        <div className="p-4 bg-surface border border-border rounded-lg">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-green-500/10 rounded-lg flex items-center justify-center">
+              <svg className="w-6 h-6 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+            </div>
+            <div>
+              <div className="font-semibold text-text-primary">System Health</div>
+              <div className="text-sm text-text-muted">{clusters.length} clusters active</div>
+            </div>
+          </div>
+        </div>
       </div>
 
       {/* System Diagnostics */}
@@ -360,21 +422,24 @@ export default function InfrastructurePage() {
           </div>
 
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-            {Object.entries(diagnostics.services).map(([name, service]) => (
-              <div key={name} className="p-4 bg-surface-hover rounded-lg">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-sm font-medium text-text-primary capitalize">{name}</span>
-                  <span
-                    className={`w-2 h-2 rounded-full ${getServiceStatusColor(service.status)}`}
-                  />
+            {Object.entries(diagnostics.services).map(([name, service]) => {
+              const svc = service as { status: string; latency?: number };
+              return (
+                <div key={name} className="p-4 bg-surface-hover rounded-lg">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-sm font-medium text-text-primary capitalize">{name}</span>
+                    <span
+                      className={`w-2 h-2 rounded-full ${getServiceStatusColor(svc.status)}`}
+                    />
+                  </div>
+                  <div className="text-xs text-text-muted">
+                    {svc.status === 'not_configured'
+                      ? 'Not configured'
+                      : `${svc.latency || 0}ms latency`}
+                  </div>
                 </div>
-                <div className="text-xs text-text-muted">
-                  {service.status === 'not_configured'
-                    ? 'Not configured'
-                    : `${service.latency || 0}ms latency`}
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
 
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -637,10 +702,10 @@ export default function InfrastructurePage() {
                                 <div className="w-16 h-2 bg-zinc-900 rounded-full overflow-hidden">
                                   <div
                                     className="h-full bg-blue-500"
-                                    style={{ width: `${worker.metadata.cpu}%` }}
+                                    style={{ width: `${Number(worker.metadata.cpu)}%` }}
                                   />
                                 </div>
-                                <div className="text-white text-center">{worker.metadata.cpu}%</div>
+                                <div className="text-white text-center">{String(worker.metadata?.cpu ?? 0)}%</div>
                               </div>
                             )}
                             {worker.metadata?.memory !== undefined && (
@@ -649,10 +714,10 @@ export default function InfrastructurePage() {
                                 <div className="w-16 h-2 bg-zinc-900 rounded-full overflow-hidden">
                                   <div
                                     className="h-full bg-green-500"
-                                    style={{ width: `${worker.metadata.memory}%` }}
+                                    style={{ width: `${Number(worker.metadata.memory)}%` }}
                                   />
                                 </div>
-                                <div className="text-white text-center">{worker.metadata.memory}%</div>
+                                <div className="text-white text-center">{String(worker.metadata?.memory ?? 0)}%</div>
                               </div>
                             )}
                             {worker.gpuEnabled && worker.metadata?.gpu !== undefined && (
@@ -661,10 +726,10 @@ export default function InfrastructurePage() {
                                 <div className="w-16 h-2 bg-zinc-900 rounded-full overflow-hidden">
                                   <div
                                     className="h-full bg-yellow-500"
-                                    style={{ width: `${worker.metadata.gpu}%` }}
+                                    style={{ width: `${Number(worker.metadata.gpu)}%` }}
                                   />
                                 </div>
-                                <div className="text-white text-center">{worker.metadata.gpu}%</div>
+                                <div className="text-white text-center">{String(worker.metadata?.gpu ?? 0)}%</div>
                               </div>
                             )}
                           </div>

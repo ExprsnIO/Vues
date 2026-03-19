@@ -60,7 +60,7 @@ adminDomainAppealsRouter.get(
             LIMIT 1
           `);
 
-          const user = userResult.rows[0] as any;
+          const user = userResult[0] as any;
 
           return {
             ...appeal,
@@ -123,7 +123,7 @@ adminDomainAppealsRouter.get(
         LIMIT 1
       `);
 
-      const user = userResult.rows[0] as any;
+      const user = userResult[0] as any;
 
       return c.json({
         appeal: {

@@ -796,9 +796,7 @@ describe('Organization Management Tests', () => {
       expect(pastDate < now).toBe(true);
     });
 
-    it.skip('should track invite uses', async () => {
-      // Note: This test is skipped due to a Drizzle ORM syntax issue with organizationInvites update
-      // The functionality is tested indirectly through other invite tests
+    it('should track invite uses', async () => {
       const invites = await db
         .select()
         .from(organizationInvites)
@@ -807,7 +805,6 @@ describe('Organization Management Tests', () => {
 
       if (invites.length > 0 && invites[0]) {
         const invite = invites[0];
-        const currentUses = invite.uses;
 
         // Verify the test data exists
         expect(invite.uses).toBeGreaterThanOrEqual(0);

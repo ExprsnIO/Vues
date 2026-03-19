@@ -1,6 +1,6 @@
 import type {
   StreamingProvider,
-  StreamingConfig,
+  StreamingProviderConfig,
   CreateStreamOptions,
   StreamInfo,
   StreamStatus,
@@ -37,7 +37,7 @@ export class SRSProvider implements StreamingProvider {
   // In-memory stream storage (in production, this would be in Redis/DB)
   private streams: Map<string, SRSStreamData> = new Map();
 
-  constructor(config: StreamingConfig) {
+  constructor(config: StreamingProviderConfig) {
     if (!config.srs) {
       throw new Error('SRS configuration is required');
     }

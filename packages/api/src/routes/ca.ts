@@ -952,7 +952,10 @@ caRoutes.post(
   requirePermission(ADMIN_PERMISSIONS.CONFIG_EDIT),
   async (c) => {
     const body = await c.req.json<{ certificateId: string; validityDays?: number }>();
-    const result = await certificateManager.renewCertificate(body.certificateId, body.validityDays);
+    const result = await certificateManager.renewCertificate({
+      certificateId: body.certificateId,
+      validityDays: body.validityDays,
+    });
     return c.json(result);
   }
 );

@@ -11,6 +11,7 @@ import {
   streamGuestInvitations,
   streamGuests,
   streamGuestSessions,
+  streamWebhooks,
   users,
   follows,
 } from '../db/schema.js';
@@ -19,6 +20,15 @@ import {
   getStreamingProvider,
   generateStreamKey,
 } from '../services/streaming/index.js';
+import {
+  getStreamWebhookService,
+  type StreamWebhookEvent,
+} from '../services/streaming/StreamWebhookService.js';
+import {
+  queueStreamStarted,
+  queueStreamEnded,
+  queueGoLiveNotifications,
+} from '../services/streaming/StreamEventsQueue.js';
 import { authMiddleware, optionalAuthMiddleware } from '../auth/middleware.js';
 
 // Middleware type for authenticated requests
@@ -77,18 +87,21 @@ liveRoutes.post('/io.exprsn.live.createStream', authMiddleware, async (c) => {
   const now = new Date();
 
   // Get streaming provider info
-  const provider = await getStreamingProvider();
-  let providerInfo;
+  const provider = await getStreamingProvider() as Record<string, unknown>;
+  let providerInfo: Record<string, unknown> | undefined;
 
   try {
-    providerInfo = await provider.createStream({
-      title: body.title,
-      description: body.description,
-      category: body.category,
-      tags: body.tags,
-      recordingEnabled: body.recordingEnabled,
-      chatEnabled: body.chatEnabled,
-    });
+    const createStream = provider.createStream as ((opts: Record<string, unknown>) => Promise<Record<string, unknown>>) | undefined;
+    if (createStream) {
+      providerInfo = await createStream({
+        title: body.title,
+        description: body.description,
+        category: body.category,
+        tags: body.tags,
+        recordingEnabled: body.recordingEnabled,
+        chatEnabled: body.chatEnabled,
+      });
+    }
   } catch (error) {
     console.error('Failed to create stream with provider:', error);
     // Continue without provider - will use internal stream key
@@ -99,13 +112,13 @@ liveRoutes.post('/io.exprsn.live.createStream', authMiddleware, async (c) => {
     userDid,
     title: body.title,
     description: body.description,
-    status: body.scheduledAt ? 'scheduled' : 'idle' as 'scheduled' | 'live' | 'ended',
-    streamKey: providerInfo?.streamKey || streamKey,
-    ingestUrl: providerInfo?.ingestUrl,
-    playbackUrl: providerInfo?.playbackUrl,
-    provider: provider.type,
-    providerStreamId: providerInfo?.providerStreamId,
-    providerChannelArn: providerInfo?.providerChannelArn,
+    status: body.scheduledAt ? 'scheduled' : 'idle',
+    streamKey: (providerInfo?.streamKey as string) || streamKey,
+    ingestUrl: (providerInfo?.ingestUrl as string) || undefined,
+    playbackUrl: (providerInfo?.playbackUrl as string) || undefined,
+    provider: (provider.type as string) || 'custom',
+    providerStreamId: (providerInfo?.providerStreamId as string) || undefined,
+    providerChannelArn: (providerInfo?.providerChannelArn as string) || undefined,
     category: body.category,
     tags: body.tags || [],
     visibility: body.visibility || 'public',
@@ -292,7 +305,8 @@ liveRoutes.post('/io.exprsn.live.startStream', authMiddleware, async (c) => {
   // Notify provider
   try {
     const provider = await getStreamingProvider();
-    await provider.startStream(body.streamId);
+    const startStream = (provider as Record<string, unknown>).startStream as ((id: string) => Promise<void>) | undefined;
+    if (startStream) await startStream(body.streamId);
   } catch (error) {
     console.error('Failed to start stream with provider:', error);
   }
@@ -305,6 +319,18 @@ liveRoutes.post('/io.exprsn.live.startStream', authMiddleware, async (c) => {
       updatedAt: new Date(),
     })
     .where(eq(liveStreams.id, body.streamId));
+
+  // Queue async tasks for reliable processing with retries
+  // These are processed by the stream events worker
+  try {
+    await Promise.all([
+      queueGoLiveNotifications(body.streamId),
+      queueStreamStarted(body.streamId, userDid),
+    ]);
+  } catch (error) {
+    // Log but don't fail the request - the stream is already live
+    console.error('Failed to queue stream started events:', error);
+  }
 
   return c.json({ success: true, status: 'live' });
 });
@@ -343,19 +369,31 @@ liveRoutes.post('/io.exprsn.live.endStream', authMiddleware, async (c) => {
   // Notify provider
   try {
     const provider = await getStreamingProvider();
-    await provider.endStream(body.streamId);
+    const endStream = (provider as Record<string, unknown>).endStream as ((id: string) => Promise<void>) | undefined;
+    if (endStream) await endStream(body.streamId);
   } catch (error) {
     console.error('Failed to end stream with provider:', error);
   }
+
+  const endedAt = new Date();
 
   await db
     .update(liveStreams)
     .set({
       status: 'ended',
-      endedAt: new Date(),
+      endedAt,
       updatedAt: new Date(),
     })
     .where(eq(liveStreams.id, body.streamId));
+
+  // Queue stream ended event for reliable processing with retries
+  // The worker will calculate stats and trigger webhooks
+  try {
+    await queueStreamEnded(body.streamId, userDid, endedAt, stream.startedAt);
+  } catch (error) {
+    // Log but don't fail the request - the stream is already ended
+    console.error('Failed to queue stream ended event:', error);
+  }
 
   return c.json({ success: true, status: 'ended' });
 });
@@ -453,7 +491,8 @@ liveRoutes.post('/io.exprsn.live.deleteStream', authMiddleware, async (c) => {
   if (stream.status === 'live') {
     try {
       const provider = await getStreamingProvider();
-      await provider.endStream(body.streamId);
+      const endStream = (provider as Record<string, unknown>).endStream as ((id: string) => Promise<void>) | undefined;
+      if (endStream) await endStream(body.streamId);
     } catch (error) {
       console.error('Failed to end stream with provider:', error);
     }
@@ -468,7 +507,8 @@ liveRoutes.post('/io.exprsn.live.deleteStream', authMiddleware, async (c) => {
   // Delete provider stream
   try {
     const provider = await getStreamingProvider();
-    await provider.deleteStream(body.streamId);
+    const deleteStream = (provider as Record<string, unknown>).deleteStream as ((id: string) => Promise<void>) | undefined;
+    if (deleteStream) await deleteStream(body.streamId);
   } catch (error) {
     console.error('Failed to delete stream from provider:', error);
   }
@@ -752,13 +792,48 @@ liveRoutes.post('/io.exprsn.live.chat.send', authMiddleware, async (c) => {
     throw new HTTPException(403, { message: 'You are banned from this chat' });
   }
 
+  // Check if user is a moderator
+  const [isMod] = await db
+    .select()
+    .from(streamModerators)
+    .where(
+      and(
+        eq(streamModerators.streamId, body.streamId),
+        eq(streamModerators.userDid, userDid)
+      )
+    )
+    .limit(1);
+
+  // Run auto-moderation check
+  const { getChatModerationService } = await import('../services/streaming/ChatModerationService.js');
+  const moderationService = getChatModerationService();
+
+  const moderationResult = await moderationService.moderateMessage(
+    body.streamId,
+    userDid,
+    body.message,
+    {
+      isModerator: !!isMod || stream.userDid === userDid,
+    }
+  );
+
+  if (!moderationResult.allowed) {
+    // Return the moderation reason to the user
+    throw new HTTPException(403, {
+      message: moderationResult.reason || 'Message blocked by auto-moderation',
+    });
+  }
+
+  // Use filtered message if provided (e.g., caps converted to lowercase)
+  const finalMessage = moderationResult.filteredMessage || body.message.trim();
+
   const messageId = nanoid();
 
   await db.insert(streamChat).values({
     id: messageId,
     streamId: body.streamId,
     userDid,
-    message: body.message.trim(),
+    message: finalMessage,
     messageType: 'text',
     createdAt: new Date(),
   });
@@ -1073,6 +1148,303 @@ liveRoutes.post('/io.exprsn.live.unban', authMiddleware, async (c) => {
 });
 
 // ============================================
+// Chat Auto-Moderation Settings
+// ============================================
+
+// Get chat moderation settings
+liveRoutes.get('/io.exprsn.live.chat.moderation.settings', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const streamId = c.req.query('streamId');
+  if (!streamId) {
+    throw new HTTPException(400, { message: 'Stream ID required' });
+  }
+
+  // Verify ownership or moderator
+  const [stream] = await db
+    .select()
+    .from(liveStreams)
+    .where(eq(liveStreams.id, streamId))
+    .limit(1);
+
+  if (!stream) {
+    throw new HTTPException(404, { message: 'Stream not found' });
+  }
+
+  const isOwner = stream.userDid === userDid;
+  if (!isOwner) {
+    const [isMod] = await db
+      .select()
+      .from(streamModerators)
+      .where(
+        and(
+          eq(streamModerators.streamId, streamId),
+          eq(streamModerators.userDid, userDid)
+        )
+      )
+      .limit(1);
+
+    if (!isMod) {
+      throw new HTTPException(403, { message: 'Not authorized' });
+    }
+  }
+
+  const { getChatModerationService } = await import('../services/streaming/ChatModerationService.js');
+  const moderationService = getChatModerationService();
+
+  const settings = await moderationService.getSettings(streamId);
+  return c.json(settings);
+});
+
+// Update chat moderation settings
+liveRoutes.post('/io.exprsn.live.chat.moderation.update', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const body = await c.req.json<{
+    streamId: string;
+    settings: {
+      enabled?: boolean;
+      blockLinks?: boolean;
+      linkWhitelist?: string[];
+      blockCaps?: boolean;
+      capsThreshold?: number;
+      spamDetection?: boolean;
+      spamThreshold?: number;
+      spamWindow?: number;
+      slowMode?: boolean;
+      slowModeInterval?: number;
+      minAccountAge?: number;
+      blockedWords?: string[];
+      blockedPatterns?: string[];
+      autoTimeoutDuration?: number;
+      maxEmojis?: number;
+      followerOnlyMode?: boolean;
+      subscriberOnlyMode?: boolean;
+    };
+  }>();
+
+  if (!body.streamId || !body.settings) {
+    throw new HTTPException(400, { message: 'Stream ID and settings required' });
+  }
+
+  // Verify ownership (only owner can change moderation settings)
+  const [stream] = await db
+    .select()
+    .from(liveStreams)
+    .where(eq(liveStreams.id, body.streamId))
+    .limit(1);
+
+  if (!stream) {
+    throw new HTTPException(404, { message: 'Stream not found' });
+  }
+
+  if (stream.userDid !== userDid) {
+    throw new HTTPException(403, { message: 'Only stream owner can update moderation settings' });
+  }
+
+  const { getChatModerationService } = await import('../services/streaming/ChatModerationService.js');
+  const moderationService = getChatModerationService();
+
+  const updatedSettings = await moderationService.updateSettings(body.streamId, body.settings);
+  return c.json(updatedSettings);
+});
+
+// Enable/disable slow mode quickly
+liveRoutes.post('/io.exprsn.live.chat.slowMode', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const body = await c.req.json<{
+    streamId: string;
+    enabled: boolean;
+    interval?: number; // seconds
+  }>();
+
+  if (!body.streamId) {
+    throw new HTTPException(400, { message: 'Stream ID required' });
+  }
+
+  // Verify ownership or moderator
+  const [stream] = await db
+    .select()
+    .from(liveStreams)
+    .where(eq(liveStreams.id, body.streamId))
+    .limit(1);
+
+  if (!stream) {
+    throw new HTTPException(404, { message: 'Stream not found' });
+  }
+
+  const isOwner = stream.userDid === userDid;
+  if (!isOwner) {
+    const [isMod] = await db
+      .select()
+      .from(streamModerators)
+      .where(
+        and(
+          eq(streamModerators.streamId, body.streamId),
+          eq(streamModerators.userDid, userDid)
+        )
+      )
+      .limit(1);
+
+    if (!isMod) {
+      throw new HTTPException(403, { message: 'Not authorized' });
+    }
+  }
+
+  const { getChatModerationService } = await import('../services/streaming/ChatModerationService.js');
+  const moderationService = getChatModerationService();
+
+  await moderationService.updateSettings(body.streamId, {
+    slowMode: body.enabled,
+    slowModeInterval: body.interval || 5,
+  });
+
+  return c.json({
+    success: true,
+    slowMode: body.enabled,
+    interval: body.interval || 5,
+  });
+});
+
+// Clear user timeout
+liveRoutes.post('/io.exprsn.live.chat.clearTimeout', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const body = await c.req.json<{
+    streamId: string;
+    targetDid: string;
+  }>();
+
+  if (!body.streamId || !body.targetDid) {
+    throw new HTTPException(400, { message: 'Stream ID and target DID required' });
+  }
+
+  // Verify ownership or moderator
+  const [stream] = await db
+    .select()
+    .from(liveStreams)
+    .where(eq(liveStreams.id, body.streamId))
+    .limit(1);
+
+  if (!stream) {
+    throw new HTTPException(404, { message: 'Stream not found' });
+  }
+
+  const isOwner = stream.userDid === userDid;
+  if (!isOwner) {
+    const [isMod] = await db
+      .select()
+      .from(streamModerators)
+      .where(
+        and(
+          eq(streamModerators.streamId, body.streamId),
+          eq(streamModerators.userDid, userDid)
+        )
+      )
+      .limit(1);
+
+    if (!isMod) {
+      throw new HTTPException(403, { message: 'Not authorized' });
+    }
+  }
+
+  const { getChatModerationService } = await import('../services/streaming/ChatModerationService.js');
+  const moderationService = getChatModerationService();
+
+  await moderationService.clearTimeout(body.streamId, body.targetDid);
+  return c.json({ success: true });
+});
+
+// Add blocked word
+liveRoutes.post('/io.exprsn.live.chat.moderation.addBlockedWord', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const body = await c.req.json<{
+    streamId: string;
+    word: string;
+  }>();
+
+  if (!body.streamId || !body.word) {
+    throw new HTTPException(400, { message: 'Stream ID and word required' });
+  }
+
+  // Verify ownership
+  const [stream] = await db
+    .select()
+    .from(liveStreams)
+    .where(eq(liveStreams.id, body.streamId))
+    .limit(1);
+
+  if (!stream || stream.userDid !== userDid) {
+    throw new HTTPException(403, { message: 'Only stream owner can add blocked words' });
+  }
+
+  const { getChatModerationService } = await import('../services/streaming/ChatModerationService.js');
+  const moderationService = getChatModerationService();
+
+  const currentSettings = await moderationService.getSettings(body.streamId);
+  const blockedWords = [...new Set([...currentSettings.blockedWords, body.word.toLowerCase()])];
+
+  await moderationService.updateSettings(body.streamId, { blockedWords });
+  return c.json({ success: true, blockedWords });
+});
+
+// Remove blocked word
+liveRoutes.post('/io.exprsn.live.chat.moderation.removeBlockedWord', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const body = await c.req.json<{
+    streamId: string;
+    word: string;
+  }>();
+
+  if (!body.streamId || !body.word) {
+    throw new HTTPException(400, { message: 'Stream ID and word required' });
+  }
+
+  // Verify ownership
+  const [stream] = await db
+    .select()
+    .from(liveStreams)
+    .where(eq(liveStreams.id, body.streamId))
+    .limit(1);
+
+  if (!stream || stream.userDid !== userDid) {
+    throw new HTTPException(403, { message: 'Only stream owner can remove blocked words' });
+  }
+
+  const { getChatModerationService } = await import('../services/streaming/ChatModerationService.js');
+  const moderationService = getChatModerationService();
+
+  const currentSettings = await moderationService.getSettings(body.streamId);
+  const blockedWords = currentSettings.blockedWords.filter(
+    w => w.toLowerCase() !== body.word.toLowerCase()
+  );
+
+  await moderationService.updateSettings(body.streamId, { blockedWords });
+  return c.json({ success: true, blockedWords });
+});
+
+// ============================================
 // Stream Status & Recording
 // ============================================
 
@@ -1106,7 +1478,8 @@ liveRoutes.get('/io.exprsn.live.getStreamStatus', authMiddleware, async (c) => {
 
   try {
     const provider = await getStreamingProvider();
-    const status = await provider.getStreamStatus(streamId);
+    const getStreamStatus = (provider as Record<string, unknown>).getStreamStatus as ((id: string) => Promise<unknown>) | undefined;
+    const status = getStreamStatus ? await getStreamStatus(streamId) : null;
 
     return c.json({
       streamId,
@@ -1292,6 +1665,130 @@ liveRoutes.get('/io.exprsn.live.getStreamMetrics', authMiddleware, async (c) => 
       error: 'Failed to get stream metrics',
     });
   }
+});
+
+// Get comprehensive stream health dashboard (for streamer dashboard UI)
+liveRoutes.get('/io.exprsn.live.getStreamDashboard', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const streamId = c.req.query('streamId');
+  if (!streamId) {
+    throw new HTTPException(400, { message: 'Stream ID required' });
+  }
+
+  // Verify ownership
+  const result = await db
+    .select()
+    .from(liveStreams)
+    .where(eq(liveStreams.id, streamId))
+    .limit(1);
+
+  const stream = result[0];
+  if (!stream) {
+    throw new HTTPException(404, { message: 'Stream not found' });
+  }
+
+  if (stream.userDid !== userDid) {
+    throw new HTTPException(403, { message: 'Not your stream' });
+  }
+
+  const { getLiveStreamHealthService } = await import('../services/streaming/LiveStreamHealthService.js');
+  const healthService = getLiveStreamHealthService();
+
+  try {
+    const dashboard = await healthService.getStreamDashboard(streamId);
+    return c.json(dashboard);
+  } catch (error) {
+    console.error('Failed to get stream dashboard:', error);
+    throw new HTTPException(500, { message: 'Failed to get stream dashboard' });
+  }
+});
+
+// Get stream health metrics only (lightweight for polling)
+liveRoutes.get('/io.exprsn.live.getStreamHealth', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const streamId = c.req.query('streamId');
+  if (!streamId) {
+    throw new HTTPException(400, { message: 'Stream ID required' });
+  }
+
+  // Verify ownership or moderator
+  const result = await db
+    .select()
+    .from(liveStreams)
+    .where(eq(liveStreams.id, streamId))
+    .limit(1);
+
+  const stream = result[0];
+  if (!stream) {
+    throw new HTTPException(404, { message: 'Stream not found' });
+  }
+
+  // Allow owner or moderators
+  if (stream.userDid !== userDid) {
+    const [isMod] = await db
+      .select()
+      .from(streamModerators)
+      .where(
+        and(
+          eq(streamModerators.streamId, streamId),
+          eq(streamModerators.userDid, userDid)
+        )
+      )
+      .limit(1);
+
+    if (!isMod) {
+      throw new HTTPException(403, { message: 'Not authorized' });
+    }
+  }
+
+  const { getLiveStreamHealthService } = await import('../services/streaming/LiveStreamHealthService.js');
+  const healthService = getLiveStreamHealthService();
+
+  const health = await healthService.getStreamHealth(streamId);
+  return c.json(health);
+});
+
+// Get viewer engagement metrics
+liveRoutes.get('/io.exprsn.live.getViewerEngagement', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const streamId = c.req.query('streamId');
+  if (!streamId) {
+    throw new HTTPException(400, { message: 'Stream ID required' });
+  }
+
+  // Verify ownership
+  const result = await db
+    .select()
+    .from(liveStreams)
+    .where(eq(liveStreams.id, streamId))
+    .limit(1);
+
+  const stream = result[0];
+  if (!stream) {
+    throw new HTTPException(404, { message: 'Stream not found' });
+  }
+
+  if (stream.userDid !== userDid) {
+    throw new HTTPException(403, { message: 'Not your stream' });
+  }
+
+  const { getLiveStreamHealthService } = await import('../services/streaming/LiveStreamHealthService.js');
+  const healthService = getLiveStreamHealthService();
+
+  const engagement = await healthService.getViewerEngagement(streamId);
+  return c.json(engagement);
 });
 
 // ============================================
@@ -2141,5 +2638,314 @@ liveRoutes.get('/io.exprsn.live.guest.pendingInvites', authMiddleware, async (c)
     })),
   });
 });
+
+// ============================================
+// Webhooks
+// ============================================
+
+const VALID_WEBHOOK_EVENTS: StreamWebhookEvent[] = [
+  'stream.started',
+  'stream.ended',
+  'stream.viewer_milestone',
+  'stream.raid_received',
+  'stream.raid_sent',
+  'stream.chat_message',
+  'stream.follow',
+  'stream.subscribe',
+  'stream.donation',
+  'stream.ban',
+  'stream.timeout',
+  'stream.mod_action',
+];
+
+// Create a webhook
+liveRoutes.post('/io.exprsn.live.webhooks.create', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const body = await c.req.json<{
+    url: string;
+    events: StreamWebhookEvent[];
+  }>();
+
+  if (!body.url || typeof body.url !== 'string') {
+    throw new HTTPException(400, { message: 'URL is required' });
+  }
+
+  if (!Array.isArray(body.events) || body.events.length === 0) {
+    throw new HTTPException(400, { message: 'At least one event is required' });
+  }
+
+  // Validate event types
+  const invalidEvents = body.events.filter(e => !VALID_WEBHOOK_EVENTS.includes(e));
+  if (invalidEvents.length > 0) {
+    throw new HTTPException(400, { message: `Invalid events: ${invalidEvents.join(', ')}` });
+  }
+
+  // Limit webhooks per user
+  const existingWebhooks = await db
+    .select({ count: sql<number>`COUNT(*)::int` })
+    .from(streamWebhooks)
+    .where(eq(streamWebhooks.userDid, userDid));
+
+  if ((existingWebhooks[0]?.count ?? 0) >= 10) {
+    throw new HTTPException(400, { message: 'Maximum of 10 webhooks allowed' });
+  }
+
+  const webhookService = getStreamWebhookService();
+
+  try {
+    const webhook = await webhookService.createWebhook(userDid, {
+      url: body.url,
+      events: body.events,
+    });
+
+    return c.json({
+      webhook: {
+        id: webhook.id,
+        url: webhook.url,
+        events: webhook.events,
+        active: webhook.active,
+        secret: webhook.secret, // Return secret only on creation
+        createdAt: webhook.createdAt.toISOString(),
+      },
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to create webhook';
+    throw new HTTPException(400, { message });
+  }
+});
+
+// List webhooks
+liveRoutes.get('/io.exprsn.live.webhooks.list', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const webhookService = getStreamWebhookService();
+  const webhooks = await webhookService.getWebhooks(userDid);
+
+  return c.json({
+    webhooks: webhooks.map(w => ({
+      id: w.id,
+      url: w.url,
+      events: w.events,
+      active: w.active,
+      failureCount: w.failureCount,
+      lastTriggeredAt: w.lastTriggeredAt?.toISOString(),
+      createdAt: w.createdAt.toISOString(),
+      updatedAt: w.updatedAt.toISOString(),
+    })),
+  });
+});
+
+// Get a webhook
+liveRoutes.get('/io.exprsn.live.webhooks.get', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const webhookId = c.req.query('id');
+  if (!webhookId) {
+    throw new HTTPException(400, { message: 'Webhook ID is required' });
+  }
+
+  const webhookService = getStreamWebhookService();
+  const webhook = await webhookService.getWebhook(webhookId, userDid);
+
+  if (!webhook) {
+    throw new HTTPException(404, { message: 'Webhook not found' });
+  }
+
+  return c.json({
+    webhook: {
+      id: webhook.id,
+      url: webhook.url,
+      events: webhook.events,
+      active: webhook.active,
+      failureCount: webhook.failureCount,
+      lastTriggeredAt: webhook.lastTriggeredAt?.toISOString(),
+      createdAt: webhook.createdAt.toISOString(),
+      updatedAt: webhook.updatedAt.toISOString(),
+    },
+  });
+});
+
+// Update a webhook
+liveRoutes.post('/io.exprsn.live.webhooks.update', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const body = await c.req.json<{
+    id: string;
+    url?: string;
+    events?: StreamWebhookEvent[];
+    active?: boolean;
+  }>();
+
+  if (!body.id) {
+    throw new HTTPException(400, { message: 'Webhook ID is required' });
+  }
+
+  // Validate event types if provided
+  if (body.events) {
+    if (!Array.isArray(body.events) || body.events.length === 0) {
+      throw new HTTPException(400, { message: 'At least one event is required' });
+    }
+
+    const invalidEvents = body.events.filter(e => !VALID_WEBHOOK_EVENTS.includes(e));
+    if (invalidEvents.length > 0) {
+      throw new HTTPException(400, { message: `Invalid events: ${invalidEvents.join(', ')}` });
+    }
+  }
+
+  const webhookService = getStreamWebhookService();
+
+  try {
+    const webhook = await webhookService.updateWebhook(body.id, userDid, {
+      url: body.url,
+      events: body.events,
+      active: body.active,
+    });
+
+    if (!webhook) {
+      throw new HTTPException(404, { message: 'Webhook not found' });
+    }
+
+    return c.json({
+      webhook: {
+        id: webhook.id,
+        url: webhook.url,
+        events: webhook.events,
+        active: webhook.active,
+        failureCount: webhook.failureCount,
+        lastTriggeredAt: webhook.lastTriggeredAt?.toISOString(),
+        createdAt: webhook.createdAt.toISOString(),
+        updatedAt: webhook.updatedAt.toISOString(),
+      },
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to update webhook';
+    throw new HTTPException(400, { message });
+  }
+});
+
+// Delete a webhook
+liveRoutes.post('/io.exprsn.live.webhooks.delete', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const body = await c.req.json<{ id: string }>();
+
+  if (!body.id) {
+    throw new HTTPException(400, { message: 'Webhook ID is required' });
+  }
+
+  const webhookService = getStreamWebhookService();
+  const deleted = await webhookService.deleteWebhook(body.id, userDid);
+
+  if (!deleted) {
+    throw new HTTPException(404, { message: 'Webhook not found' });
+  }
+
+  return c.json({ success: true });
+});
+
+// Regenerate webhook secret
+liveRoutes.post('/io.exprsn.live.webhooks.regenerateSecret', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const body = await c.req.json<{ id: string }>();
+
+  if (!body.id) {
+    throw new HTTPException(400, { message: 'Webhook ID is required' });
+  }
+
+  const webhookService = getStreamWebhookService();
+  const newSecret = await webhookService.regenerateSecret(body.id, userDid);
+
+  if (!newSecret) {
+    throw new HTTPException(404, { message: 'Webhook not found' });
+  }
+
+  return c.json({ secret: newSecret });
+});
+
+// Test a webhook
+liveRoutes.post('/io.exprsn.live.webhooks.test', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  const body = await c.req.json<{ id: string }>();
+
+  if (!body.id) {
+    throw new HTTPException(400, { message: 'Webhook ID is required' });
+  }
+
+  const webhookService = getStreamWebhookService();
+  const result = await webhookService.testWebhook(body.id, userDid);
+
+  return c.json({
+    success: result.success,
+    statusCode: result.statusCode,
+    error: result.error,
+    duration: result.duration,
+  });
+});
+
+// Get available webhook events
+liveRoutes.get('/io.exprsn.live.webhooks.events', async (c) => {
+  return c.json({
+    events: VALID_WEBHOOK_EVENTS.map(event => ({
+      id: event,
+      name: event.replace('stream.', '').replace(/_/g, ' '),
+      description: getEventDescription(event),
+    })),
+  });
+});
+
+function getEventDescription(event: StreamWebhookEvent): string {
+  switch (event) {
+    case 'stream.started':
+      return 'Triggered when you go live';
+    case 'stream.ended':
+      return 'Triggered when your stream ends';
+    case 'stream.viewer_milestone':
+      return 'Triggered when you hit viewer milestones (10, 25, 50, 100, etc.)';
+    case 'stream.raid_received':
+      return 'Triggered when you receive a raid from another streamer';
+    case 'stream.raid_sent':
+      return 'Triggered when you raid another streamer';
+    case 'stream.chat_message':
+      return 'Triggered for each chat message (high volume)';
+    case 'stream.follow':
+      return 'Triggered when someone follows you while live';
+    case 'stream.subscribe':
+      return 'Triggered when someone subscribes while live';
+    case 'stream.donation':
+      return 'Triggered when you receive a donation';
+    case 'stream.ban':
+      return 'Triggered when a user is banned from chat';
+    case 'stream.timeout':
+      return 'Triggered when a user is timed out';
+    case 'stream.mod_action':
+      return 'Triggered for moderator actions';
+    default:
+      return '';
+  }
+}
 
 export default liveRoutes;

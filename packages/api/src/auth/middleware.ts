@@ -3,9 +3,10 @@ import { HTTPException } from 'hono/http-exception';
 import { eq } from 'drizzle-orm';
 import { getOAuthClient, OAuthSession } from './oauth-client.js';
 import { db, sessions } from '../db/index.js';
-import { adminUsers, type AdminUser } from '../db/schema.js';
+import { adminUsers, domainUsers, type AdminUser } from '../db/schema.js';
 import { getEffectiveDomainAccess } from '../services/domain-access.js';
 import type { DomainPermission, EffectiveDomainAccess } from '@exprsn/shared';
+import { hashSessionToken } from '../utils/session-tokens.js';
 
 // Admin role types
 export type AdminRole = 'super_admin' | 'admin' | 'moderator' | 'support';
@@ -40,6 +41,50 @@ export const ADMIN_PERMISSIONS = {
   // Platform settings permissions
   SETTINGS_VIEW: 'admin.settings.view',
   SETTINGS_MANAGE: 'admin.settings.manage',
+  // Webhook permissions
+  WEBHOOKS_VIEW: 'admin.webhooks.view',
+  WEBHOOKS_MANAGE: 'admin.webhooks.manage',
+  WEBHOOKS_TEST: 'admin.webhooks.test',
+  // API token permissions
+  API_TOKENS_VIEW: 'admin.api.tokens.view',
+  API_TOKENS_CREATE: 'admin.api.tokens.create',
+  API_TOKENS_REVOKE: 'admin.api.tokens.revoke',
+  // Payment gateway permissions
+  PAYMENTS_VIEW: 'admin.payments.view',
+  PAYMENTS_MANAGE: 'admin.payments.manage',
+  PAYMENTS_REFUND: 'admin.payments.refund',
+  // Live streaming permissions
+  LIVESTREAM_VIEW: 'admin.livestream.view',
+  LIVESTREAM_MODERATE: 'admin.livestream.moderate',
+  LIVESTREAM_MANAGE: 'admin.livestream.manage',
+  // Video processing permissions
+  VIDEO_PROCESSING_VIEW: 'admin.video.processing.view',
+  VIDEO_PROCESSING_RETRY: 'admin.video.processing.retry',
+  VIDEO_PROCESSING_CANCEL: 'admin.video.processing.cancel',
+  // Federation permissions
+  FEDERATION_VIEW: 'admin.federation.view',
+  FEDERATION_MANAGE: 'admin.federation.manage',
+  // PLC/Identity permissions
+  PLC_VIEW: 'admin.plc.view',
+  PLC_MANAGE: 'admin.plc.manage',
+  PLC_IDENTITIES_CREATE: 'admin.plc.identities.create',
+  PLC_IDENTITIES_TOMBSTONE: 'admin.plc.identities.tombstone',
+  // Prefetch engine permissions
+  PREFETCH_VIEW: 'admin.prefetch.view',
+  PREFETCH_MANAGE: 'admin.prefetch.manage',
+  // Invite code permissions
+  INVITE_CODES_VIEW: 'admin.invite_codes.view',
+  INVITE_CODES_MANAGE: 'admin.invite_codes.manage',
+  // Audit permissions
+  AUDIT_VIEW: 'admin.audit.view',
+  AUDIT_MANAGE: 'admin.audit.manage',
+  // Infrastructure permissions
+  INFRASTRUCTURE_VIEW: 'admin.infrastructure.view',
+  INFRASTRUCTURE_MANAGE: 'admin.infrastructure.manage',
+  // Streaming permissions
+  STREAMING_VIEW: 'admin.streaming.view',
+  STREAMING_MANAGE: 'admin.streaming.manage',
+  STREAMING_MODERATE: 'admin.streaming.moderate',
 } as const;
 
 // Role-based default permissions
@@ -62,6 +107,29 @@ export const ROLE_PERMISSIONS: Record<AdminRole, string[]> = {
     ADMIN_PERMISSIONS.ORGS_CREATE,
     ADMIN_PERMISSIONS.SECURITY_VIEW,
     ADMIN_PERMISSIONS.SETTINGS_VIEW,
+    ADMIN_PERMISSIONS.WEBHOOKS_VIEW,
+    ADMIN_PERMISSIONS.WEBHOOKS_MANAGE,
+    ADMIN_PERMISSIONS.API_TOKENS_VIEW,
+    ADMIN_PERMISSIONS.API_TOKENS_CREATE,
+    ADMIN_PERMISSIONS.PAYMENTS_VIEW,
+    ADMIN_PERMISSIONS.PAYMENTS_MANAGE,
+    ADMIN_PERMISSIONS.LIVESTREAM_VIEW,
+    ADMIN_PERMISSIONS.LIVESTREAM_MANAGE,
+    ADMIN_PERMISSIONS.VIDEO_PROCESSING_VIEW,
+    ADMIN_PERMISSIONS.VIDEO_PROCESSING_RETRY,
+    ADMIN_PERMISSIONS.FEDERATION_VIEW,
+    ADMIN_PERMISSIONS.PLC_VIEW,
+    ADMIN_PERMISSIONS.PLC_MANAGE,
+    ADMIN_PERMISSIONS.PREFETCH_VIEW,
+    ADMIN_PERMISSIONS.PREFETCH_MANAGE,
+    ADMIN_PERMISSIONS.INVITE_CODES_VIEW,
+    ADMIN_PERMISSIONS.INVITE_CODES_MANAGE,
+    ADMIN_PERMISSIONS.AUDIT_VIEW,
+    ADMIN_PERMISSIONS.AUDIT_MANAGE,
+    ADMIN_PERMISSIONS.INFRASTRUCTURE_VIEW,
+    ADMIN_PERMISSIONS.INFRASTRUCTURE_MANAGE,
+    ADMIN_PERMISSIONS.STREAMING_VIEW,
+    ADMIN_PERMISSIONS.STREAMING_MANAGE,
   ],
   moderator: [
     ADMIN_PERMISSIONS.USERS_VIEW,
@@ -72,6 +140,16 @@ export const ROLE_PERMISSIONS: Record<AdminRole, string[]> = {
     ADMIN_PERMISSIONS.REPORTS_ACTION,
     ADMIN_PERMISSIONS.DOMAINS_VIEW,
     ADMIN_PERMISSIONS.ORGS_VIEW,
+    ADMIN_PERMISSIONS.WEBHOOKS_VIEW,
+    ADMIN_PERMISSIONS.LIVESTREAM_VIEW,
+    ADMIN_PERMISSIONS.LIVESTREAM_MODERATE,
+    ADMIN_PERMISSIONS.VIDEO_PROCESSING_VIEW,
+    ADMIN_PERMISSIONS.PLC_VIEW,
+    ADMIN_PERMISSIONS.PREFETCH_VIEW,
+    ADMIN_PERMISSIONS.STREAMING_VIEW,
+    ADMIN_PERMISSIONS.STREAMING_MODERATE,
+    ADMIN_PERMISSIONS.AUDIT_VIEW,
+    ADMIN_PERMISSIONS.INVITE_CODES_VIEW,
   ],
   support: [
     ADMIN_PERMISSIONS.USERS_VIEW,
@@ -79,12 +157,17 @@ export const ROLE_PERMISSIONS: Record<AdminRole, string[]> = {
     ADMIN_PERMISSIONS.REPORTS_VIEW,
     ADMIN_PERMISSIONS.DOMAINS_VIEW,
     ADMIN_PERMISSIONS.ORGS_VIEW,
+    ADMIN_PERMISSIONS.WEBHOOKS_VIEW,
+    ADMIN_PERMISSIONS.LIVESTREAM_VIEW,
+    ADMIN_PERMISSIONS.VIDEO_PROCESSING_VIEW,
+    ADMIN_PERMISSIONS.PLC_VIEW,
   ],
 };
 
 // Extend Hono context with our custom variables
 declare module 'hono' {
   interface ContextVariableMap {
+    requestId: string;
     session: OAuthSession;
     did: string;
     userDid: string;
@@ -95,15 +178,37 @@ declare module 'hono' {
 }
 
 /**
+ * Cache user → domain mapping in Redis for the prefetch worker.
+ * Writes `user-domain:{did}` → `{domainId}` with a 1-hour TTL.
+ * Fires without awaiting so it never adds latency to the auth path.
+ */
+function cacheDomainMembership(userDid: string): void {
+  db.select({ domainId: domainUsers.domainId })
+    .from(domainUsers)
+    .where(eq(domainUsers.userDid, userDid))
+    .limit(1)
+    .then(async ([row]) => {
+      if (!row) return;
+      const { redis } = await import('../cache/redis.js');
+      await redis.setex(`user-domain:${userDid}`, 3600, row.domainId);
+    })
+    .catch(() => {
+      // Non-critical: swallow errors so auth is never disrupted
+    });
+}
+
+/**
  * Authentication middleware that requires a valid session (local or OAuth)
  * In development mode, bypasses authentication and uses a default user
  */
 export async function authMiddleware(c: Context, next: Next) {
-  const isDev = process.env.NODE_ENV !== 'production';
+  const isDev = process.env.DEV_AUTH_BYPASS === 'true' && process.env.NODE_ENV !== 'production';
+  const isTest = process.env.NODE_ENV === 'test' || process.env.VITEST === 'true';
   const authHeader = c.req.header('Authorization');
 
   // Development bypass - use default user when no auth provided
-  if (isDev && (!authHeader || !authHeader.startsWith('Bearer '))) {
+  // Skip bypass in test mode to allow testing authentication behavior
+  if (isDev && !isTest && (!authHeader || !authHeader.startsWith('Bearer '))) {
     // Use rickholland as the default dev user
     c.set('did', 'did:web:exprsn.local:user:rickholland');
     await next();
@@ -119,8 +224,10 @@ export async function authMiddleware(c: Context, next: Next) {
   try {
     // Check for local session token (prefixed with exp_)
     if (token.startsWith('exp_')) {
+      // Hash the token to look it up (tokens are stored as hashes)
+      const tokenHash = hashSessionToken(token);
       const session = await db.query.sessions.findFirst({
-        where: eq(sessions.accessJwt, token),
+        where: eq(sessions.accessJwt, tokenHash),
       });
 
       if (!session || session.expiresAt < new Date()) {
@@ -135,6 +242,7 @@ export async function authMiddleware(c: Context, next: Next) {
       }
 
       c.set('did', session.did);
+      cacheDomainMembership(session.did);
       await next();
       return;
     }
@@ -156,6 +264,7 @@ export async function authMiddleware(c: Context, next: Next) {
 
     c.set('session', session);
     c.set('did', session.did);
+    cacheDomainMembership(session.did);
 
     await next();
   } catch (error) {
@@ -194,7 +303,7 @@ export async function requireAuth(c: Context, next: Next) {
  * In development mode, uses a default user when no auth provided
  */
 export async function optionalAuthMiddleware(c: Context, next: Next) {
-  const isDev = process.env.NODE_ENV !== 'production';
+  const isDev = process.env.DEV_AUTH_BYPASS === 'true' && process.env.NODE_ENV !== 'production';
   const authHeader = c.req.header('Authorization');
 
   // Development bypass - use default user when no auth provided
@@ -210,8 +319,10 @@ export async function optionalAuthMiddleware(c: Context, next: Next) {
     try {
       // Check for local session token (prefixed with exp_)
       if (token.startsWith('exp_')) {
+        // Hash the token to look it up (tokens are stored as hashes)
+        const tokenHash = hashSessionToken(token);
         const session = await db.query.sessions.findFirst({
-          where: eq(sessions.accessJwt, token),
+          where: eq(sessions.accessJwt, tokenHash),
         });
 
         if (session && session.expiresAt >= new Date()) {
@@ -292,7 +403,7 @@ export function hasPermission(permissions: string[], permission: string): boolea
  * In development mode, automatically falls back to first admin user if no valid auth
  */
 export async function adminAuthMiddleware(c: Context, next: Next) {
-  const isDev = process.env.NODE_ENV !== 'production';
+  const isDev = process.env.DEV_AUTH_BYPASS === 'true' && process.env.NODE_ENV !== 'production';
 
   // Helper to use dev admin fallback
   const useDevAdminFallback = async (): Promise<boolean> => {
@@ -332,8 +443,10 @@ export async function adminAuthMiddleware(c: Context, next: Next) {
 
     // Check for local session token (prefixed with exp_)
     if (token.startsWith('exp_')) {
+      // Hash the token to look it up (tokens are stored as hashes)
+      const tokenHash = hashSessionToken(token);
       const session = await db.query.sessions.findFirst({
-        where: eq(sessions.accessJwt, token),
+        where: eq(sessions.accessJwt, tokenHash),
       });
 
       if (!session || session.expiresAt < new Date()) {

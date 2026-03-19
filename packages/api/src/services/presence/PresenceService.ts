@@ -494,21 +494,19 @@ export class PresenceService extends EventEmitter {
    */
   private async persistPresence(data: UserPresenceData): Promise<void> {
     try {
-      // Convert Date to ISO string for postgres.js compatibility
-      const lastSeenStr = data.lastSeen.toISOString();
       await db
         .insert(userPresence)
         .values({
           userDid: data.userDid,
           status: data.status,
-          lastSeen: lastSeenStr,
+          lastSeen: data.lastSeen,
           currentConversationId: data.currentContext || null,
         })
         .onConflictDoUpdate({
           target: userPresence.userDid,
           set: {
             status: data.status,
-            lastSeen: lastSeenStr,
+            lastSeen: data.lastSeen,
             currentConversationId: data.currentContext || null,
           },
         });

@@ -27,6 +27,8 @@ import {
 } from './auth';
 import { api } from './api';
 
+export type AdminRole = 'super_admin' | 'admin' | 'moderator' | 'support' | null;
+
 export interface SocialLinks {
   twitter?: string;
   instagram?: string;
@@ -54,6 +56,7 @@ interface SignUpResult {
   did: string;
   handle: string;
   certificate?: CertificateData;
+  apiToken?: string;
 }
 
 interface AuthContextType {
@@ -61,6 +64,11 @@ interface AuthContextType {
   token: string | null;
   isLoading: boolean;
   isAuthenticated: boolean;
+  // Admin/moderator role
+  adminRole: AdminRole;
+  adminPermissions: string[];
+  isModerator: boolean;
+  isAdmin: boolean;
   // Local auth methods
   signUp: (data: {
     handle: string;
@@ -68,6 +76,7 @@ interface AuthContextType {
     password: string;
     displayName?: string;
     accountType?: AccountType;
+    didMethod?: 'plc' | 'web' | 'exprn';
   }) => Promise<SignUpResult>;
   signIn: (identifier: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
@@ -79,10 +88,30 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | null>(null);
 
+const MODERATOR_ROLES: AdminRole[] = ['moderator', 'admin', 'super_admin'];
+const ADMIN_ROLES: AdminRole[] = ['admin', 'super_admin'];
+
+async function fetchAdminRole(): Promise<{ role: AdminRole; permissions: string[] }> {
+  try {
+    const session = await api.getAdminSession();
+    if (session?.admin) {
+      return {
+        role: session.admin.role as AdminRole,
+        permissions: session.admin.permissions ?? [],
+      };
+    }
+  } catch {
+    // 403 or network error — user is not an admin, silently ignore
+  }
+  return { role: null, permissions: [] };
+}
+
 export const AuthProvider: FC<PropsWithChildren> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
   const [token, setToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [adminRole, setAdminRole] = useState<AdminRole>(null);
+  const [adminPermissions, setAdminPermissions] = useState<string[]>([]);
 
   // Initialize session on mount
   useEffect(() => {
@@ -130,6 +159,13 @@ export const AuthProvider: FC<PropsWithChildren> = ({ children }) => {
               }
             }
           }
+
+          // Background: check admin role (non-blocking)
+          fetchAdminRole().then(({ role, permissions }) => {
+            setAdminRole(role);
+            setAdminPermissions(permissions);
+          });
+
           setIsLoading(false);
           return;
         }
@@ -140,6 +176,12 @@ export const AuthProvider: FC<PropsWithChildren> = ({ children }) => {
           setUser({
             did: oauthSession.did,
             handle: oauthSession.handle,
+          });
+
+          // Background: check admin role (non-blocking)
+          fetchAdminRole().then(({ role, permissions }) => {
+            setAdminRole(role);
+            setAdminPermissions(permissions);
           });
         }
       } catch (error) {
@@ -157,6 +199,7 @@ export const AuthProvider: FC<PropsWithChildren> = ({ children }) => {
     password: string;
     displayName?: string;
     accountType?: AccountType;
+    didMethod?: 'plc' | 'web' | 'exprn';
   }): Promise<SignUpResult> => {
     const result = await createAccount(data);
     api.setSession(result.accessJwt);
@@ -172,6 +215,7 @@ export const AuthProvider: FC<PropsWithChildren> = ({ children }) => {
       did: result.did,
       handle: result.handle,
       certificate: result.certificate,
+      apiToken: result.apiToken,
     };
   }, []);
 
@@ -184,6 +228,12 @@ export const AuthProvider: FC<PropsWithChildren> = ({ children }) => {
       handle: session.handle,
       displayName: session.user?.displayName,
       avatar: session.user?.avatar,
+    });
+
+    // Background: check admin role after sign-in
+    fetchAdminRole().then(({ role, permissions }) => {
+      setAdminRole(role);
+      setAdminPermissions(permissions);
     });
   }, []);
 
@@ -199,6 +249,8 @@ export const AuthProvider: FC<PropsWithChildren> = ({ children }) => {
     }
     setToken(null);
     setUser(null);
+    setAdminRole(null);
+    setAdminPermissions([]);
   }, []);
 
   const signInWithOAuth = useCallback(async (handle: string) => {
@@ -226,6 +278,9 @@ export const AuthProvider: FC<PropsWithChildren> = ({ children }) => {
     }
   }, [user]);
 
+  const isModerator = MODERATOR_ROLES.includes(adminRole);
+  const isAdmin = ADMIN_ROLES.includes(adminRole);
+
   return (
     <AuthContext.Provider
       value={{
@@ -233,6 +288,10 @@ export const AuthProvider: FC<PropsWithChildren> = ({ children }) => {
         token,
         isLoading,
         isAuthenticated: !!user,
+        adminRole,
+        adminPermissions,
+        isModerator,
+        isAdmin,
         signUp,
         signIn,
         signOut,

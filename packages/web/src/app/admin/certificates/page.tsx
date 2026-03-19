@@ -772,35 +772,42 @@ function CertificatesTab({
           </button>
         </div>
         <div className="space-y-3">
-          {caCerts?.map((ca) => (
-            <div key={ca.id} className="flex items-center justify-between p-4 bg-surface-hover rounded-lg">
-              <div className="flex items-center gap-4">
-                <div className={`p-2 rounded-lg ${ca.certType === 'root' ? 'bg-purple-500/10' : 'bg-violet-500/10'}`}>
-                  {ca.certType === 'root' ? (
-                    <RootCertIcon className="w-6 h-6 text-purple-500" />
-                  ) : (
-                    <IntermediateIcon className="w-6 h-6 text-violet-500" />
-                  )}
-                </div>
-                <div>
-                  <div className="flex items-center gap-2">
-                    <p className="text-sm font-medium text-text-primary">{ca.commonName}</p>
-                    {getTypeBadge(ca.certType)}
+          {caCerts && caCerts.length > 0 ? (
+            caCerts.map((ca) => (
+              <div key={ca.id} className="flex items-center justify-between p-4 bg-surface-hover rounded-lg">
+                <div className="flex items-center gap-4">
+                  <div className={`p-2 rounded-lg ${ca.certType === 'root' ? 'bg-purple-500/10' : 'bg-violet-500/10'}`}>
+                    {ca.certType === 'root' ? (
+                      <RootCertIcon className="w-6 h-6 text-purple-500" />
+                    ) : (
+                      <IntermediateIcon className="w-6 h-6 text-violet-500" />
+                    )}
                   </div>
-                  <p className="text-xs text-text-muted font-mono">{ca.fingerprint}</p>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <p className="text-sm font-medium text-text-primary">{ca.commonName}</p>
+                      {getTypeBadge(ca.certType)}
+                    </div>
+                    <p className="text-xs text-text-muted font-mono">{ca.fingerprint}</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-4">
+                  <div className="text-right">
+                    <p className="text-sm text-text-primary">{ca.issuedCount} issued</p>
+                    <p className="text-xs text-text-muted">
+                      Expires: {new Date(ca.notAfter).toLocaleDateString()}
+                    </p>
+                  </div>
+                  {getStatusBadge(ca.status)}
                 </div>
               </div>
-              <div className="flex items-center gap-4">
-                <div className="text-right">
-                  <p className="text-sm text-text-primary">{ca.issuedCount} issued</p>
-                  <p className="text-xs text-text-muted">
-                    Expires: {new Date(ca.notAfter).toLocaleDateString()}
-                  </p>
-                </div>
-                {getStatusBadge(ca.status)}
-              </div>
+            ))
+          ) : (
+            <div className="text-center py-8 text-text-muted">
+              <p className="mb-2">No certificate authorities configured</p>
+              <p className="text-sm">Root and intermediate CAs will appear here once created</p>
             </div>
-          ))}
+          )}
         </div>
       </div>
 

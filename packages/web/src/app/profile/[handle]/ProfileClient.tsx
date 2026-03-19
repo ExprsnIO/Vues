@@ -6,11 +6,14 @@ import Link from 'next/link';
 import { Sidebar, useSidebar } from '@/components/Sidebar';
 import { UserActionsMenu } from '@/components/UserActionsMenu';
 import { BlockedMutedSettings } from '@/components/settings/BlockedMutedSettings';
-import { api, VideoView, OrganizationView, CollectionView } from '@/lib/api';
+import { api, API_BASE, VideoView, OrganizationView, CollectionView } from '@/lib/api';
+import { IdentityBadge } from '@/components/IdentityBadge';
 import { useAuth } from '@/lib/auth-context';
 import { cn } from '@/lib/utils';
 import { useState, useRef, useEffect } from 'react';
 import toast from 'react-hot-toast';
+import { ProfileSkeleton } from '@/components/skeletons';
+import { useMessagingStore } from '@/stores/messaging-store';
 
 interface ProfileClientProps {
   handle: string;
@@ -18,11 +21,12 @@ interface ProfileClientProps {
 
 export default function ProfileClient({ handle }: ProfileClientProps) {
   const router = useRouter();
-  const { user, isLoading: authLoading } = useAuth();
+  const { user, isLoading: authLoading, isModerator } = useAuth();
   const queryClient = useQueryClient();
   const { openSettings } = useSidebar();
   const [activeTab, setActiveTab] = useState<'videos' | 'liked' | 'collections' | 'blocked' | 'account'>('videos');
   const [showStatsModal, setShowStatsModal] = useState(false);
+  const [showSanctionModal, setShowSanctionModal] = useState(false);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['profile', handle],
@@ -43,10 +47,14 @@ export default function ProfileClient({ handle }: ProfileClientProps) {
     },
   });
 
+  const openConversation = useMessagingStore((state) => state.openConversation);
+
   const messageMutation = useMutation({
     mutationFn: (did: string) => api.getOrCreateConversation(did),
     onSuccess: (result) => {
-      router.push(`/messages/${result.conversation.id}`);
+      openConversation(result.conversation.id);
+      // Fallback navigation (disabled — drawer handles this):
+      // router.push(`/messages/${result.conversation.id}`);
     },
     onError: () => {
       toast.error('Failed to start conversation');
@@ -100,9 +108,9 @@ export default function ProfileClient({ handle }: ProfileClientProps) {
           ) : data ? (
             <>
               {/* Profile Header */}
-              <div className="flex items-start gap-8 mb-8">
+              <div className="flex flex-col sm:flex-row items-center sm:items-start gap-4 sm:gap-8 mb-8">
                 {/* Avatar */}
-                <div className="w-32 h-32 rounded-full bg-surface flex items-center justify-center overflow-hidden flex-shrink-0">
+                <div className="w-24 h-24 sm:w-32 sm:h-32 rounded-full bg-surface flex items-center justify-center overflow-hidden flex-shrink-0">
                   {data.profile.avatar ? (
                     <img
                       src={data.profile.avatar}
@@ -125,6 +133,7 @@ export default function ProfileClient({ handle }: ProfileClientProps) {
                     {data.profile.verified && (
                       <VerifiedBadge />
                     )}
+                    <IdentityBadge did={data.profile.did} size="md" showLabel />
                   </div>
                   <div className="flex items-center gap-2 mb-4">
                     <p className="text-text-muted">@{data.profile.handle}</p>
@@ -296,6 +305,34 @@ export default function ProfileClient({ handle }: ProfileClientProps) {
                       </>
                     )}
                   </div>
+
+                  {/* Moderation tools (moderators+ only, not own profile) */}
+                  {isModerator && !isOwnProfile && data && (
+                    <div className="mt-4 p-3 border border-orange-500/30 rounded-lg bg-orange-500/5">
+                      <div className="flex items-center gap-2 mb-3">
+                        <ModShieldIcon className="w-4 h-4 text-orange-400" />
+                        <span className="text-xs font-semibold text-orange-400 uppercase tracking-wide">
+                          Moderation
+                        </span>
+                      </div>
+                      <div className="flex flex-wrap gap-2 mb-3">
+                        <button
+                          onClick={() => setShowSanctionModal(true)}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-orange-500/10 text-orange-400 hover:bg-orange-500/20 border border-orange-500/30 rounded-md transition-colors"
+                        >
+                          <ModShieldIcon className="w-3.5 h-3.5" />
+                          Sanction User
+                        </button>
+                        <Link
+                          href={`/mod/users?did=${data.profile.did}`}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-surface text-text-muted hover:bg-surface-hover border border-border rounded-md transition-colors"
+                        >
+                          <ModReportsIcon className="w-3.5 h-3.5" />
+                          View Reports
+                        </Link>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -398,7 +435,7 @@ export default function ProfileClient({ handle }: ProfileClientProps) {
                         <PinIcon className="w-5 h-5 text-text-muted" />
                         <h2 className="text-lg font-semibold text-text-primary">Pinned Videos</h2>
                       </div>
-                      <div className="grid grid-cols-3 gap-4">
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 sm:gap-4">
                         {data.pinnedVideos.map((video) => (
                           <VideoThumbnail key={video.uri} video={video} isPinned={true} isOwnProfile={isOwnProfile} />
                         ))}
@@ -407,7 +444,7 @@ export default function ProfileClient({ handle }: ProfileClientProps) {
                   )}
 
                   {/* Video Grid */}
-                  <div className="grid grid-cols-3 gap-4">
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 sm:gap-4">
                     {data.videos.map((video) => (
                       <VideoThumbnail key={video.uri} video={video} isOwnProfile={isOwnProfile} />
                     ))}
@@ -434,33 +471,19 @@ export default function ProfileClient({ handle }: ProfileClientProps) {
           onClose={() => setShowStatsModal(false)}
         />
       )}
+
+      {/* Sanction Modal (moderators only) */}
+      {showSanctionModal && data && (
+        <SanctionModal
+          userDid={data.profile.did}
+          userHandle={data.profile.handle}
+          onClose={() => setShowSanctionModal(false)}
+        />
+      )}
     </div>
   );
 }
 
-function ProfileSkeleton() {
-  return (
-    <div className="animate-pulse">
-      <div className="flex items-start gap-8 mb-8">
-        <div className="w-32 h-32 rounded-full bg-surface" />
-        <div className="flex-1">
-          <div className="h-8 w-48 bg-surface rounded mb-4" />
-          <div className="h-4 w-32 bg-surface rounded mb-4" />
-          <div className="flex gap-6 mb-4">
-            <div className="h-4 w-24 bg-surface rounded" />
-            <div className="h-4 w-24 bg-surface rounded" />
-            <div className="h-4 w-24 bg-surface rounded" />
-          </div>
-        </div>
-      </div>
-      <div className="grid grid-cols-3 gap-4">
-        {[...Array(6)].map((_, i) => (
-          <div key={i} className="aspect-[9/16] bg-surface rounded-lg" />
-        ))}
-      </div>
-    </div>
-  );
-}
 
 function VideoThumbnail({ video, isPinned = false, isOwnProfile = false }: { video: VideoView; isPinned?: boolean; isOwnProfile?: boolean }) {
   const queryClient = useQueryClient();
@@ -570,7 +593,7 @@ function VideoThumbnail({ video, isPinned = false, isOwnProfile = false }: { vid
       {videoUrl && supportsHover && (
         <video
           ref={videoRef}
-          src={videoUrl.startsWith('/') ? `http://localhost:3002${videoUrl}` : videoUrl}
+          src={videoUrl.startsWith('/') ? `${API_BASE}${videoUrl}` : videoUrl}
           className={cn(
             "absolute inset-0 w-full h-full object-cover transition-opacity duration-300",
             showPreview ? "opacity-100" : "opacity-0"
@@ -1181,5 +1204,135 @@ function LockIcon({ className }: { className?: string }) {
     <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
       <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z" />
     </svg>
+  );
+}
+
+function ModShieldIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" />
+    </svg>
+  );
+}
+
+function ModReportsIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M3 3v1.5M3 21v-6m0 0l2.77-.693a9 9 0 016.208.682l.108.054a9 9 0 006.086.71l3.114-.732a48.524 48.524 0 01-.005-10.499l-3.11.732a9 9 0 01-6.085-.711l-.108-.054a9 9 0 00-6.208-.682L3 4.5M3 15V4.5" />
+    </svg>
+  );
+}
+
+// SanctionModal — lightweight sanction form for moderators on profile pages
+function SanctionModal({
+  userDid,
+  userHandle,
+  onClose,
+}: {
+  userDid: string;
+  userHandle: string;
+  onClose: () => void;
+}) {
+  const [sanctionType, setSanctionType] = useState<'warning' | 'mute' | 'suspend' | 'ban'>('warning');
+  const [reason, setReason] = useState('');
+  const [duration, setDuration] = useState('');
+
+  const sanctionMutation = useMutation({
+    mutationFn: () =>
+      api.sanctionUser({
+        userDid,
+        sanctionType,
+        reason,
+        expiresAt:
+          duration && sanctionType !== 'ban'
+            ? new Date(Date.now() + Number(duration) * 24 * 60 * 60 * 1000).toISOString()
+            : undefined,
+      }),
+    onSuccess: () => {
+      toast.success(`${sanctionType.charAt(0).toUpperCase() + sanctionType.slice(1)} applied to @${userHandle}`);
+      onClose();
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || 'Failed to apply sanction');
+    },
+  });
+
+  return (
+    <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
+      <div className="bg-surface rounded-lg p-6 max-w-md mx-4 border border-border w-full">
+        <div className="flex items-center gap-2 mb-4">
+          <ModShieldIcon className="w-5 h-5 text-orange-400" />
+          <h3 className="text-base font-semibold text-text-primary">
+            Sanction @{userHandle}
+          </h3>
+        </div>
+
+        {/* Sanction type */}
+        <div className="mb-4">
+          <label className="block text-sm font-medium text-text-muted mb-2">Sanction type</label>
+          <div className="grid grid-cols-2 gap-2">
+            {(['warning', 'mute', 'suspend', 'ban'] as const).map((type) => (
+              <button
+                key={type}
+                onClick={() => setSanctionType(type)}
+                className={cn(
+                  'px-3 py-2 text-sm font-medium rounded-md border transition-colors capitalize',
+                  sanctionType === type
+                    ? 'border-orange-500 bg-orange-500/10 text-orange-400'
+                    : 'border-border text-text-muted hover:bg-surface-hover'
+                )}
+              >
+                {type}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Duration (optional, not for ban) */}
+        {sanctionType !== 'warning' && sanctionType !== 'ban' && (
+          <div className="mb-4">
+            <label className="block text-sm font-medium text-text-muted mb-2">
+              Duration (days, leave blank for permanent)
+            </label>
+            <input
+              type="number"
+              min="1"
+              value={duration}
+              onChange={(e) => setDuration(e.target.value)}
+              placeholder="e.g. 7"
+              className="w-full bg-background border border-border rounded-md px-3 py-2 text-sm text-text-primary placeholder-text-muted focus:outline-none focus:border-orange-400"
+            />
+          </div>
+        )}
+
+        {/* Reason */}
+        <div className="mb-5">
+          <label className="block text-sm font-medium text-text-muted mb-2">Reason</label>
+          <textarea
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            placeholder="Describe the reason for this sanction..."
+            rows={3}
+            className="w-full bg-background border border-border rounded-md px-3 py-2 text-sm text-text-primary placeholder-text-muted resize-none focus:outline-none focus:border-orange-400"
+          />
+        </div>
+
+        <div className="flex gap-3">
+          <button
+            onClick={onClose}
+            className="flex-1 px-4 py-2 text-sm text-text-muted border border-border rounded-md hover:bg-surface-hover transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={() => sanctionMutation.mutate()}
+            disabled={!reason.trim() || sanctionMutation.isPending}
+            className="flex-1 px-4 py-2 text-sm bg-orange-500 hover:bg-orange-400 disabled:opacity-50 text-white rounded-md font-medium transition-colors"
+          >
+            {sanctionMutation.isPending ? 'Applying...' : `Apply ${sanctionType}`}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }

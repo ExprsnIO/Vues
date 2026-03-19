@@ -38,22 +38,17 @@ export default function GlobalTokensPage() {
   const { data, isLoading } = useQuery({
     queryKey: ['admin', 'tokens', 'global'],
     queryFn: async () => {
-      const response = await fetch('/api/admin/tokens', {
-        credentials: 'include',
-      });
-      if (!response.ok) throw new Error('Failed to fetch tokens');
-      return response.json();
+      const response = await api.get('/xrpc/io.exprsn.admin.tokens.list') as { data: { tokens: Token[] } };
+      return response.data;
     },
   });
 
   const revokeMutation = useMutation({
     mutationFn: async (tokenId: string) => {
-      const response = await fetch(`/api/admin/tokens/${tokenId}/revoke`, {
-        method: 'POST',
-        credentials: 'include',
-      });
-      if (!response.ok) throw new Error('Failed to revoke token');
-      return response.json();
+      const response = await api.post('/xrpc/io.exprsn.admin.tokens.revoke', {
+        tokenId,
+      }) as { data: { success: boolean } };
+      return response.data;
     },
     onSuccess: () => {
       toast.success('Token revoked');
@@ -70,7 +65,7 @@ export default function GlobalTokensPage() {
   }
 
   const tokens: Token[] = data?.tokens || [];
-  const stats = data?.stats || {
+  const stats = (data as Record<string, unknown>)?.stats as { total: number; active: number; personal: number; service: number } | undefined ?? {
     total: tokens.length,
     active: tokens.filter((t: Token) => t.status === 'active').length,
     personal: tokens.filter((t: Token) => t.tokenType === 'personal').length,
@@ -242,12 +237,13 @@ export default function GlobalTokensPage() {
       {/* Revoke Confirmation */}
       {revokeTarget && (
         <ConfirmDialog
+          isOpen={true}
           title="Revoke Token"
           message={`Are you sure you want to revoke "${revokeTarget.name}"? This action cannot be undone.`}
           confirmLabel="Revoke"
-          confirmVariant="danger"
+          variant="danger"
           onConfirm={() => revokeMutation.mutate(revokeTarget.id)}
-          onCancel={() => setRevokeTarget(null)}
+          onClose={() => setRevokeTarget(null)}
           isLoading={revokeMutation.isPending}
         />
       )}

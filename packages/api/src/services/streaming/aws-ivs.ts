@@ -1,6 +1,6 @@
 import type {
   StreamingProvider,
-  StreamingConfig,
+  StreamingProviderConfig,
   CreateStreamOptions,
   StreamInfo,
   StreamStatus,
@@ -51,7 +51,7 @@ export class AWSIVSProvider implements StreamingProvider {
   // Store channel mappings
   private streamToChannel: Map<string, { channelArn: string; streamKey: string }> = new Map();
 
-  constructor(config: StreamingConfig) {
+  constructor(config: StreamingProviderConfig) {
     if (!config.awsIvs) {
       throw new Error('AWS IVS configuration is required');
     }
@@ -413,7 +413,12 @@ export class AWSIVSProvider implements StreamingProvider {
     recordingDuration: number;
   }>> {
     const mapping = this.streamToChannel.get(streamId);
-    if (!mapping || !this.recordingBucket) {
+    if (!mapping) {
+      console.warn('AWS IVS listRecordings: No channel mapping found for streamId:', streamId);
+      return [];
+    }
+    if (!this.recordingBucket) {
+      console.warn('AWS IVS listRecordings: Recording bucket not configured');
       return [];
     }
 
@@ -438,7 +443,13 @@ export class AWSIVSProvider implements StreamingProvider {
             : 0,
         }));
     } catch (error) {
-      console.error('Failed to list recordings:', error);
+      const awsError = error as Error;
+      console.error('AWS IVS listRecordings failed:', {
+        streamId,
+        channelArn: mapping.channelArn,
+        message: awsError.message,
+        name: awsError.name,
+      });
       return [];
     }
   }
@@ -457,6 +468,7 @@ export class AWSIVSProvider implements StreamingProvider {
   }> {
     const mapping = this.streamToChannel.get(streamId);
     if (!mapping) {
+      console.warn('AWS IVS getStreamMetrics: No channel mapping found for streamId:', streamId);
       return {};
     }
 
@@ -482,7 +494,14 @@ export class AWSIVSProvider implements StreamingProvider {
         audioChannels: audioConfig?.channels as number | undefined,
         audioSampleRate: audioConfig?.sampleRate as number | undefined,
       };
-    } catch {
+    } catch (error) {
+      const awsError = error as Error;
+      console.error('AWS IVS getStreamMetrics failed:', {
+        streamId,
+        channelArn: mapping.channelArn,
+        message: awsError.message,
+        name: awsError.name,
+      });
       return {};
     }
   }

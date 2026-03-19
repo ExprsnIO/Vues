@@ -197,8 +197,11 @@ export class TrendingAlgorithm {
         ? Math.min(2, 1 + (velocity * this.velocityWindowHours) / baseScore)
         : 1;
 
+      // Identity boost for did:exprsn authors
+      const identityBoost = video.authorDid.startsWith('did:exprsn:') ? 1.15 : 1.0;
+
       // Final score
-      const score = (baseScore * timeDecay + velocity * 100) * viralBoost * (1 + engagementRate);
+      const score = (baseScore * timeDecay + velocity * 100) * viralBoost * (1 + engagementRate) * identityBoost;
 
       return {
         videoUri: video.uri,
@@ -288,7 +291,7 @@ export class TrendingAlgorithm {
       score: r.score,
       rank: r.rank,
       velocity: r.velocity || 0,
-      engagementRate: r.engagementRate || 0,
+      engagementRate: 0, // Calculated separately, not stored in trendingVideos table
       hoursSincePost: 0, // Would need to join with videos table
     }));
   }
@@ -303,7 +306,6 @@ export class TrendingAlgorithm {
         score: schema.trendingVideos.score,
         rank: schema.trendingVideos.rank,
         velocity: schema.trendingVideos.velocity,
-        engagementRate: schema.trendingVideos.engagementRate,
       })
       .from(schema.trendingVideos)
       .innerJoin(schema.videos, eq(schema.trendingVideos.videoUri, schema.videos.uri))
@@ -316,7 +318,7 @@ export class TrendingAlgorithm {
       score: r.score,
       rank: r.rank,
       velocity: r.velocity || 0,
-      engagementRate: r.engagementRate || 0,
+      engagementRate: 0, // Calculated separately, not stored in trendingVideos table
       hoursSincePost: 0,
     }));
   }

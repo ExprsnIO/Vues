@@ -427,6 +427,109 @@ export class PlcService {
   }
 
   /**
+   * Register an existing DID with the PLC directory
+   * Use this when the DID has already been generated externally
+   */
+  static async registerDid(
+    did: string,
+    input: Omit<CreateDidInput, 'did'>,
+    ipAddress?: string,
+    userAgent?: string
+  ): Promise<{
+    did: string;
+    handle: string;
+    operationCid: string;
+  }> {
+    // Validate handle
+    const handleValidation = await this.validateHandle(input.handle);
+    if (!handleValidation.valid) {
+      throw new Error(handleValidation.error);
+    }
+
+    // Check handle availability
+    const available = await this.isHandleAvailable(input.handle);
+    if (!available) {
+      throw new Error('Handle is already taken');
+    }
+
+    // Check if DID is already registered
+    const existingIdentity = await db.query.plcIdentities.findFirst({
+      where: eq(plcIdentities.did, did),
+    });
+    if (existingIdentity) {
+      throw new Error('DID is already registered');
+    }
+
+    const normalizedHandle = input.handle.toLowerCase().replace(/^@/, '');
+
+    // Create the operation
+    const operation: PlcOperationData = {
+      type: 'create',
+      rotationKeys: input.rotationKeys,
+      verificationMethods: {
+        atproto: input.signingKey,
+      },
+      alsoKnownAs: [`at://${normalizedHandle}`],
+      services: {
+        atproto_pds: {
+          type: 'AtprotoPersonalDataServer',
+          endpoint: input.pdsEndpoint,
+        },
+      },
+      prev: null,
+      sig: '', // Would be signed in real implementation
+    };
+
+    const cid = this.generateOperationCid(operation);
+
+    // Store operation
+    await db.insert(plcOperations).values({
+      did,
+      cid,
+      operation,
+      nullified: false,
+    });
+
+    // Store identity state
+    await db.insert(plcIdentities).values({
+      did,
+      handle: normalizedHandle,
+      pdsEndpoint: input.pdsEndpoint,
+      signingKey: input.signingKey,
+      rotationKeys: input.rotationKeys,
+      alsoKnownAs: [`at://${normalizedHandle}`],
+      services: {
+        atproto_pds: {
+          type: 'AtprotoPersonalDataServer',
+          endpoint: input.pdsEndpoint,
+        },
+      },
+      lastOperationCid: cid,
+    });
+
+    // Audit log
+    await db.insert(plcAuditLog).values({
+      did,
+      action: 'create',
+      operationCid: cid,
+      newState: {
+        handle: normalizedHandle,
+        pdsEndpoint: input.pdsEndpoint,
+        signingKey: input.signingKey,
+        rotationKeys: input.rotationKeys,
+      },
+      ipAddress,
+      userAgent,
+    });
+
+    return {
+      did,
+      handle: normalizedHandle,
+      operationCid: cid,
+    };
+  }
+
+  /**
    * Create a new DID for an organization with type-specific services
    */
   static async createOrgDid(

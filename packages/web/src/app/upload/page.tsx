@@ -204,7 +204,7 @@ export default function UploadPage() {
     return (
       <div className="flex min-h-screen bg-black">
         <Sidebar />
-        <main className="flex-1 ml-60 flex items-center justify-center">
+        <main className="flex-1 ml-0 lg:ml-60 pt-14 lg:pt-0 pb-16 lg:pb-0 flex items-center justify-center">
           <div className="text-center">
             <div className="w-16 h-16 border-4 border-primary-500 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
             <p className="text-gray-400">Loading...</p>
@@ -217,7 +217,7 @@ export default function UploadPage() {
   return (
     <div className="flex min-h-screen bg-black">
       <Sidebar />
-      <main className="flex-1 ml-60">
+      <main className="flex-1 ml-0 lg:ml-60 pt-14 lg:pt-0 pb-16 lg:pb-0">
         {/* Progress Indicator */}
         <UploadWizardProgress
           currentStep={currentStep}
@@ -264,7 +264,7 @@ export default function UploadPage() {
           {currentStep === 2 && previewUrl && (
             <Step3CoverImage
               videoUrl={previewUrl}
-              coverImage={currentDraft.coverImage || null}
+              coverImage={currentDraft.coverImage ? { ...currentDraft.coverImage, data: currentDraft.coverImage.data ?? '' } : null}
               onUpdate={(coverImage) => {
                 updateDraft({ coverImage });
               }}
@@ -294,7 +294,7 @@ export default function UploadPage() {
               title={currentDraft.title}
               description={currentDraft.description}
               tags={currentDraft.tags}
-              coverImage={currentDraft.coverImage || null}
+              coverImage={currentDraft.coverImage ? { ...currentDraft.coverImage, data: currentDraft.coverImage.data ?? '' } : null}
               visibility={currentDraft.visibility}
               allowComments={currentDraft.allowComments}
               allowDuets={currentDraft.allowDuets}

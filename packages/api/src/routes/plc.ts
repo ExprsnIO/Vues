@@ -9,6 +9,43 @@ const plcRouter = new Hono();
 // ===========================================
 
 /**
+ * GET /
+ * Root endpoint returning directory information
+ */
+plcRouter.get('/', async (c) => {
+  const config = await getPlcConfig();
+
+  return c.json({
+    name: 'Exprsn PLC Directory',
+    description: 'DID PLC Directory Service for did:plc and did:exprsn identities',
+    version: '1.0.0',
+    mode: config.mode,
+    enabled: config.enabled,
+    endpoints: {
+      resolve: '/plc/:did',
+      operations: '/plc/:did/log',
+      audit: '/plc/:did/log/audit',
+      health: '/plc/health',
+    },
+    supportedMethods: ['did:plc', 'did:exprsn'],
+    documentation: 'https://docs.exprsn.io/plc',
+  });
+});
+
+/**
+ * GET /health
+ * Health check endpoint
+ */
+plcRouter.get('/health', async (c) => {
+  const config = await getPlcConfig();
+  return c.json({
+    status: config.enabled ? 'healthy' : 'disabled',
+    mode: config.mode,
+    timestamp: new Date().toISOString(),
+  });
+});
+
+/**
  * GET /:did
  * Resolve a DID to its document (standard PLC endpoint)
  */

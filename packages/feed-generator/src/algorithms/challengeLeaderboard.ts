@@ -1,6 +1,6 @@
 import { CronJob } from 'cron';
-import { dbType, executeRawSql, db } from '../db.js';
-import { sql, eq, lte, and, inArray } from 'drizzle-orm';
+import { executeRawSql } from '../db.js';
+import { sql } from 'drizzle-orm';
 
 export class ChallengeLeaderboardCalculator {
   private leaderboardJob: CronJob;
@@ -28,11 +28,6 @@ export class ChallengeLeaderboardCalculator {
 
   async updateLeaderboards() {
     console.log('Updating challenge leaderboards...');
-
-    if (dbType === 'sqlite') {
-      console.log('Challenge leaderboard skipped (SQLite mode - use PostgreSQL for full functionality)');
-      return;
-    }
 
     try {
       // Update engagement scores and ranks for all active/voting challenges
@@ -121,11 +116,6 @@ export class ChallengeLeaderboardCalculator {
 
   async updateStatuses() {
     console.log('Updating challenge statuses...');
-
-    if (dbType === 'sqlite') {
-      console.log('Challenge status update skipped (SQLite mode)');
-      return;
-    }
 
     try {
       const now = new Date().toISOString();

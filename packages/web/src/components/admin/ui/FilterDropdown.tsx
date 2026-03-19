@@ -12,7 +12,8 @@ interface FilterOption {
 interface FilterDropdownProps {
   label: string;
   options: FilterOption[];
-  value: string[];
+  value?: string[];
+  selected?: string[]; // Alias for value (backwards compatibility)
   onChange: (value: string[]) => void;
   multiple?: boolean;
   searchable?: boolean;
@@ -23,13 +24,16 @@ interface FilterDropdownProps {
 export function FilterDropdown({
   label,
   options,
-  value,
+  value: valueProp,
+  selected,
   onChange,
   multiple = true,
   searchable = false,
   placeholder = 'Select...',
   className = '',
 }: FilterDropdownProps) {
+  // Support both value and selected props for backwards compatibility
+  const value = valueProp ?? selected ?? [];
   const [isOpen, setIsOpen] = useState(false);
   const [search, setSearch] = useState('');
   const containerRef = useRef<HTMLDivElement>(null);

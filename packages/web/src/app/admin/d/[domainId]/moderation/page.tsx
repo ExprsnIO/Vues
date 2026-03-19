@@ -157,7 +157,7 @@ function BannedWordsTab({ domainId }: { domainId: string }) {
   });
 
   const addMutation = useMutation({
-    mutationFn: (word: string) => api.adminDomainBannedWordsAdd(domainId, word),
+    mutationFn: (word: string) => api.adminDomainBannedWordsAdd({ domainId, word }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['admin', 'domain', domainId, 'moderation', 'banned-words'] });
       setNewWord('');
@@ -167,7 +167,7 @@ function BannedWordsTab({ domainId }: { domainId: string }) {
   });
 
   const removeMutation = useMutation({
-    mutationFn: (word: string) => api.adminDomainBannedWordsRemove(domainId, word),
+    mutationFn: (id: string) => api.adminDomainBannedWordsRemove(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['admin', 'domain', domainId, 'moderation', 'banned-words'] });
       toast.success('Word removed');
@@ -206,13 +206,13 @@ function BannedWordsTab({ domainId }: { domainId: string }) {
         </div>
       ) : (
         <div className="flex flex-wrap gap-2">
-          {words.map((word: string) => (
+          {words.map((word: any) => (
             <span
-              key={word}
+              key={word.id}
               className="inline-flex items-center gap-2 px-3 py-1.5 bg-red-500/10 text-red-400 rounded-full"
             >
-              {word}
-              <button onClick={() => removeMutation.mutate(word)} className="hover:text-red-300">
+              {word.word}
+              <button onClick={() => removeMutation.mutate(word.id)} className="hover:text-red-300">
                 <XIcon className="w-4 h-4" />
               </button>
             </span>
@@ -233,7 +233,7 @@ function BannedTagsTab({ domainId }: { domainId: string }) {
   });
 
   const addMutation = useMutation({
-    mutationFn: (tag: string) => api.adminDomainBannedTagsAdd(domainId, tag),
+    mutationFn: (tag: string) => api.adminDomainBannedTagsAdd({ domainId, tag }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['admin', 'domain', domainId, 'moderation', 'banned-tags'] });
       setNewTag('');
@@ -243,7 +243,7 @@ function BannedTagsTab({ domainId }: { domainId: string }) {
   });
 
   const removeMutation = useMutation({
-    mutationFn: (tag: string) => api.adminDomainBannedTagsRemove(domainId, tag),
+    mutationFn: (id: string) => api.adminDomainBannedTagsRemove(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['admin', 'domain', domainId, 'moderation', 'banned-tags'] });
       toast.success('Tag removed');
@@ -282,13 +282,13 @@ function BannedTagsTab({ domainId }: { domainId: string }) {
         </div>
       ) : (
         <div className="flex flex-wrap gap-2">
-          {tags.map((tag: string) => (
+          {tags.map((tag: any) => (
             <span
-              key={tag}
+              key={tag.id}
               className="inline-flex items-center gap-2 px-3 py-1.5 bg-red-500/10 text-red-400 rounded-full"
             >
-              #{tag}
-              <button onClick={() => removeMutation.mutate(tag)} className="hover:text-red-300">
+              #{tag.tag}
+              <button onClick={() => removeMutation.mutate(tag.id)} className="hover:text-red-300">
                 <XIcon className="w-4 h-4" />
               </button>
             </span>

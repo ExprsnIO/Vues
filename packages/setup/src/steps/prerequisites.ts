@@ -4,7 +4,8 @@
  * Verifies system requirements and connectivity before setup proceeds.
  */
 
-import { db, dbType } from '@exprsn/api/db';
+import { db } from '@exprsn/api/db';
+const dbType = 'postgresql';
 import { sql } from 'drizzle-orm';
 
 export interface PrerequisiteCheck {

@@ -1,4 +1,4 @@
-import { Hono } from 'hono';
+import { Hono, Context } from 'hono';
 import { eq, and, gte, desc } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import * as schema from '../db/schema.js';
@@ -7,6 +7,32 @@ import { ServiceAuth } from '../services/federation/ServiceAuth.js';
 import { getStorageProvider } from '../services/storage/index.js';
 import { createReadStream, existsSync } from 'fs';
 import { Readable } from 'stream';
+import { createDIDResolver } from '../services/identity/DIDResolver.js';
+import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
+
+// Lazy-loaded DID resolver
+let didResolver: ReturnType<typeof createDIDResolver> | null = null;
+
+function getDIDResolver() {
+  if (!didResolver) {
+    didResolver = createDIDResolver(db as PostgresJsDatabase<typeof schema>);
+  }
+  return didResolver;
+}
+
+/**
+ * Resolve handle for a DID, falling back to DID if not found
+ */
+async function resolveHandleForDid(did: string): Promise<string> {
+  try {
+    const resolver = getDIDResolver();
+    const handle = await resolver.resolveHandle(did);
+    return handle || did;
+  } catch (error) {
+    console.warn(`[Sync] Failed to resolve handle for ${did}:`, error);
+    return did;
+  }
+}
 
 export const syncRouter = new Hono();
 
@@ -36,7 +62,7 @@ let serviceAuthInstance: ServiceAuth | null = null;
 function getServiceAuth(): ServiceAuth {
   if (!serviceAuthInstance) {
     serviceAuthInstance = new ServiceAuth({
-      db: db as any, // Cast to avoid type issues with drizzle-orm
+      db: db as PostgresJsDatabase<typeof schema>,
     });
   }
   return serviceAuthInstance;
@@ -45,7 +71,7 @@ function getServiceAuth(): ServiceAuth {
 /**
  * Verify service authentication for sync endpoints
  */
-async function verifyServiceAuth(c: any): Promise<{ valid: boolean; error?: string }> {
+async function verifyServiceAuth(c: Context): Promise<{ valid: boolean; error?: string }> {
   const certificateId = c.req.header('x-exprsn-certificate');
   const signature = c.req.header('x-exprsn-signature');
   const timestamp = c.req.header('x-exprsn-timestamp');
@@ -384,12 +410,13 @@ syncRouter.post('/xrpc/io.exprsn.sync.pushRecords', async (c) => {
             throw new Error('Invalid URI: missing author DID');
           }
 
-          // Ensure user exists
+          // Ensure user exists with resolved handle
+          const handle = await resolveHandleForDid(authorDid);
           await db
             .insert(users)
             .values({
               did: authorDid,
-              handle: authorDid, // Placeholder handle
+              handle,
               createdAt: new Date(),
               updatedAt: new Date(),
               indexedAt: new Date(),

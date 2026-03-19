@@ -65,7 +65,8 @@ export class PrefetchService {
    */
   async prefetchTimeline(
     userId: string,
-    priority: 'high' | 'medium' | 'low' = 'medium'
+    priority: 'high' | 'medium' | 'low' = 'medium',
+    limit?: number,
   ): Promise<PrefetchResult> {
     const startTime = Date.now();
     const cacheKey = this.getTimelineCacheKey(userId);
@@ -82,8 +83,9 @@ export class PrefetchService {
     }
 
     try {
-      // Fetch from timeline service
-      const timeline = await this.fetchTimelineFromService(userId);
+      // Fetch from timeline service, using the domain-effective limit when provided
+      const effectiveLimit = limit ?? this.config.defaultLimit;
+      const timeline = await this.fetchTimelineFromService(userId, effectiveLimit);
 
       // Determine cache tier based on priority
       const tier = priority === 'high' ? 'hot' : priority === 'medium' ? 'warm' : 'cold';
@@ -190,10 +192,11 @@ export class PrefetchService {
 
   /**
    * Fetch timeline from external service
+   *
+   * Tries the authenticated getTimeline endpoint first. If auth fails (401/403),
+   * falls back to the unauthenticated getSuggestedFeed endpoint.
    */
-  private async fetchTimelineFromService(userId: string): Promise<TimelineData> {
-    const url = `${this.config.timelineServiceUrl}/api/timeline?userId=${userId}&limit=${this.config.defaultLimit}`;
-
+  private async fetchTimelineFromService(userId: string, limit: number = this.config.defaultLimit): Promise<TimelineData> {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
     };
@@ -202,16 +205,59 @@ export class PrefetchService {
       headers['Authorization'] = `Bearer ${this.config.authToken}`;
     }
 
-    const response = await fetch(url, { headers });
+    // Try authenticated timeline first
+    try {
+      const timelineUrl = `${this.config.timelineServiceUrl}/xrpc/io.exprsn.feed.getTimeline?limit=${limit}`;
+      const response = await fetch(timelineUrl, { headers });
 
-    if (!response.ok) {
-      throw new Error(`Timeline service error: ${response.status}`);
+      if (response.ok) {
+        const data = await response.json() as { feed?: any[]; cursor?: string };
+        return {
+          posts: (data.feed || []).map((item: any) => {
+            const post = item.post || item;
+            return {
+              uri: post.uri,
+              cid: post.cid,
+              authorDid: post.author?.did || post.authorDid || '',
+            };
+          }),
+          cursor: data.cursor,
+          fetchedAt: Date.now(),
+        };
+      }
+
+      // If auth failed, fall through to suggested feed
+      if (response.status !== 401 && response.status !== 403) {
+        throw new Error(`Timeline service error: ${response.status}`);
+      }
+    } catch (error) {
+      // Fall through to suggested feed on network/auth errors
+      if (error instanceof Error && error.message.startsWith('Timeline service error')) {
+        throw error;
+      }
     }
 
-    const data = await response.json() as { posts?: unknown[]; feed?: unknown[]; cursor?: string };
+    // Fallback: use suggested feed (no auth required)
+    const suggestedUrl = `${this.config.timelineServiceUrl}/xrpc/io.exprsn.feed.getSuggestedFeed?limit=${limit}`;
+    const response = await fetch(suggestedUrl, {
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+    if (!response.ok) {
+      throw new Error(`Suggested feed error: ${response.status}`);
+    }
+
+    const data = await response.json() as { feed?: any[]; cursor?: string };
 
     return {
-      posts: (data.posts || data.feed || []) as TimelineData['posts'],
+      posts: (data.feed || []).map((item: any) => {
+        const post = item.post || item;
+        return {
+          uri: post.uri || '',
+          cid: post.cid || '',
+          authorDid: post.author?.did || post.authorDid || '',
+        };
+      }),
       cursor: data.cursor,
       fetchedAt: Date.now(),
     };

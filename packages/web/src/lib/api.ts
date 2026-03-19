@@ -1,5 +1,4 @@
-// @ts-nocheck
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3002';
+export const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3002';
 
 export interface VideoView {
   uri: string;
@@ -32,6 +31,11 @@ export interface VideoView {
   shareCount: number;
   createdAt: string;
   indexedAt: string;
+  signature?: {
+    signed: boolean;
+    verified: boolean;
+    timestamp?: string;
+  };
   viewerLike?: string;
   isPinned?: boolean;
   viewer?: {
@@ -146,6 +150,7 @@ class ApiClient {
   private baseUrl: string;
   private sessionToken: string | null = null;
   private devAdminMode: boolean = false;
+  private refreshPromise: Promise<boolean> | null = null;
 
   constructor(baseUrl: string) {
     this.baseUrl = baseUrl;
@@ -215,9 +220,25 @@ class ApiClient {
     return this.fetch('/xrpc/io.exprsn.auth.getLoginHistory');
   }
 
+  // Password Reset
+  async requestPasswordReset(identifier: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.auth.requestPasswordReset', {
+      method: 'POST',
+      body: JSON.stringify({ identifier }),
+    });
+  }
+
+  async resetPassword(token: string, newPassword: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.auth.resetPassword', {
+      method: 'POST',
+      body: JSON.stringify({ token, newPassword }),
+    });
+  }
+
   private async fetch<T>(
     endpoint: string,
-    options: RequestInit = {}
+    options: RequestInit = {},
+    isRetry = false
   ): Promise<T> {
     const headers: HeadersInit = {
       'Content-Type': 'application/json',
@@ -239,12 +260,73 @@ class ApiClient {
       headers,
     });
 
+    if (response.status === 401 && !isRetry) {
+      const refreshed = await this.tryRefreshToken();
+      if (refreshed) {
+        return this.fetch<T>(endpoint, options, true);
+      }
+    }
+
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
       throw new Error(error.message || `API error: ${response.status}`);
     }
 
     return response.json();
+  }
+
+  private async tryRefreshToken(): Promise<boolean> {
+    if (this.refreshPromise) {
+      return this.refreshPromise;
+    }
+
+    this.refreshPromise = this.executeRefresh();
+    try {
+      return await this.refreshPromise;
+    } finally {
+      this.refreshPromise = null;
+    }
+  }
+
+  private async executeRefresh(): Promise<boolean> {
+    try {
+      const sessionStr =
+        typeof window !== 'undefined'
+          ? localStorage.getItem('exprsn_session')
+          : null;
+      if (!sessionStr) return false;
+
+      const session = JSON.parse(sessionStr);
+      if (!session.refreshJwt) return false;
+
+      const response = await fetch(
+        `${this.baseUrl}/xrpc/io.exprsn.auth.refreshSession`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${session.refreshJwt}`,
+            'Content-Type': 'application/json',
+          },
+        }
+      );
+
+      if (!response.ok) return false;
+
+      const data = await response.json();
+
+      const newSession = {
+        ...session,
+        accessJwt: data.accessJwt,
+        refreshJwt: data.refreshJwt,
+      };
+      localStorage.setItem('exprsn_session', JSON.stringify(newSession));
+
+      this.sessionToken = data.accessJwt;
+
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async getFeed(
@@ -540,6 +622,13 @@ class ApiClient {
     visibility?: 'public' | 'followers';
     aspectRatio: { width: number; height: number };
     duration: number;
+    // Duet metadata
+    duetVideoUri?: string;
+    duetLayout?: string;
+    // Stitch metadata
+    stitchVideoUri?: string;
+    stitchStartTime?: number;
+    stitchEndTime?: number;
   }): Promise<{ uri: string; cid: string }> {
     return this.fetch('/xrpc/io.exprsn.video.createPost', {
       method: 'POST',
@@ -894,6 +983,183 @@ class ApiClient {
   }> {
     const params = new URLSearchParams({ did });
     return this.fetch(`/xrpc/io.exprsn.admin.users.getAccountInfo?${params}`);
+  }
+
+  // User Certificates
+  async adminUserCertificates(did: string): Promise<{
+    certificates: Array<{
+      id: string;
+      commonName: string;
+      certType: 'client' | 'server' | 'code_signing';
+      serialNumber: string;
+      fingerprint: string;
+      status: 'active' | 'revoked' | 'expired';
+      notBefore: string;
+      notAfter: string;
+      issuerId: string;
+      issuerName?: string;
+    }>;
+    didCertificate?: {
+      id: string;
+      certificateId: string;
+      certificateType: string;
+      publicKeyMultibase: string;
+      status: string;
+      organizationId?: string;
+      createdAt: string;
+    };
+  }> {
+    return this.fetch(`/xrpc/io.exprsn.admin.users.certificates?did=${encodeURIComponent(did)}`);
+  }
+
+  async adminUserCertificateRevoke(certId: string, reason: string): Promise<{ success: boolean; cascadedTokens?: number }> {
+    return this.fetch('/xrpc/io.exprsn.admin.users.certificates.revoke', {
+      method: 'POST',
+      body: JSON.stringify({ certId, reason }),
+    });
+  }
+
+  async adminUserCertificateIssue(data: {
+    did: string;
+    type: 'client' | 'code_signing';
+    commonName?: string;
+  }): Promise<{
+    success: boolean;
+    certificate: {
+      id: string;
+      commonName: string;
+      certType: string;
+      serialNumber: string;
+      fingerprint: string;
+      status: string;
+      notBefore: string;
+      notAfter: string;
+    };
+  }> {
+    return this.fetch('/xrpc/io.exprsn.admin.users.certificates.issue', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  // User Sessions & Tokens
+  async adminUserSessions(did: string): Promise<{
+    sessions: Array<{
+      id: string;
+      tokenType: string;
+      createdAt: string;
+      expiresAt?: string;
+      lastUsedAt?: string;
+      userAgent?: string;
+      ipAddress?: string;
+      isActive: boolean;
+    }>;
+    tokens: Array<{
+      id: string;
+      name: string;
+      prefix: string;
+      scopes: string[];
+      status: 'active' | 'revoked' | 'expired';
+      createdAt: string;
+      expiresAt?: string;
+      lastUsedAt?: string;
+      usageCount: number;
+    }>;
+  }> {
+    return this.fetch(`/xrpc/io.exprsn.admin.users.sessions?did=${encodeURIComponent(did)}`);
+  }
+
+  async adminUserSessionRevoke(sessionId: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.users.sessions.revoke', {
+      method: 'POST',
+      body: JSON.stringify({ sessionId }),
+    });
+  }
+
+  async adminUserTokenRevoke(tokenId: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.users.tokens.revoke', {
+      method: 'POST',
+      body: JSON.stringify({ tokenId }),
+    });
+  }
+
+  async adminUserTokenCreate(data: {
+    did: string;
+    name: string;
+    scopes: string[];
+    tokenType?: 'personal' | 'service';
+    certificateId?: string;
+    expiresIn?: number;
+  }): Promise<{
+    success: boolean;
+    token: string;
+    id: string;
+    name: string;
+    prefix: string;
+  }> {
+    return this.fetch('/xrpc/io.exprsn.admin.users.tokens.create', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async adminUserTokenUpdate(data: {
+    tokenId: string;
+    name?: string;
+    scopes?: string[];
+  }): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.users.tokens.update', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  // User Invite Codes
+  async adminUserInviteCodes(did: string): Promise<{
+    inviteCodes: Array<{
+      id: string;
+      code: string;
+      status: string;
+      maxUses: number | null;
+      usedCount: number;
+      usedBy: string[];
+      expiresAt: string | null;
+      createdAt: string;
+      domainId: string | null;
+      metadata: { name?: string; description?: string; tags?: string[] } | null;
+    }>;
+  }> {
+    const params = new URLSearchParams({ did });
+    return this.fetch(`/xrpc/io.exprsn.admin.users.inviteCodes?${params}`);
+  }
+
+  async adminUserInviteCodeRevoke(codeId: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.users.inviteCodes.revoke', {
+      method: 'POST',
+      body: JSON.stringify({ codeId }),
+    });
+  }
+
+  async adminUserInviteCodeCreate(data: {
+    did: string;
+    maxUses?: number;
+    expiresIn?: number;
+    domainId?: string;
+    metadata?: { name?: string; description?: string };
+  }): Promise<{
+    success: boolean;
+    inviteCode: {
+      id: string;
+      code: string;
+      maxUses: number | null;
+      expiresAt: string | null;
+      status: string;
+    };
+  }> {
+    return this.fetch('/xrpc/io.exprsn.admin.users.inviteCodes.create', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
   }
 
   // Bulk User Actions
@@ -2340,6 +2606,34 @@ class ApiClient {
     return this.fetch(`/xrpc/io.exprsn.actor.getSuggestions?${params}`);
   }
 
+  async getSuggestedUsers(interests?: string[], limit?: number): Promise<{
+    users: Array<{
+      did: string;
+      handle: string;
+      displayName?: string;
+      avatar?: string;
+      followerCount: number;
+      bio?: string;
+    }>;
+  }> {
+    const params = new URLSearchParams();
+    if (interests?.length) params.set('interests', interests.join(','));
+    if (limit) params.set('limit', String(limit));
+    const res = await this.fetch<{ actors: ActorProfileView[]; cursor?: string }>(
+      `/xrpc/io.exprsn.actor.getSuggestions?${params}`
+    );
+    return {
+      users: res.actors.map((a) => ({
+        did: a.did,
+        handle: a.handle,
+        displayName: a.displayName,
+        avatar: a.avatar,
+        followerCount: a.followerCount ?? 0,
+        bio: a.bio,
+      })),
+    };
+  }
+
   async searchActors(
     query: string,
     options: { cursor?: string; limit?: number } = {}
@@ -2386,9 +2680,52 @@ class ApiClient {
     return this.fetch('/xrpc/io.exprsn.notification.getUnreadCount');
   }
 
+  async getGroupedNotifications(
+    cursor?: string,
+    limit?: number
+  ): Promise<{
+    notifications: GroupedNotificationView[];
+    cursor?: string;
+    unreadCount: number;
+  }> {
+    const params = new URLSearchParams();
+    if (cursor) params.set('cursor', cursor);
+    if (limit) params.set('limit', String(limit));
+    return this.fetch(`/xrpc/io.exprsn.notification.listGrouped?${params}`);
+  }
+
   // =============================================================================
   // Feed API
   // =============================================================================
+
+  async getFeedPreferences(): Promise<{
+    interests: string[];
+    hiddenAuthors: Array<{ did: string; handle: string; hiddenAt: string }>;
+    blockedTags: string[];
+    feedbackCount: number;
+  }> {
+    return this.fetch('/xrpc/io.exprsn.feed.getPreferences');
+  }
+
+  async removeInterest(tag: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.feed.removeInterest', {
+      method: 'POST',
+      body: JSON.stringify({ tag }),
+    });
+  }
+
+  async unhideAuthor(did: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.feed.unhideAuthor', {
+      method: 'POST',
+      body: JSON.stringify({ did }),
+    });
+  }
+
+  async resetFeedPreferences(): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.feed.resetPreferences', {
+      method: 'POST',
+    });
+  }
 
   async getTimeline(
     options: { cursor?: string; limit?: number } = {}
@@ -2799,6 +3136,73 @@ class ApiClient {
   }> {
     const params = new URLSearchParams({ userDids: userDids.join(',') });
     return this.fetch(`/xrpc/io.exprsn.chat.getPresence?${params}`);
+  }
+
+  // Search messages across conversations
+  async searchMessages(query: string, limit?: number): Promise<{
+    results: Array<{
+      conversationId: string;
+      message: { id: string; text: string; sentAt: string };
+      participant: { did: string; handle: string; displayName?: string; avatar?: string };
+    }>;
+  }> {
+    const params = new URLSearchParams({ q: query });
+    if (limit) params.set('limit', String(limit));
+    return this.fetch(`/xrpc/io.exprsn.chat.searchMessages?${params}`);
+  }
+
+  // Edit a sent message
+  async editMessage(messageId: string, text: string): Promise<{ message: MessageView }> {
+    return this.fetch('/xrpc/io.exprsn.chat.editMessage', {
+      method: 'POST',
+      body: JSON.stringify({ messageId, text }),
+    });
+  }
+
+  // =============================================================================
+  // Group Chat API
+  // =============================================================================
+
+  async createGroup(name: string, memberDids: string[], avatarUrl?: string): Promise<{ conversation: any }> {
+    return this.fetch('/xrpc/io.exprsn.chat.createGroup', {
+      method: 'POST',
+      body: JSON.stringify({ name, memberDids, avatarUrl }),
+    });
+  }
+
+  async addGroupMember(conversationId: string, memberDid: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.chat.addGroupMember', {
+      method: 'POST',
+      body: JSON.stringify({ conversationId, memberDid }),
+    });
+  }
+
+  async removeGroupMember(conversationId: string, memberDid: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.chat.removeGroupMember', {
+      method: 'POST',
+      body: JSON.stringify({ conversationId, memberDid }),
+    });
+  }
+
+  async updateGroup(conversationId: string, updates: { name?: string; avatarUrl?: string }): Promise<{ conversation: any }> {
+    return this.fetch('/xrpc/io.exprsn.chat.updateGroup', {
+      method: 'POST',
+      body: JSON.stringify({ conversationId, ...updates }),
+    });
+  }
+
+  async setGroupRole(conversationId: string, memberDid: string, role: 'admin' | 'member'): Promise<{ success: boolean; memberDid: string; role: string }> {
+    return this.fetch('/xrpc/io.exprsn.chat.setGroupRole', {
+      method: 'POST',
+      body: JSON.stringify({ conversationId, memberDid, role }),
+    });
+  }
+
+  async getGroupMembers(conversationId: string, options: { limit?: number; cursor?: string } = {}): Promise<{ members: any[]; total: number; cursor?: string }> {
+    const params = new URLSearchParams({ conversationId });
+    if (options.limit) params.set('limit', String(options.limit));
+    if (options.cursor) params.set('cursor', options.cursor);
+    return this.fetch(`/xrpc/io.exprsn.chat.getGroupMembers?${params}`);
   }
 
   // =============================================================================
@@ -4532,7 +4936,10 @@ class ApiClient {
   async adminDomainsUpdate(data: {
     id: string;
     name?: string;
+    domain?: string;
     status?: string;
+    handleSuffix?: string;
+    dnsVerificationToken?: string;
     features?: Record<string, boolean>;
     rateLimits?: Record<string, number>;
     branding?: Record<string, string>;
@@ -5374,33 +5781,6 @@ class ApiClient {
   // Domain Roles API
   // =============================================
 
-  async adminDomainRolesList(domainId: string, options?: {
-    includeSystem?: boolean;
-    limit?: number;
-    offset?: number;
-  }): Promise<{
-    roles: Array<{
-      id: string;
-      domainId: string;
-      name: string;
-      displayName: string;
-      description?: string;
-      isSystem: boolean;
-      priority: number;
-      permissions: string[];
-      createdAt: string;
-      updatedAt: string;
-    }>;
-    total: number;
-  }> {
-    const params = new URLSearchParams();
-    params.set('domainId', domainId);
-    if (options?.includeSystem !== undefined) params.set('includeSystem', options.includeSystem.toString());
-    if (options?.limit) params.set('limit', options.limit.toString());
-    if (options?.offset) params.set('offset', options.offset.toString());
-    return this.fetch(`/xrpc/io.exprsn.admin.domain.roles.list?${params.toString()}`);
-  }
-
   async adminDomainRolesGet(roleId: string): Promise<{
     id: string;
     domainId: string;
@@ -5414,60 +5794,6 @@ class ApiClient {
     updatedAt: string;
   }> {
     return this.fetch(`/xrpc/io.exprsn.admin.domain.roles.get?roleId=${roleId}`);
-  }
-
-  async adminDomainRolesCreate(data: {
-    domainId: string;
-    name: string;
-    displayName: string;
-    description?: string;
-    priority?: number;
-    permissions?: string[];
-  }): Promise<{
-    id: string;
-    domainId: string;
-    name: string;
-    displayName: string;
-    description?: string;
-    isSystem: boolean;
-    priority: number;
-    permissions: string[];
-    createdAt: string;
-    updatedAt: string;
-  }> {
-    return this.fetch('/xrpc/io.exprsn.admin.domain.roles.create', {
-      method: 'POST',
-      body: JSON.stringify(data),
-    });
-  }
-
-  async adminDomainRolesUpdate(roleId: string, data: {
-    displayName?: string;
-    description?: string;
-    priority?: number;
-    permissions?: string[];
-  }): Promise<{
-    id: string;
-    domainId: string;
-    name: string;
-    displayName: string;
-    description?: string;
-    isSystem: boolean;
-    priority: number;
-    permissions: string[];
-    createdAt: string;
-    updatedAt: string;
-  }> {
-    return this.fetch('/xrpc/io.exprsn.admin.domain.roles.update', {
-      method: 'PUT',
-      body: JSON.stringify({ roleId, ...data }),
-    });
-  }
-
-  async adminDomainRolesDelete(roleId: string): Promise<{ success: boolean }> {
-    return this.fetch(`/xrpc/io.exprsn.admin.domain.roles.delete?roleId=${roleId}`, {
-      method: 'DELETE',
-    });
   }
 
   async adminDomainPermissionsCatalog(): Promise<{
@@ -5533,113 +5859,6 @@ class ApiClient {
     errorMessage: string | null;
   }> {
     return this.fetch(`/xrpc/io.exprsn.admin.domains.services.health?domainId=${domainId}&serviceType=${serviceType}`);
-  }
-
-  // ============================================
-  // Domain SSO Configuration
-  // ============================================
-
-  async adminDomainSSOConfigGet(domainId: string): Promise<{
-    config: {
-      ssoMode: 'disabled' | 'optional' | 'required';
-      primaryIdpId?: string;
-      allowedIdpIds: string[];
-      jitProvisioning: boolean;
-      defaultOrganizationId?: string;
-      defaultRole: string;
-      emailDomainVerification: boolean;
-      allowedEmailDomains: string[];
-      forceReauthAfterHours: number;
-    } | null;
-  }> {
-    return this.fetch(`/sso/domains/${domainId}/sso/config`);
-  }
-
-  async adminDomainSSOConfigUpdate(
-    domainId: string,
-    config: {
-      ssoMode?: 'disabled' | 'optional' | 'required';
-      primaryIdpId?: string;
-      allowedIdpIds?: string[];
-      jitProvisioning?: boolean;
-      defaultOrganizationId?: string;
-      defaultRole?: string;
-      emailDomainVerification?: boolean;
-      allowedEmailDomains?: string[];
-      forceReauthAfterHours?: number;
-    }
-  ): Promise<{ config: Record<string, unknown> }> {
-    return this.fetch(`/sso/domains/${domainId}/sso/config`, {
-      method: 'PUT',
-      body: JSON.stringify(config),
-    });
-  }
-
-  async adminDomainSSOProvidersAdd(
-    domainId: string,
-    data: { providerId: string; setPrimary?: boolean }
-  ): Promise<{ config: Record<string, unknown> }> {
-    return this.fetch(`/sso/domains/${domainId}/sso/providers`, {
-      method: 'POST',
-      body: JSON.stringify(data),
-    });
-  }
-
-  async adminDomainSSOProvidersRemove(
-    domainId: string,
-    providerId: string
-  ): Promise<{ config: Record<string, unknown> }> {
-    return this.fetch(`/sso/domains/${domainId}/sso/providers/${providerId}`, {
-      method: 'DELETE',
-    });
-  }
-
-  async adminDomainSSOProvidersSetPrimary(
-    domainId: string,
-    providerId: string
-  ): Promise<{ config: Record<string, unknown> }> {
-    return this.fetch(`/sso/domains/${domainId}/sso/providers/${providerId}/primary`, {
-      method: 'PUT',
-    });
-  }
-
-  async adminDomainSSOProvidersList(domainId: string): Promise<{
-    providers: Array<{
-      id: string;
-      name: string;
-      type: 'oidc' | 'oauth2' | 'saml';
-      providerKey: string;
-      displayName: string;
-      iconUrl?: string;
-      buttonColor?: string;
-      status: 'active' | 'inactive' | 'testing';
-      domainId?: string;
-      autoProvisionUsers: boolean;
-      requiredEmailDomain?: string;
-      priority: number;
-      createdAt: string;
-    }>;
-  }> {
-    return this.fetch(`/xrpc/io.exprsn.admin.domains.sso.providers.list?domainId=${domainId}`);
-  }
-
-  async adminDomainSSOEmailDomainsAdd(
-    domainId: string,
-    data: { emailDomain: string; verify?: boolean }
-  ): Promise<{ config: Record<string, unknown> }> {
-    return this.fetch(`/sso/domains/${domainId}/sso/email-domains`, {
-      method: 'POST',
-      body: JSON.stringify(data),
-    });
-  }
-
-  async adminDomainSSOEmailDomainsRemove(
-    domainId: string,
-    emailDomain: string
-  ): Promise<{ config: Record<string, unknown> }> {
-    return this.fetch(`/sso/domains/${domainId}/sso/email-domains/${emailDomain}`, {
-      method: 'DELETE',
-    });
   }
 
   async adminSSOProvidersAvailable(): Promise<{
@@ -7376,6 +7595,68 @@ class ApiClient {
     });
   }
 
+  // Exprsn SSO Provider Management
+  async adminSSOExprsnDiscover(issuerUrl: string): Promise<{
+    issuer: string;
+    authorization_endpoint: string;
+    token_endpoint: string;
+    userinfo_endpoint: string;
+    jwks_uri: string;
+    scopes_supported: string[];
+    valid: boolean;
+  }> {
+    return this.fetch(`/xrpc/io.exprsn.admin.sso.exprsn.discover?issuerUrl=${encodeURIComponent(issuerUrl)}`);
+  }
+
+  async adminSSOExprsnRegister(data: {
+    issuerUrl: string;
+    clientId: string;
+    clientSecret: string;
+    domainId?: string;
+    displayName?: string;
+    autoProvision?: boolean;
+    defaultRole?: string;
+    defaultAccountType?: string;
+    allowedScopes?: string[];
+    roleMapping?: Record<string, string>;
+    scopePolicy?: string;
+  }): Promise<{ provider: any }> {
+    return this.fetch('/xrpc/io.exprsn.admin.sso.exprsn.register', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async adminSSOExprsnScopes(providerId: string): Promise<{
+    available: Array<{ scope: string; description: string; category: string }>;
+    allowed: string[];
+    policy: string;
+  }> {
+    return this.fetch(`/xrpc/io.exprsn.admin.sso.exprsn.scopes?providerId=${encodeURIComponent(providerId)}`);
+  }
+
+  async adminSSOExprsnUpdateScopes(providerId: string, scopes: string[], policy: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.sso.exprsn.scopes', {
+      method: 'PUT',
+      body: JSON.stringify({ providerId, scopes, policy }),
+    });
+  }
+
+  async adminSSOExprsnRoleMapping(providerId: string): Promise<{
+    mapping: Record<string, string>;
+    defaultRole: string;
+    defaultAccountType: string;
+  }> {
+    return this.fetch(`/xrpc/io.exprsn.admin.sso.exprsn.roleMapping?providerId=${encodeURIComponent(providerId)}`);
+  }
+
+  async adminSSOExprsnUpdateRoleMapping(providerId: string, mapping: Record<string, string>, defaultRole: string, defaultAccountType: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.sso.exprsn.roleMapping', {
+      method: 'PUT',
+      body: JSON.stringify({ providerId, mapping, defaultRole, defaultAccountType }),
+    });
+  }
+
   // =============================================================================
   // Domain API Tokens
   // =============================================================================
@@ -7525,7 +7806,9 @@ class ApiClient {
 
   async adminDomainRolesCreate(domainId: string, data: {
     name: string;
+    displayName?: string;
     description?: string;
+    priority?: number;
     permissions: string[];
   }): Promise<{ id: string }> {
     return this.fetch('/xrpc/io.exprsn.admin.domains.roles.create', {
@@ -7536,7 +7819,9 @@ class ApiClient {
 
   async adminDomainRolesUpdate(domainId: string, roleId: string, data: {
     name?: string;
+    displayName?: string;
     description?: string;
+    priority?: number;
     permissions?: string[];
   }): Promise<{ success: boolean }> {
     return this.fetch('/xrpc/io.exprsn.admin.domains.roles.update', {
@@ -8101,6 +8386,433 @@ class ApiClient {
     cursor?: string;
   }> {
     return this.fetch('/xrpc/io.exprsn.user.moderation.getMyAppeals');
+  }
+
+  // ═══════════════════════════════════════
+  // Prefetch Engine Admin
+  // ═══════════════════════════════════════
+
+  async getPrefetchConfig(): Promise<{ config: any }> {
+    return this.fetch('/xrpc/io.exprsn.admin.prefetch.config');
+  }
+
+  async updatePrefetchConfig(config: any): Promise<{ config: any }> {
+    return this.fetch('/xrpc/io.exprsn.admin.prefetch.config', {
+      method: 'PUT',
+      body: JSON.stringify(config),
+    });
+  }
+
+  async getPrefetchMetrics(): Promise<{ metrics: any; timestamp: string }> {
+    return this.fetch('/xrpc/io.exprsn.admin.prefetch.metrics');
+  }
+
+  async getPrefetchTimeseries(startDate: string, endDate: string): Promise<{ timeseries: any[] }> {
+    return this.fetch(`/xrpc/io.exprsn.admin.prefetch.metrics.timeseries?startDate=${startDate}&endDate=${endDate}`);
+  }
+
+  async getPrefetchHealth(): Promise<{ healthy: boolean; components: any }> {
+    return this.fetch('/xrpc/io.exprsn.admin.prefetch.health');
+  }
+
+  async getPrefetchEdge(): Promise<{ edge: any; nodes: any[] }> {
+    return this.fetch('/xrpc/io.exprsn.admin.prefetch.edge');
+  }
+
+  async getPrefetchRules(): Promise<{ rules: any[] }> {
+    return this.fetch('/xrpc/io.exprsn.admin.prefetch.rules');
+  }
+
+  async createPrefetchRule(rule: any): Promise<{ rule: any }> {
+    return this.fetch('/xrpc/io.exprsn.admin.prefetch.rules', {
+      method: 'POST',
+      body: JSON.stringify(rule),
+    });
+  }
+
+  async updatePrefetchRule(id: string, updates: any): Promise<{ rule: any }> {
+    return this.fetch(`/xrpc/io.exprsn.admin.prefetch.rules/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(updates),
+    });
+  }
+
+  async deletePrefetchRule(id: string): Promise<{ success: boolean }> {
+    return this.fetch(`/xrpc/io.exprsn.admin.prefetch.rules/${id}`, {
+      method: 'DELETE',
+    });
+  }
+
+  async reorderPrefetchRules(orderedIds: string[]): Promise<{ rules: any[] }> {
+    return this.fetch('/xrpc/io.exprsn.admin.prefetch.rules.reorder', {
+      method: 'POST',
+      body: JSON.stringify({ orderedIds }),
+    });
+  }
+
+  async getPrefetchAlerts(): Promise<{ alerts: any[] }> {
+    return this.fetch('/xrpc/io.exprsn.admin.prefetch.alerts');
+  }
+
+  async createPrefetchAlert(alert: any): Promise<{ alert: any }> {
+    return this.fetch('/xrpc/io.exprsn.admin.prefetch.alerts', {
+      method: 'POST',
+      body: JSON.stringify(alert),
+    });
+  }
+
+  async updatePrefetchAlert(id: string, updates: any): Promise<{ alert: any }> {
+    return this.fetch(`/xrpc/io.exprsn.admin.prefetch.alerts/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(updates),
+    });
+  }
+
+  async deletePrefetchAlert(id: string): Promise<{ success: boolean }> {
+    return this.fetch(`/xrpc/io.exprsn.admin.prefetch.alerts/${id}`, {
+      method: 'DELETE',
+    });
+  }
+
+  async getPrefetchLogs(options?: { level?: string; search?: string; limit?: number }): Promise<{ logs: any[] }> {
+    const params = new URLSearchParams();
+    if (options?.level) params.set('level', options.level);
+    if (options?.search) params.set('search', options.search);
+    if (options?.limit) params.set('limit', String(options.limit));
+    return this.fetch(`/xrpc/io.exprsn.admin.prefetch.logs?${params}`);
+  }
+
+  // Domain-scoped prefetch config
+  async getDomainPrefetchConfig(domainId: string): Promise<{ config: any; hasOverrides: boolean }> {
+    return this.fetch(`/xrpc/io.exprsn.admin.prefetch.config.domain?domainId=${domainId}`);
+  }
+
+  async updateDomainPrefetchConfig(domainId: string, config: any): Promise<{ config: any; hasOverrides: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.prefetch.config.domain', {
+      method: 'POST',
+      body: JSON.stringify({ domainId, config }),
+    });
+  }
+
+  async resetDomainPrefetchConfig(domainId: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.prefetch.config.domain.reset', {
+      method: 'POST',
+      body: JSON.stringify({ domainId }),
+    });
+  }
+
+  // =============================================================================
+  // Hashtag Following API
+  // =============================================================================
+
+  async followHashtag(tag: string): Promise<{ success: boolean; tag: string; following: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.social.followHashtag', {
+      method: 'POST',
+      body: JSON.stringify({ tag }),
+    });
+  }
+
+  async unfollowHashtag(tag: string): Promise<{ success: boolean; tag: string; following: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.social.unfollowHashtag', {
+      method: 'POST',
+      body: JSON.stringify({ tag }),
+    });
+  }
+
+  async getFollowedHashtags(cursor?: string, limit?: number): Promise<{
+    tags: Array<{ tag: string; videoCount: number; followedAt: string }>;
+    cursor?: string;
+  }> {
+    const params = new URLSearchParams();
+    if (cursor) params.set('cursor', cursor);
+    if (limit) params.set('limit', String(limit));
+    return this.fetch(`/xrpc/io.exprsn.social.getFollowedHashtags?${params}`);
+  }
+
+  async getHashtagInfo(tag: string): Promise<{
+    tag: string;
+    videoCount: number;
+    viewCount: number;
+    followerCount: number;
+    trending: { velocity: number; rank: number; direction: 'up' | 'down' | 'stable' };
+    isFollowing: boolean;
+  }> {
+    return this.fetch(`/xrpc/io.exprsn.social.getHashtagInfo?tag=${encodeURIComponent(tag)}`);
+  }
+
+  async searchTypeahead(query: string, type: 'users' | 'tags'): Promise<{
+    results: Array<{ handle?: string; displayName?: string; avatar?: string; did?: string; tag?: string; videoCount?: number }>;
+  }> {
+    const params = new URLSearchParams({ q: query, type });
+    return this.fetch(`/xrpc/io.exprsn.search.typeahead?${params}`);
+  }
+
+  // =============================================================================
+  // Worker Administration API
+  // =============================================================================
+
+  async getWorkerQueues(domainId?: string): Promise<{ queues: any[] }> {
+    const params = new URLSearchParams();
+    if (domainId) params.set('domainId', domainId);
+    return this.fetch(`/xrpc/io.exprsn.admin.workers.list?${params}`);
+  }
+
+  async getWorkerQueue(name: string): Promise<{ queue: any; recentJobs: any[]; failedJobs: any[] }> {
+    return this.fetch(`/xrpc/io.exprsn.admin.workers.queue?name=${encodeURIComponent(name)}`);
+  }
+
+  async getWorkerJobs(queue: string, status: string, limit?: number, offset?: number): Promise<{ jobs: any[]; total: number }> {
+    const params = new URLSearchParams({ queue, status });
+    if (limit) params.set('limit', String(limit));
+    if (offset) params.set('offset', String(offset));
+    return this.fetch(`/xrpc/io.exprsn.admin.workers.jobs?${params}`);
+  }
+
+  async retryWorkerJob(queue: string, jobId: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.workers.retry', {
+      method: 'POST',
+      body: JSON.stringify({ queue, jobId }),
+    });
+  }
+
+  async cleanWorkerQueue(queue: string, status: string, grace?: number): Promise<{ cleaned: number }> {
+    return this.fetch('/xrpc/io.exprsn.admin.workers.clean', {
+      method: 'POST',
+      body: JSON.stringify({ queue, status, grace }),
+    });
+  }
+
+  async pauseWorkerQueue(queue: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.workers.pause', {
+      method: 'POST',
+      body: JSON.stringify({ queue }),
+    });
+  }
+
+  async resumeWorkerQueue(queue: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.admin.workers.resume', {
+      method: 'POST',
+      body: JSON.stringify({ queue }),
+    });
+  }
+
+  async getWorkerMetrics(): Promise<{ metrics: any }> {
+    return this.fetch('/xrpc/io.exprsn.admin.workers.metrics');
+  }
+
+  // =============================================================================
+  // Creator Analytics API
+  // =============================================================================
+
+  async getCreatorAnalyticsOverview(period: '24h' | '7d' | '30d' | '90d' | '1y' = '30d'): Promise<{
+    period: string;
+    overview: {
+      totalVideos: number;
+      totalViews: number;
+      totalLikes: number;
+      totalComments: number;
+      totalShares: number;
+      totalFollowers: number;
+      newFollowers: number;
+      engagementRate: number;
+    };
+  }> {
+    return this.fetch(`/xrpc/io.exprsn.analytics.getOverview?period=${period}`);
+  }
+
+  async getCreatorVideoPerformance(options?: {
+    period?: '24h' | '7d' | '30d' | '90d' | '1y';
+    sortBy?: 'views' | 'likes' | 'comments' | 'engagement';
+    limit?: number;
+  }): Promise<{
+    period: string;
+    videos: Array<{
+      uri: string;
+      caption?: string;
+      thumbnailUrl?: string;
+      viewCount: number;
+      likeCount: number;
+      commentCount: number;
+      shareCount: number;
+      engagementRate: number;
+      createdAt: string;
+    }>;
+  }> {
+    const params = new URLSearchParams();
+    if (options?.period) params.set('period', options.period);
+    if (options?.sortBy) params.set('sortBy', options.sortBy);
+    if (options?.limit) params.set('limit', String(options.limit));
+    return this.fetch(`/xrpc/io.exprsn.analytics.getVideoPerformance?${params}`);
+  }
+
+  async getCreatorContentTrends(period: '24h' | '7d' | '30d' | '90d' | '1y' = '30d'): Promise<{
+    period: string;
+    dailyStats: Array<{
+      date: string;
+      videos: number;
+      views: number;
+      likes: number;
+    }>;
+    topHashtags: Array<{
+      tag: string;
+      videoCount: number;
+      totalViews: number;
+    }>;
+  }> {
+    return this.fetch(`/xrpc/io.exprsn.analytics.getContentTrends?period=${period}`);
+  }
+
+  async getCreatorEngagementBreakdown(period: '24h' | '7d' | '30d' | '90d' | '1y' = '30d'): Promise<{
+    period: string;
+    likes: {
+      total: number;
+      daily: Array<{ date: string; count: number }>;
+    };
+    comments: {
+      total: number;
+      daily: Array<{ date: string; count: number }>;
+    };
+  }> {
+    return this.fetch(`/xrpc/io.exprsn.analytics.getEngagementBreakdown?period=${period}`);
+  }
+
+  async getCreatorAudienceDemographics(): Promise<{
+    followerGrowth: Array<{ date: string; count: number }>;
+    topViewers: Array<{
+      did: string;
+      handle: string;
+      displayName?: string;
+      avatar?: string;
+      viewCount: number;
+    }>;
+  }> {
+    return this.fetch('/xrpc/io.exprsn.analytics.getAudienceDemographics');
+  }
+
+  async getCreatorRealtimeStats(): Promise<{
+    activeViewers: number;
+    hourlyViews: Array<{ hour: string; count: number }>;
+    recentLikes: Array<{ videoUri: string; likerDid: string; createdAt: string }>;
+    recentComments: Array<{ videoUri: string; commenterDid: string; text: string; createdAt: string }>;
+  }> {
+    return this.fetch('/xrpc/io.exprsn.analytics.getRealtime');
+  }
+
+  async exportCreatorAnalytics(period: string = '30d', format: 'json' | 'csv' = 'json'): Promise<Blob> {
+    return this.fetchBlob(
+      `/xrpc/io.exprsn.analytics.export?period=${period}&format=${format}`
+    );
+  }
+
+  async getCreatorEarnings(): Promise<{
+    totalEarnings: number;
+    pendingBalance: number;
+    availableBalance: number;
+    recentTips: Array<{
+      amount: number;
+      senderHandle: string;
+      message?: string;
+      createdAt: string;
+    }>;
+  }> {
+    return this.fetch('/xrpc/io.exprsn.payments.getEarnings');
+  }
+
+  async registerPushSubscription(subscription: {
+    endpoint: string;
+    keys: { p256dh: string; auth: string };
+  }): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.notification.registerPush', {
+      method: 'POST',
+      body: JSON.stringify(subscription),
+    });
+  }
+
+  async unregisterPushSubscription(endpoint: string): Promise<{ success: boolean }> {
+    return this.fetch('/xrpc/io.exprsn.notification.unregisterPush', {
+      method: 'POST',
+      body: JSON.stringify({ endpoint }),
+    });
+  }
+
+  // Certificate / Identity
+  async getSignatureInfo(uri: string): Promise<{
+    verified: boolean;
+    signerDid?: string;
+    signerHandle?: string;
+    timestamp?: string;
+    certificateFingerprint?: string;
+    issuer?: string;
+    status?: string;
+  }> {
+    return this.fetch(`/xrpc/io.exprsn.video.getSignatureInfo?uri=${encodeURIComponent(uri)}`);
+  }
+
+  async getCertificateInfo(did?: string): Promise<{
+    hasCertificate: boolean;
+    didMethod: string;
+    certificate?: {
+      fingerprint: string;
+      issuer: string;
+      notBefore: string;
+      notAfter: string;
+      status: string;
+      type: string;
+      daysUntilExpiry: number;
+      expiringSoon: boolean;
+    };
+  }> {
+    const params = did ? `?did=${encodeURIComponent(did)}` : '';
+    return this.fetch(`/xrpc/io.exprsn.did.getMyCertificate${params}`);
+  }
+
+  // =============================================================================
+  // Admin Relay API
+  // =============================================================================
+
+  async adminRelayGetConfig(): Promise<RelayConfig> {
+    return this.fetch('/xrpc/io.exprsn.admin.relay.getConfig');
+  }
+
+  async adminRelayUpdateConfig(config: Partial<RelayConfig>): Promise<{ message: string; current: RelayConfig }> {
+    return this.fetch('/xrpc/io.exprsn.admin.relay.updateConfig', {
+      method: 'POST',
+      body: JSON.stringify(config),
+    });
+  }
+
+  async adminRelayGetStats(): Promise<RelayStatsResponse> {
+    return this.fetch('/xrpc/io.exprsn.admin.relay.getStats');
+  }
+
+  async adminRelayGetSubscribers(protocol?: string): Promise<RelaySubscribersResponse> {
+    const params = protocol ? `?protocol=${protocol}` : '';
+    return this.fetch(`/xrpc/io.exprsn.admin.relay.getSubscribers${params}`);
+  }
+
+  async adminRelayDisconnectSubscriber(subscriberId: string): Promise<{ success: boolean; disconnected: string }> {
+    return this.fetch('/xrpc/io.exprsn.admin.relay.disconnectSubscriber', {
+      method: 'POST',
+      body: JSON.stringify({ subscriberId }),
+    });
+  }
+
+  async adminRelayGetProtocolHealth(): Promise<RelayProtocolHealth> {
+    return this.fetch('/xrpc/io.exprsn.admin.relay.getProtocolHealth');
+  }
+
+  async validateInviteCode(code: string): Promise<{ valid: boolean; reason?: string; inviteCode?: unknown }> {
+    return this.fetch('/xrpc/io.exprsn.inviteCodes.validate', {
+      method: 'POST',
+      body: JSON.stringify({ code }),
+    });
+  }
+
+  async useInviteCode(code: string): Promise<{ success: boolean; message?: string }> {
+    return this.fetch('/xrpc/io.exprsn.inviteCodes.use', {
+      method: 'POST',
+      body: JSON.stringify({ code }),
+    });
   }
 }
 
@@ -8992,6 +9704,7 @@ export interface MessageView {
   embedUri?: string;
   read: boolean;
   createdAt: string;
+  editedAt?: string;
   reactions?: MessageReaction[];
 }
 
@@ -9030,7 +9743,7 @@ export interface NotificationView {
     avatar?: string;
     verified?: boolean;
   };
-  reason: 'like' | 'comment' | 'follow' | 'mention' | 'repost' | 'reply' | 'quote';
+  reason: 'like' | 'comment' | 'follow' | 'mention' | 'repost' | 'reply' | 'quote' | 'message' | 'dm';
   reasonSubject?: string;
   record?: {
     uri?: string;
@@ -9039,6 +9752,27 @@ export interface NotificationView {
   };
   isRead: boolean;
   indexedAt: string;
+}
+
+export interface GroupedNotificationView {
+  id: string;
+  type: string;
+  reason: string;
+  isGrouped: boolean;
+  actors: Array<{
+    did: string;
+    handle: string;
+    displayName?: string;
+    avatar?: string;
+  }>;
+  actorCount: number;
+  subject?: string;
+  subjectPreview?: {
+    caption?: string;
+    thumbnailUrl?: string;
+  };
+  latestAt: string;
+  isRead: boolean;
 }
 
 // Feed types
@@ -9738,6 +10472,56 @@ export interface AdminUserSearchResult {
   avatar?: string;
   verified: boolean;
   createdAt: string;
+}
+
+// Relay admin types
+export interface RelayConfig {
+  socketio: { enabled: boolean };
+  websocket: { enabled: boolean; maxSubscribers: number };
+  jetstream: { enabled: boolean; maxSubscribers: number };
+  verifySignatures: boolean;
+  maxBackfillEvents: number;
+  sequence: { oldestSeq: number | null; currentSeq: number; eventCount: number };
+}
+
+export interface RelayProtocolStats {
+  totalEvents: number;
+  totalBytes: number;
+  eventsPerSec: number;
+  bytesPerSec: number;
+  connectedClients: number;
+}
+
+export interface RelayStatsResponse {
+  protocols: {
+    socketio: RelayProtocolStats;
+    websocket: RelayProtocolStats;
+    jetstream: RelayProtocolStats;
+  };
+  sequence: { oldestSeq: number | null; currentSeq: number; eventCount: number };
+  totalClients: number;
+}
+
+export interface RelaySubscriberView {
+  id: string;
+  endpoint: string;
+  cursor: number | null;
+  wantedCollections: string[] | null;
+  status: string;
+  lastHeartbeat: string;
+  createdAt: string;
+}
+
+export interface RelaySubscribersResponse {
+  subscribers: RelaySubscriberView[];
+  wsClients: Array<{ id: string; endpoint: string; wantedCollections?: string[]; connectedAt: string }>;
+  jetstreamClients: Array<{ id: string; endpoint: string; wantedCollections?: string[]; wantedDids?: string[]; connectedAt: string }>;
+}
+
+export interface RelayProtocolHealth {
+  socketio: { enabled: boolean; status: string; clients: number; eventsPerSec: number };
+  websocket: { enabled: boolean; status: string; clients: number; eventsPerSec: number };
+  jetstream: { enabled: boolean; status: string; clients: number; eventsPerSec: number };
 }
 
 export const api = new ApiClient(API_BASE);

@@ -9,6 +9,7 @@ import { db, users, messages, conversations, conversationParticipants, userPrese
 import { eq, and, or, sql } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import { getOAuthClient } from '../auth/oauth-client.js';
+import { hashSessionToken } from '../utils/session-tokens.js';
 
 type NextFunction = (err?: Error) => void;
 
@@ -79,7 +80,7 @@ const userConversations = new Map<string, Set<string>>();
  */
 async function updatePresence(userDid: string, status: 'online' | 'away' | 'offline', conversationId?: string): Promise<void> {
   try {
-    const now = new Date().toISOString();
+    const now = new Date();
     await db
       .insert(userPresence)
       .values({
@@ -102,10 +103,20 @@ async function updatePresence(userDid: string, status: 'online' | 'away' | 'offl
 }
 
 /**
- * Check if user can access conversation
+ * Check if user can access conversation (direct or group)
  */
 async function canAccessConversation(userDid: string, conversationId: string): Promise<boolean> {
-  const conversation = await db.query.conversations.findFirst({
+  // Check conversationParticipants first (covers direct and group)
+  const participant = await db.query.conversationParticipants.findFirst({
+    where: and(
+      eq(conversationParticipants.conversationId, conversationId),
+      eq(conversationParticipants.participantDid, userDid)
+    ),
+  });
+  if (participant) return true;
+
+  // Fall back to direct-conversation participant columns
+  const direct = await db.query.conversations.findFirst({
     where: and(
       eq(conversations.id, conversationId),
       or(
@@ -114,7 +125,34 @@ async function canAccessConversation(userDid: string, conversationId: string): P
       )
     ),
   });
-  return !!conversation;
+  return !!direct;
+}
+
+/**
+ * Get all participant DIDs for a conversation (direct or group)
+ */
+async function getParticipantDids(conversationId: string): Promise<string[]> {
+  // First try conversationParticipants table
+  const rows = await db
+    .select({ participantDid: conversationParticipants.participantDid })
+    .from(conversationParticipants)
+    .where(eq(conversationParticipants.conversationId, conversationId));
+
+  if (rows.length > 0) {
+    return rows.map((r) => r.participantDid);
+  }
+
+  // Fall back to direct-conversation participant columns
+  const conversation = await db.query.conversations.findFirst({
+    where: eq(conversations.id, conversationId),
+    columns: { participant1Did: true, participant2Did: true },
+  });
+
+  if (!conversation) return [];
+  const dids: string[] = [];
+  if (conversation.participant1Did) dids.push(conversation.participant1Did);
+  if (conversation.participant2Did) dids.push(conversation.participant2Did);
+  return dids;
 }
 
 /**
@@ -146,8 +184,10 @@ export function initializeChatWebSocket(io: SocketIOServer): void {
 
       // Check for local session token (prefixed with exp_)
       if (token.startsWith('exp_')) {
+        // Hash the token to look it up (tokens are stored as hashes)
+        const tokenHash = hashSessionToken(token);
         const session = await db.query.sessions.findFirst({
-          where: eq(sessions.accessJwt, token),
+          where: eq(sessions.accessJwt, tokenHash),
         });
 
         if (!session || session.expiresAt < new Date()) {
@@ -246,21 +286,25 @@ export function initializeChatWebSocket(io: SocketIOServer): void {
       });
 
       if (conversation) {
-        const otherDid = conversation.participant1Did === userDid
-          ? conversation.participant2Did
-          : conversation.participant1Did;
+        // For both direct and group conversations, get all participant DIDs
+        const allParticipantDids = await getParticipantDids(conversationId);
+        const otherDids = allParticipantDids.filter((did) => did !== userDid);
 
-        const otherPresence = await db.query.userPresence.findFirst({
-          where: eq(userPresence.userDid, otherDid),
-        });
+        const presenceRows = otherDids.length > 0
+          ? await db.query.userPresence.findMany({
+              where: sql`${userPresence.userDid} IN (${sql.raw(otherDids.map((d) => `'${d}'`).join(','))})`,
+            })
+          : [];
+
+        const presenceMap = new Map(presenceRows.map((p) => [p.userDid, p]));
 
         socket.emit('conversation-presence', {
           conversationId,
-          participants: [{
-            userDid: otherDid,
-            status: otherPresence?.status || 'offline',
-            lastSeen: otherPresence?.lastSeen?.toISOString() || null,
-          }],
+          participants: otherDids.map((did) => ({
+            userDid: did,
+            status: presenceMap.get(did)?.status || 'offline',
+            lastSeen: presenceMap.get(did)?.lastSeen?.toISOString() || null,
+          })),
         });
       }
 
@@ -292,6 +336,21 @@ export function initializeChatWebSocket(io: SocketIOServer): void {
           typingUsers.delete(conversationId);
         }
       }
+    });
+
+    /**
+     * Join a user-level room so the client receives new-message events for
+     * ALL conversations without needing to join each conversation room.
+     * The web app's global MessagingProvider emits this on connect.
+     */
+    socket.on('join-user', (data: { userDid: string }) => {
+      // Only allow a socket to join its own user room
+      if (data.userDid !== userDid) {
+        socket.emit('error', { message: 'Cannot join another user\'s room' });
+        return;
+      }
+      socket.join(`user:${userDid}`);
+      console.log(`Chat: User ${userDid} joined user room`);
     });
 
     /**
@@ -340,17 +399,44 @@ export function initializeChatWebSocket(io: SocketIOServer): void {
         typingInConversation.delete(userDid);
       }
 
+      const conversationRoom = `conversation:${message.conversationId}`;
+
       // Broadcast to conversation room
-      socket.to(`conversation:${message.conversationId}`).emit('new-message', message);
+      socket.to(conversationRoom).emit('new-message', message);
 
       // Also notify conversation list updates
-      socket.to(`conversation:${message.conversationId}`).emit('conversation-updated', {
+      socket.to(conversationRoom).emit('conversation-updated', {
         conversationId: message.conversationId,
         lastMessage: {
           text: message.text,
           createdAt: message.createdAt,
         },
       });
+
+      // Fan out to each participant's user-level room so clients that have
+      // called join-user (e.g. the global MessagingProvider) receive the
+      // event even if they haven't joined the specific conversation room.
+      // .except(conversationRoom) prevents double-delivery to sockets that
+      // are already subscribed to the conversation room above.
+      // Works for both direct and group conversations.
+      try {
+        const participantDids = await getParticipantDids(message.conversationId);
+
+        for (const participantDid of participantDids) {
+          if (participantDid !== userDid) {
+            namespace
+              .to(`user:${participantDid}`)
+              .except(conversationRoom)
+              .emit('new-message', {
+                conversationId: message.conversationId,
+                message,
+                sender: message.sender,
+              });
+          }
+        }
+      } catch (error) {
+        console.error('Failed to fan out new-message to user rooms:', error);
+      }
     });
 
     /**

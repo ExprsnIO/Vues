@@ -5,7 +5,7 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { authMiddleware, optionalAuthMiddleware } from '../auth/middleware.js';
 import { sanitizeText, isSuspiciousInput, logSuspiciousActivity } from '../auth/security-middleware.js';
 import { db, users, follows, blocks, mutes, videos, userPreferences } from '../db/index.js';
-import { eq, desc, and, or, sql, like, ne } from 'drizzle-orm';
+import { eq, desc, and, or, sql, like, ne, lt } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 
 // S3 client for avatar uploads
@@ -120,7 +120,7 @@ actorRouter.post('/io.exprsn.actor.updateProfile', authMiddleware, async (c) => 
   const body = await c.req.json();
 
   // Log suspicious input attempts
-  const clientIP = c.req.header('x-forwarded-for')?.split(',')[0].trim() || 'unknown';
+  const clientIP = c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown';
   if (body.displayName && isSuspiciousInput(body.displayName)) {
     logSuspiciousActivity(clientIP, '/io.exprsn.actor.updateProfile', 'Suspicious displayName', body.displayName);
   }
@@ -392,7 +392,7 @@ actorRouter.get('/io.exprsn.actor.getVideos', optionalAuthMiddleware, async (c) 
 
   if (cursor) {
     const cursorDate = new Date(cursor);
-    conditions.push(sql`${videos.createdAt} < ${cursorDate}`);
+    conditions.push(lt(videos.createdAt, cursorDate));
   }
 
   const results = await db

@@ -221,7 +221,7 @@ export default function DomainAppealsPage() {
   }
 
   const appeals = data?.appeals || [];
-  const stats = data?.stats || {
+  const stats: Record<string, number> = (data?.stats as Record<string, number>) || {
     pending: 0,
     in_review: 0,
     awaiting_info: 0,
@@ -753,9 +753,9 @@ export default function DomainAppealsPage() {
       <SimpleTabs tabs={tabs} activeTab={activeTab} onChange={setActiveTab} />
 
       <DataTable
-        data={appeals}
+        data={appeals as unknown as Appeal[]}
         columns={columns}
-        keyExtractor={(row) => row.id}
+        keyExtractor={(row: Appeal) => row.id}
         emptyMessage="No appeals found"
       />
     </div>

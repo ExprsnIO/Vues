@@ -11,7 +11,7 @@ import {
   messageReactions,
   userPresence,
 } from '../db/index.js';
-import { eq, desc, and, or, sql } from 'drizzle-orm';
+import { eq, desc, and, or, sql, lt, gt, ne, count } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import { isBlocked } from './social.js';
 
@@ -87,9 +87,9 @@ chatRouter.post('/io.exprsn.chat.getOrCreateConversation', authMiddleware, async
     ? conversation!.participant2Did
     : conversation!.participant1Did;
 
-  const otherUser = await db.query.users.findFirst({
-    where: eq(users.did, otherDid),
-  });
+  const otherUser = otherDid
+    ? await db.query.users.findFirst({ where: eq(users.did, otherDid) })
+    : null;
 
   // Get participant state for current user
   const participantState = await db.query.conversationParticipants.findFirst({
@@ -107,8 +107,8 @@ chatRouter.post('/io.exprsn.chat.getOrCreateConversation', authMiddleware, async
         .where(
           and(
             eq(messages.conversationId, conversation!.id),
-            sql`${messages.createdAt} > ${participantState.lastReadAt.toISOString()}`,
-            sql`${messages.senderDid} != ${userDid}`
+            gt(messages.createdAt, participantState.lastReadAt),
+            ne(messages.senderDid, userDid)
           )
         )
         .then((r) => Number(r[0]?.count || 0))
@@ -148,16 +148,31 @@ chatRouter.get('/io.exprsn.chat.getConversations', authMiddleware, async (c) => 
   const limit = Math.min(parseInt(c.req.query('limit') || '50', 10), 100);
   const cursor = c.req.query('cursor');
 
-  const conditions = [
-    or(
-      eq(conversations.participant1Did, userDid),
-      eq(conversations.participant2Did, userDid)
-    ),
-  ];
+  // Find all conversation IDs the user is a participant in
+  const participantRows = await db
+    .select({ conversationId: conversationParticipants.conversationId })
+    .from(conversationParticipants)
+    .where(eq(conversationParticipants.participantDid, userDid));
+
+  const participantConversationIds = participantRows.map((r) => r.conversationId);
+
+  // Build conditions: direct conversations by participant columns OR group conversations by participant table
+  const membershipCondition = participantConversationIds.length > 0
+    ? or(
+        eq(conversations.participant1Did, userDid),
+        eq(conversations.participant2Did, userDid),
+        sql`${conversations.id} IN (${sql.raw(participantConversationIds.map((id) => `'${id}'`).join(','))})`
+      )
+    : or(
+        eq(conversations.participant1Did, userDid),
+        eq(conversations.participant2Did, userDid)
+      );
+
+  const conditions = [membershipCondition!];
 
   if (cursor) {
     const cursorDate = new Date(cursor);
-    conditions.push(sql`${conversations.lastMessageAt} < ${cursorDate.toISOString()}`);
+    conditions.push(lt(conversations.lastMessageAt, cursorDate));
   }
 
   const results = await db
@@ -172,15 +187,6 @@ chatRouter.get('/io.exprsn.chat.getConversations', authMiddleware, async (c) => 
   // Hydrate with participant info
   const hydratedConversations = await Promise.all(
     results.map(async (r) => {
-      const otherDid =
-        r.conversation.participant1Did === userDid
-          ? r.conversation.participant2Did
-          : r.conversation.participant1Did;
-
-      const otherUser = await db.query.users.findFirst({
-        where: eq(users.did, otherDid),
-      });
-
       const participantState = await db.query.conversationParticipants.findFirst({
         where: and(
           eq(conversationParticipants.conversationId, r.conversation.id),
@@ -196,15 +202,55 @@ chatRouter.get('/io.exprsn.chat.getConversations', authMiddleware, async (c) => 
             .where(
               and(
                 eq(messages.conversationId, r.conversation.id),
-                sql`${messages.createdAt} > ${participantState.lastReadAt.toISOString()}`,
-                sql`${messages.senderDid} != ${userDid}`
+                gt(messages.createdAt, participantState.lastReadAt),
+                ne(messages.senderDid, userDid)
               )
             )
             .then((res) => Number(res[0]?.count || 0))
         : 0;
 
+      const isGroup = r.conversation.type === 'group';
+
+      if (isGroup) {
+        // For groups: get member count and return group metadata
+        const memberCountResult = await db
+          .select({ count: sql<number>`count(*)` })
+          .from(conversationParticipants)
+          .where(eq(conversationParticipants.conversationId, r.conversation.id))
+          .then((res) => Number(res[0]?.count || 0));
+
+        return {
+          id: r.conversation.id,
+          type: 'group' as const,
+          name: r.conversation.name,
+          avatarUrl: r.conversation.avatarUrl,
+          memberCount: memberCountResult,
+          lastMessage: r.conversation.lastMessageText
+            ? {
+                text: r.conversation.lastMessageText,
+                createdAt: r.conversation.lastMessageAt?.toISOString(),
+              }
+            : null,
+          unreadCount,
+          muted: participantState?.muted || false,
+          createdAt: r.conversation.createdAt.toISOString(),
+          updatedAt: r.conversation.updatedAt.toISOString(),
+        };
+      }
+
+      // Direct conversation: hydrate other participant
+      const otherDid =
+        r.conversation.participant1Did === userDid
+          ? r.conversation.participant2Did
+          : r.conversation.participant1Did;
+
+      const otherUser = otherDid
+        ? await db.query.users.findFirst({ where: eq(users.did, otherDid) })
+        : null;
+
       return {
         id: r.conversation.id,
+        type: 'direct' as const,
         members: [
           {
             did: otherUser?.did,
@@ -259,29 +305,49 @@ chatRouter.post('/io.exprsn.chat.sendMessage', authMiddleware, async (c) => {
     throw new HTTPException(400, { message: 'Message too long (max 2000 characters)' });
   }
 
-  // Verify user is part of conversation
-  const conversation = await db.query.conversations.findFirst({
+  // Verify user is part of conversation (direct or group)
+  const participantRecord = await db.query.conversationParticipants.findFirst({
     where: and(
-      eq(conversations.id, conversationId),
-      or(
-        eq(conversations.participant1Did, userDid),
-        eq(conversations.participant2Did, userDid)
-      )
+      eq(conversationParticipants.conversationId, conversationId),
+      eq(conversationParticipants.participantDid, userDid)
     ),
+  });
+
+  // Also allow direct conversations where participant columns are used
+  const directConversation = !participantRecord
+    ? await db.query.conversations.findFirst({
+        where: and(
+          eq(conversations.id, conversationId),
+          or(
+            eq(conversations.participant1Did, userDid),
+            eq(conversations.participant2Did, userDid)
+          )
+        ),
+      })
+    : null;
+
+  if (!participantRecord && !directConversation) {
+    throw new HTTPException(404, { message: 'Conversation not found' });
+  }
+
+  const conversation = await db.query.conversations.findFirst({
+    where: eq(conversations.id, conversationId),
   });
 
   if (!conversation) {
     throw new HTTPException(404, { message: 'Conversation not found' });
   }
 
-  // Check if blocked by other participant
-  const otherDid =
-    conversation.participant1Did === userDid
-      ? conversation.participant2Did
-      : conversation.participant1Did;
+  // For direct conversations, check if blocked by the other participant
+  if (conversation.type === 'direct') {
+    const otherDid =
+      conversation.participant1Did === userDid
+        ? conversation.participant2Did
+        : conversation.participant1Did;
 
-  if (await isBlocked(userDid, otherDid)) {
-    throw new HTTPException(403, { message: 'Cannot message this user' });
+    if (otherDid && (await isBlocked(userDid, otherDid))) {
+      throw new HTTPException(403, { message: 'Cannot message this user' });
+    }
   }
 
   const messageId = nanoid();
@@ -344,18 +410,30 @@ chatRouter.get('/io.exprsn.chat.getMessages', authMiddleware, async (c) => {
     throw new HTTPException(400, { message: 'Conversation ID is required' });
   }
 
-  // Verify user is part of conversation
-  const conversation = await db.query.conversations.findFirst({
-    where: and(
-      eq(conversations.id, conversationId),
-      or(
-        eq(conversations.participant1Did, userDid),
-        eq(conversations.participant2Did, userDid)
-      )
-    ),
+  // Verify user is part of conversation (direct or group)
+  const getMessagesConversation = await db.query.conversations.findFirst({
+    where: eq(conversations.id, conversationId),
   });
 
-  if (!conversation) {
+  if (!getMessagesConversation) {
+    throw new HTTPException(404, { message: 'Conversation not found' });
+  }
+
+  // Check membership: direct by participant columns, group by participant table
+  const isDirectMember =
+    getMessagesConversation.participant1Did === userDid ||
+    getMessagesConversation.participant2Did === userDid;
+
+  const isGroupMember = !isDirectMember
+    ? !!(await db.query.conversationParticipants.findFirst({
+        where: and(
+          eq(conversationParticipants.conversationId, conversationId),
+          eq(conversationParticipants.participantDid, userDid)
+        ),
+      }))
+    : false;
+
+  if (!isDirectMember && !isGroupMember) {
     throw new HTTPException(404, { message: 'Conversation not found' });
   }
 
@@ -363,7 +441,7 @@ chatRouter.get('/io.exprsn.chat.getMessages', authMiddleware, async (c) => {
 
   if (cursor) {
     const cursorDate = new Date(cursor);
-    messageConditions.push(sql`${messages.createdAt} < ${cursorDate.toISOString()}`);
+    messageConditions.push(lt(messages.createdAt, cursorDate));
   }
 
   const results = await db
@@ -437,18 +515,8 @@ chatRouter.post('/io.exprsn.chat.markRead', authMiddleware, async (c) => {
     throw new HTTPException(400, { message: 'Conversation ID is required' });
   }
 
-  // Verify user is part of conversation
-  const conversation = await db.query.conversations.findFirst({
-    where: and(
-      eq(conversations.id, conversationId),
-      or(
-        eq(conversations.participant1Did, userDid),
-        eq(conversations.participant2Did, userDid)
-      )
-    ),
-  });
-
-  if (!conversation) {
+  // Verify user is part of conversation (direct or group)
+  if (!(await isMember(userDid, conversationId))) {
     throw new HTTPException(404, { message: 'Conversation not found' });
   }
 
@@ -477,18 +545,8 @@ chatRouter.post('/io.exprsn.chat.muteConversation', authMiddleware, async (c) =>
     throw new HTTPException(400, { message: 'Conversation ID and muted flag are required' });
   }
 
-  // Verify user is part of conversation
-  const conversation = await db.query.conversations.findFirst({
-    where: and(
-      eq(conversations.id, conversationId),
-      or(
-        eq(conversations.participant1Did, userDid),
-        eq(conversations.participant2Did, userDid)
-      )
-    ),
-  });
-
-  if (!conversation) {
+  // Verify user is part of conversation (direct or group)
+  if (!(await isMember(userDid, conversationId))) {
     throw new HTTPException(404, { message: 'Conversation not found' });
   }
 
@@ -517,18 +575,8 @@ chatRouter.post('/io.exprsn.chat.deleteMessage', authMiddleware, async (c) => {
     throw new HTTPException(400, { message: 'Conversation ID and message ID are required' });
   }
 
-  // Verify user is part of conversation
-  const conversation = await db.query.conversations.findFirst({
-    where: and(
-      eq(conversations.id, conversationId),
-      or(
-        eq(conversations.participant1Did, userDid),
-        eq(conversations.participant2Did, userDid)
-      )
-    ),
-  });
-
-  if (!conversation) {
+  // Verify user is part of conversation (direct or group)
+  if (!(await isMember(userDid, conversationId))) {
     throw new HTTPException(404, { message: 'Conversation not found' });
   }
 
@@ -590,18 +638,8 @@ chatRouter.post('/io.exprsn.chat.deleteConversation', authMiddleware, async (c) 
     throw new HTTPException(400, { message: 'Conversation ID is required' });
   }
 
-  // Verify user is part of conversation
-  const conversation = await db.query.conversations.findFirst({
-    where: and(
-      eq(conversations.id, conversationId),
-      or(
-        eq(conversations.participant1Did, userDid),
-        eq(conversations.participant2Did, userDid)
-      )
-    ),
-  });
-
-  if (!conversation) {
+  // Verify user is part of conversation (direct or group)
+  if (!(await isMember(userDid, conversationId))) {
     throw new HTTPException(404, { message: 'Conversation not found' });
   }
 
@@ -652,18 +690,8 @@ chatRouter.post('/io.exprsn.chat.addReaction', authMiddleware, async (c) => {
     throw new HTTPException(404, { message: 'Message not found' });
   }
 
-  // Verify user is part of the conversation
-  const conversation = await db.query.conversations.findFirst({
-    where: and(
-      eq(conversations.id, message.conversationId),
-      or(
-        eq(conversations.participant1Did, userDid),
-        eq(conversations.participant2Did, userDid)
-      )
-    ),
-  });
-
-  if (!conversation) {
+  // Verify user is part of the conversation (direct or group)
+  if (!(await isMember(userDid, message.conversationId))) {
     throw new HTTPException(403, { message: 'Not authorized to react to this message' });
   }
 
@@ -770,6 +798,418 @@ chatRouter.get('/io.exprsn.chat.getPresence', authMiddleware, async (c) => {
     })),
   });
 });
+
+// =============================================================================
+// Group Chat Endpoints
+// =============================================================================
+
+/**
+ * Create a group conversation
+ * POST /xrpc/io.exprsn.chat.createGroup
+ */
+chatRouter.post('/io.exprsn.chat.createGroup', authMiddleware, async (c) => {
+  const { name, memberDids, avatarUrl } = await c.req.json();
+  const userDid = c.get('did');
+
+  if (!name || typeof name !== 'string' || name.trim().length === 0) {
+    throw new HTTPException(400, { message: 'Group name is required' });
+  }
+
+  if (!Array.isArray(memberDids) || memberDids.length === 0) {
+    throw new HTTPException(400, { message: 'At least one member DID is required' });
+  }
+
+  const maxMembers = 50;
+  // Total participants = creator + memberDids
+  const allDids = Array.from(new Set([...memberDids, userDid]));
+
+  if (allDids.length > maxMembers) {
+    throw new HTTPException(400, {
+      message: `Group cannot exceed ${maxMembers} members`,
+    });
+  }
+
+  const conversationId = nanoid();
+
+  await db.insert(conversations).values({
+    id: conversationId,
+    type: 'group',
+    name: name.trim(),
+    avatarUrl: avatarUrl || null,
+    createdBy: userDid,
+    maxMembers,
+  });
+
+  // Insert all participant records; creator gets admin role
+  const participantValues = allDids.map((did) => ({
+    id: nanoid(),
+    conversationId,
+    participantDid: did,
+    role: did === userDid ? 'admin' : 'member',
+  }));
+
+  await db.insert(conversationParticipants).values(participantValues);
+
+  const conversation = await db.query.conversations.findFirst({
+    where: eq(conversations.id, conversationId),
+  });
+
+  return c.json({ conversation }, 201);
+});
+
+/**
+ * Add a member to a group conversation
+ * POST /xrpc/io.exprsn.chat.addGroupMember
+ */
+chatRouter.post('/io.exprsn.chat.addGroupMember', authMiddleware, async (c) => {
+  const { conversationId, memberDid } = await c.req.json();
+  const userDid = c.get('did');
+
+  if (!conversationId || !memberDid) {
+    throw new HTTPException(400, { message: 'Conversation ID and member DID are required' });
+  }
+
+  const conversation = await db.query.conversations.findFirst({
+    where: and(eq(conversations.id, conversationId), eq(conversations.type, 'group')),
+  });
+
+  if (!conversation) {
+    throw new HTTPException(404, { message: 'Group conversation not found' });
+  }
+
+  // Caller must be an admin
+  const callerParticipant = await db.query.conversationParticipants.findFirst({
+    where: and(
+      eq(conversationParticipants.conversationId, conversationId),
+      eq(conversationParticipants.participantDid, userDid)
+    ),
+  });
+
+  if (!callerParticipant || callerParticipant.role !== 'admin') {
+    throw new HTTPException(403, { message: 'Only group admins can add members' });
+  }
+
+  // Check member limit
+  const currentCountResult = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(conversationParticipants)
+    .where(eq(conversationParticipants.conversationId, conversationId))
+    .then((r) => Number(r[0]?.count || 0));
+
+  const maxMembers = conversation.maxMembers ?? 50;
+  if (currentCountResult >= maxMembers) {
+    throw new HTTPException(400, { message: `Group has reached the maximum of ${maxMembers} members` });
+  }
+
+  // Check if already a member
+  const existing = await db.query.conversationParticipants.findFirst({
+    where: and(
+      eq(conversationParticipants.conversationId, conversationId),
+      eq(conversationParticipants.participantDid, memberDid)
+    ),
+  });
+
+  if (existing) {
+    return c.json({ success: true, alreadyMember: true });
+  }
+
+  await db.insert(conversationParticipants).values({
+    id: nanoid(),
+    conversationId,
+    participantDid: memberDid,
+    role: 'member',
+  });
+
+  return c.json({ success: true });
+});
+
+/**
+ * Remove a member from a group conversation
+ * POST /xrpc/io.exprsn.chat.removeGroupMember
+ */
+chatRouter.post('/io.exprsn.chat.removeGroupMember', authMiddleware, async (c) => {
+  const { conversationId, memberDid } = await c.req.json();
+  const userDid = c.get('did');
+
+  if (!conversationId || !memberDid) {
+    throw new HTTPException(400, { message: 'Conversation ID and member DID are required' });
+  }
+
+  const conversation = await db.query.conversations.findFirst({
+    where: and(eq(conversations.id, conversationId), eq(conversations.type, 'group')),
+  });
+
+  if (!conversation) {
+    throw new HTTPException(404, { message: 'Group conversation not found' });
+  }
+
+  const callerParticipant = await db.query.conversationParticipants.findFirst({
+    where: and(
+      eq(conversationParticipants.conversationId, conversationId),
+      eq(conversationParticipants.participantDid, userDid)
+    ),
+  });
+
+  if (!callerParticipant) {
+    throw new HTTPException(403, { message: 'You are not a member of this group' });
+  }
+
+  // Admins can remove anyone; members can only remove themselves
+  if (callerParticipant.role !== 'admin' && memberDid !== userDid) {
+    throw new HTTPException(403, { message: 'Only group admins can remove other members' });
+  }
+
+  await db
+    .delete(conversationParticipants)
+    .where(
+      and(
+        eq(conversationParticipants.conversationId, conversationId),
+        eq(conversationParticipants.participantDid, memberDid)
+      )
+    );
+
+  return c.json({ success: true });
+});
+
+/**
+ * Update group metadata (name, avatar)
+ * POST /xrpc/io.exprsn.chat.updateGroup
+ */
+chatRouter.post('/io.exprsn.chat.updateGroup', authMiddleware, async (c) => {
+  const { conversationId, name, avatarUrl } = await c.req.json();
+  const userDid = c.get('did');
+
+  if (!conversationId) {
+    throw new HTTPException(400, { message: 'Conversation ID is required' });
+  }
+
+  if (name === undefined && avatarUrl === undefined) {
+    throw new HTTPException(400, { message: 'At least one of name or avatarUrl must be provided' });
+  }
+
+  const conversation = await db.query.conversations.findFirst({
+    where: and(eq(conversations.id, conversationId), eq(conversations.type, 'group')),
+  });
+
+  if (!conversation) {
+    throw new HTTPException(404, { message: 'Group conversation not found' });
+  }
+
+  // Only admins can update group metadata
+  const callerParticipant = await db.query.conversationParticipants.findFirst({
+    where: and(
+      eq(conversationParticipants.conversationId, conversationId),
+      eq(conversationParticipants.participantDid, userDid)
+    ),
+  });
+
+  if (!callerParticipant || callerParticipant.role !== 'admin') {
+    throw new HTTPException(403, { message: 'Only group admins can update group details' });
+  }
+
+  const updates: { name?: string; avatarUrl?: string; updatedAt: Date } = { updatedAt: new Date() };
+  if (name !== undefined) updates.name = (name as string).trim();
+  if (avatarUrl !== undefined) updates.avatarUrl = avatarUrl as string;
+
+  await db
+    .update(conversations)
+    .set(updates)
+    .where(eq(conversations.id, conversationId));
+
+  const updatedConversation = await db.query.conversations.findFirst({
+    where: eq(conversations.id, conversationId),
+  });
+
+  return c.json({ conversation: updatedConversation });
+});
+
+/**
+ * Set a member's role within a group
+ * POST /xrpc/io.exprsn.chat.setGroupRole
+ */
+chatRouter.post('/io.exprsn.chat.setGroupRole', authMiddleware, async (c) => {
+  const { conversationId, memberDid, role } = await c.req.json();
+  const userDid = c.get('did');
+
+  if (!conversationId || !memberDid || !role) {
+    throw new HTTPException(400, { message: 'Conversation ID, member DID, and role are required' });
+  }
+
+  if (role !== 'admin' && role !== 'member') {
+    throw new HTTPException(400, { message: 'Role must be "admin" or "member"' });
+  }
+
+  const conversation = await db.query.conversations.findFirst({
+    where: and(eq(conversations.id, conversationId), eq(conversations.type, 'group')),
+  });
+
+  if (!conversation) {
+    throw new HTTPException(404, { message: 'Group conversation not found' });
+  }
+
+  // Only admins can change roles
+  const callerParticipant = await db.query.conversationParticipants.findFirst({
+    where: and(
+      eq(conversationParticipants.conversationId, conversationId),
+      eq(conversationParticipants.participantDid, userDid)
+    ),
+  });
+
+  if (!callerParticipant || callerParticipant.role !== 'admin') {
+    throw new HTTPException(403, { message: 'Only group admins can change member roles' });
+  }
+
+  // If demoting from admin, ensure at least one admin remains
+  if (role === 'member') {
+    const adminCountResult = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(conversationParticipants)
+      .where(
+        and(
+          eq(conversationParticipants.conversationId, conversationId),
+          eq(conversationParticipants.role, 'admin')
+        )
+      )
+      .then((r) => Number(r[0]?.count || 0));
+
+    if (adminCountResult <= 1 && memberDid !== userDid) {
+      // Fine — we are demoting someone else while the caller is still an admin
+    } else if (adminCountResult <= 1 && memberDid === userDid) {
+      throw new HTTPException(400, { message: 'Cannot demote the last admin' });
+    }
+  }
+
+  const targetParticipant = await db.query.conversationParticipants.findFirst({
+    where: and(
+      eq(conversationParticipants.conversationId, conversationId),
+      eq(conversationParticipants.participantDid, memberDid)
+    ),
+  });
+
+  if (!targetParticipant) {
+    throw new HTTPException(404, { message: 'Member not found in this group' });
+  }
+
+  await db
+    .update(conversationParticipants)
+    .set({ role })
+    .where(
+      and(
+        eq(conversationParticipants.conversationId, conversationId),
+        eq(conversationParticipants.participantDid, memberDid)
+      )
+    );
+
+  return c.json({ success: true, memberDid, role });
+});
+
+/**
+ * Get members of a group conversation
+ * GET /xrpc/io.exprsn.chat.getGroupMembers
+ */
+chatRouter.get('/io.exprsn.chat.getGroupMembers', authMiddleware, async (c) => {
+  const conversationId = c.req.query('conversationId');
+  const userDid = c.get('did');
+  const limit = Math.min(parseInt(c.req.query('limit') || '50', 10), 100);
+  const cursor = c.req.query('cursor');
+
+  if (!conversationId) {
+    throw new HTTPException(400, { message: 'Conversation ID is required' });
+  }
+
+  const conversation = await db.query.conversations.findFirst({
+    where: and(eq(conversations.id, conversationId), eq(conversations.type, 'group')),
+  });
+
+  if (!conversation) {
+    throw new HTTPException(404, { message: 'Group conversation not found' });
+  }
+
+  // Caller must be a member
+  if (!(await isMember(userDid, conversationId))) {
+    throw new HTTPException(403, { message: 'You are not a member of this group' });
+  }
+
+  const participantConditions: Parameters<typeof and>[0][] = [
+    eq(conversationParticipants.conversationId, conversationId),
+  ];
+
+  if (cursor) {
+    const cursorDate = new Date(cursor);
+    participantConditions.push(gt(conversationParticipants.createdAt, cursorDate));
+  }
+
+  const participantRows = await db
+    .select()
+    .from(conversationParticipants)
+    .where(and(...participantConditions))
+    .orderBy(conversationParticipants.createdAt)
+    .limit(limit + 1); // fetch one extra to determine if there's a next page
+
+  const hasMore = participantRows.length > limit;
+  const rows = hasMore ? participantRows.slice(0, limit) : participantRows;
+
+  // Hydrate with user info
+  const memberDids = rows.map((r) => r.participantDid);
+  const memberUsers =
+    memberDids.length > 0
+      ? await db.query.users.findMany({
+          where: sql`${users.did} IN (${sql.raw(memberDids.map((d) => `'${d}'`).join(','))})`,
+        })
+      : [];
+
+  const userMap = new Map(memberUsers.map((u) => [u.did, u]));
+
+  // Get total member count
+  const totalResult = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(conversationParticipants)
+    .where(eq(conversationParticipants.conversationId, conversationId))
+    .then((r) => Number(r[0]?.count || 0));
+
+  const nextCursor =
+    hasMore ? rows[rows.length - 1]!.createdAt.toISOString() : undefined;
+
+  return c.json({
+    members: rows.map((r) => {
+      const user = userMap.get(r.participantDid);
+      return {
+        did: r.participantDid,
+        handle: user?.handle,
+        displayName: user?.displayName,
+        avatar: user?.avatar,
+        role: r.role,
+        joinedAt: r.createdAt.toISOString(),
+      };
+    }),
+    total: totalResult,
+    cursor: nextCursor,
+  });
+});
+
+// Helper: check whether a user is a member of a conversation (direct or group)
+async function isMember(userDid: string, conversationId: string): Promise<boolean> {
+  // Check the conversationParticipants table first (covers both direct and group)
+  const participant = await db.query.conversationParticipants.findFirst({
+    where: and(
+      eq(conversationParticipants.conversationId, conversationId),
+      eq(conversationParticipants.participantDid, userDid)
+    ),
+  });
+  if (participant) return true;
+
+  // Fall back to direct-conversation participant columns (legacy / newly created direct convos)
+  const direct = await db.query.conversations.findFirst({
+    where: and(
+      eq(conversations.id, conversationId),
+      or(
+        eq(conversations.participant1Did, userDid),
+        eq(conversations.participant2Did, userDid)
+      )
+    ),
+  });
+  return !!direct;
+}
 
 // Helper function to get reactions for a message
 async function getMessageReactions(

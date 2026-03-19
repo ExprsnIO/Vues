@@ -1,9 +1,11 @@
 'use client';
 
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { api, type VideoView } from '@/lib/api';
+import { useQuery } from '@tanstack/react-query';
+import { api, type VideoView, type ConversationView } from '@/lib/api';
 import toast from 'react-hot-toast';
 import { cn } from '@/lib/utils';
+import { useMessagingStore } from '@/stores/messaging-store';
 
 interface ShareModalProps {
   isOpen: boolean;
@@ -67,7 +69,43 @@ export function ShareModal({ isOpen, onClose, video, userHandle }: ShareModalPro
   const [qrCodeUrl, setQrCodeUrl] = useState<string>('');
   const [isGeneratingQR, setIsGeneratingQR] = useState(false);
   const [showQR, setShowQR] = useState(false);
+  const [sendingToDm, setSendingToDm] = useState<string | null>(null);
   const modalRef = useRef<HTMLDivElement>(null);
+
+  const openConversation = useMessagingStore((state) => state.openConversation);
+  const openNewConversation = useMessagingStore((state) => state.openNewConversation);
+
+  // Fetch recent conversations for the "Send to friend" section
+  const { data: conversationsData } = useQuery({
+    queryKey: ['conversations'],
+    queryFn: () => api.getConversations({ limit: 5 }),
+    enabled: isOpen,
+    staleTime: 60_000,
+  });
+
+  const recentConversations = conversationsData?.conversations?.slice(0, 5) ?? [];
+
+  const handleSendViaDm = useCallback(
+    async (conversation: ConversationView) => {
+      setSendingToDm(conversation.id);
+      try {
+        await api.sendMessage({
+          conversationId: conversation.id,
+          text: '',
+          embedType: 'video',
+          embedUri: video.uri,
+        });
+        toast.success('Sent!');
+        onClose();
+        openConversation(conversation.id);
+      } catch {
+        toast.error('Failed to send');
+      } finally {
+        setSendingToDm(null);
+      }
+    },
+    [video.uri, onClose, openConversation]
+  );
 
   const shareParams = new URLSearchParams({ ref: 'share' });
   if (userHandle) {
@@ -140,15 +178,17 @@ export function ShareModal({ isOpen, onClose, video, userHandle }: ShareModalPro
     [shareUrl, shareText, video.uri]
   );
 
+  const embedUrl = `${window.location.origin}/embed/${encodeURIComponent(video.uri)}`;
+  const embedCode = `<iframe src="${embedUrl}" width="480" height="854" frameborder="0" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen></iframe>`;
+
   const handleEmbedCopy = useCallback(async () => {
-    const embedCode = `<iframe src="${shareUrl}" width="100%" height="600" frameborder="0" allowfullscreen></iframe>`;
     try {
       await navigator.clipboard.writeText(embedCode);
       toast.success('Embed code copied');
-    } catch (error) {
+    } catch {
       toast.error('Failed to copy embed code');
     }
-  }, [shareUrl]);
+  }, [embedCode]);
 
   if (!isOpen) return null;
 
@@ -269,18 +309,83 @@ export function ShareModal({ isOpen, onClose, video, userHandle }: ShareModalPro
             </div>
           </div>
 
+          {/* Send to friend via DM */}
+          {recentConversations.length > 0 && (
+            <div className="mb-4">
+              <h3 className="text-text-secondary text-sm font-medium mb-3">
+                Send to friend
+              </h3>
+              <div className="space-y-2">
+                {recentConversations.map((conversation) => {
+                  const otherMember = conversation.members[0];
+                  if (!otherMember) return null;
+                  const displayName = otherMember.displayName || `@${otherMember.handle}`;
+                  const isSending = sendingToDm === conversation.id;
+
+                  return (
+                    <button
+                      key={conversation.id}
+                      onClick={() => handleSendViaDm(conversation)}
+                      disabled={isSending || !!sendingToDm}
+                      className="w-full flex items-center gap-3 px-3 py-2.5 bg-surface hover:bg-surface-hover rounded-lg transition-colors disabled:opacity-60"
+                    >
+                      <div className="w-8 h-8 rounded-full bg-background flex items-center justify-center overflow-hidden flex-shrink-0">
+                        {otherMember.avatar ? (
+                          <img
+                            src={otherMember.avatar}
+                            alt={displayName}
+                            className="w-full h-full object-cover"
+                          />
+                        ) : (
+                          <span className="text-text-primary text-sm font-medium">
+                            {otherMember.handle[0]?.toUpperCase()}
+                          </span>
+                        )}
+                      </div>
+                      <span className="flex-1 text-left text-text-primary text-sm truncate">
+                        {displayName}
+                      </span>
+                      <span className="text-text-muted text-xs flex-shrink-0">
+                        {isSending ? 'Sending...' : 'Send'}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+              <button
+                onClick={() => {
+                  onClose();
+                  openNewConversation();
+                }}
+                className="mt-2 text-accent hover:text-accent-hover text-sm font-medium"
+              >
+                More...
+              </button>
+            </div>
+          )}
+
           {/* Embed Code */}
           <div>
             <h3 className="text-text-secondary text-sm font-medium mb-3">
               Embed video
             </h3>
-            <button
-              onClick={handleEmbedCopy}
-              className="w-full px-4 py-3 bg-surface hover:bg-surface-hover text-text-primary rounded-lg font-medium transition-colors text-left flex items-center gap-2"
-            >
-              <CodeIcon className="w-5 h-5" />
-              Copy embed code
-            </button>
+            <div className="flex gap-2">
+              <input
+                readOnly
+                value={embedCode}
+                onClick={(e) => (e.target as HTMLInputElement).select()}
+                className="flex-1 min-w-0 bg-surface border border-border rounded-lg px-3 py-2 text-xs text-text-primary font-mono truncate focus:outline-none focus:ring-1 focus:ring-accent"
+                aria-label="Embed code"
+              />
+              <button
+                onClick={handleEmbedCopy}
+                className="flex-shrink-0 flex items-center gap-1.5 px-3 py-2 bg-surface hover:bg-surface-hover text-text-primary rounded-lg text-xs font-medium transition-colors border border-border"
+                aria-label="Copy embed code"
+              >
+                <CodeIcon className="w-4 h-4" />
+                Copy
+              </button>
+            </div>
           </div>
         </div>
       </div>

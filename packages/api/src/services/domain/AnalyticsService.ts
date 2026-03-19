@@ -133,19 +133,48 @@ export class AnalyticsService {
   }
 
   /**
+   * Get domain user DIDs for filtering
+   */
+  private async getDomainUserDids(domainId: string): Promise<string[]> {
+    const domainUsers = await this.db
+      .select({ userDid: schema.domainUsers.userDid })
+      .from(schema.domainUsers)
+      .where(eq(schema.domainUsers.domainId, domainId));
+    return domainUsers.map(u => u.userDid);
+  }
+
+  /**
    * Get domain overview metrics
+   * Filters by domain users when domainId is provided
    */
   async getOverview(domainId: string): Promise<DomainOverview> {
-    // Get user counts
+    // Get domain user DIDs for filtering
+    const domainUserDids = await this.getDomainUserDids(domainId);
+
+    // If no domain users, return zeros
+    if (domainUserDids.length === 0) {
+      return {
+        totalUsers: 0,
+        activeUsers: 0,
+        totalVideos: 0,
+        totalViews: 0,
+        totalLikes: 0,
+        totalComments: 0,
+        storageUsedBytes: 0,
+        bandwidthUsedBytes: 0,
+      };
+    }
+
+    // Get user counts filtered by domain
     const [userStats] = await this.db
       .select({
         total: count(),
-        active: sql<number>`COUNT(CASE WHEN ${schema.users.lastSeenAt} > NOW() - INTERVAL '7 days' THEN 1 END)`,
+        active: sql<number>`COUNT(CASE WHEN ${schema.users.updatedAt} > NOW() - INTERVAL '7 days' THEN 1 END)`,
       })
       .from(schema.users)
-      .where(eq(schema.users.domainId, domainId));
+      .where(sql`${schema.users.did} = ANY(${domainUserDids})`);
 
-    // Get video counts
+    // Get video counts filtered by domain users
     const [videoStats] = await this.db
       .select({
         total: count(),
@@ -154,16 +183,13 @@ export class AnalyticsService {
         comments: sql<number>`COALESCE(SUM(${schema.videos.commentCount}), 0)`,
       })
       .from(schema.videos)
-      .where(eq(schema.videos.domainId, domainId));
+      .where(sql`${schema.videos.authorDid} = ANY(${domainUserDids})`);
 
-    // Get storage usage
-    const [storageStats] = await this.db
-      .select({
-        storage: sql<number>`COALESCE(SUM(${schema.uploadJobs.totalSize}), 0)`,
-      })
-      .from(schema.uploadJobs)
-      .innerJoin(schema.videos, eq(schema.uploadJobs.videoUri, schema.videos.uri))
-      .where(eq(schema.videos.domainId, domainId));
+    // Note: Video file sizes are not tracked in the videos table
+    // Storage usage would require integration with S3/CDN provider
+    // For now, estimate based on video count and average video size
+    const estimatedAvgVideoSizeBytes = 10 * 1024 * 1024; // 10MB average
+    const estimatedStorageBytes = (Number(videoStats?.total) || 0) * estimatedAvgVideoSizeBytes;
 
     return {
       totalUsers: Number(userStats?.total) || 0,
@@ -172,13 +198,14 @@ export class AnalyticsService {
       totalViews: Number(videoStats?.views) || 0,
       totalLikes: Number(videoStats?.likes) || 0,
       totalComments: Number(videoStats?.comments) || 0,
-      storageUsedBytes: Number(storageStats?.storage) || 0,
+      storageUsedBytes: estimatedStorageBytes,
       bandwidthUsedBytes: 0, // Would need CDN integration
     };
   }
 
   /**
    * Get user metrics
+   * Filters by domain users when domainId is provided
    */
   async getUserMetrics(domainId: string, period: AnalyticsPeriod): Promise<UserMetrics> {
     const periodStart = this.getPeriodStart(period);
@@ -186,25 +213,39 @@ export class AnalyticsService {
       periodStart.getTime() - (Date.now() - periodStart.getTime())
     );
 
-    // New users in period
+    // Get domain user DIDs for filtering
+    const domainUserDids = await this.getDomainUserDids(domainId);
+
+    if (domainUserDids.length === 0) {
+      return {
+        newUsers: 0,
+        activeUsers: 0,
+        churned: 0,
+        retention: 100,
+        avgSessionDuration: 0,
+        topCountries: [],
+      };
+    }
+
+    // New users in period (domain users created in period)
     const [newUsersResult] = await this.db
       .select({ count: count() })
-      .from(schema.users)
+      .from(schema.domainUsers)
       .where(
         and(
-          eq(schema.users.domainId, domainId),
-          gte(schema.users.createdAt, periodStart)
+          eq(schema.domainUsers.domainId, domainId),
+          gte(schema.domainUsers.createdAt, periodStart)
         )
       );
 
-    // Active users in period
+    // Active users in period - using updatedAt as proxy for lastSeenAt
     const [activeUsersResult] = await this.db
       .select({ count: count() })
       .from(schema.users)
       .where(
         and(
-          eq(schema.users.domainId, domainId),
-          gte(schema.users.lastSeenAt, periodStart)
+          sql`${schema.users.did} = ANY(${domainUserDids})`,
+          gte(schema.users.updatedAt, periodStart)
         )
       );
 
@@ -214,9 +255,9 @@ export class AnalyticsService {
       .from(schema.users)
       .where(
         and(
-          eq(schema.users.domainId, domainId),
-          gte(schema.users.lastSeenAt, previousPeriodStart),
-          lte(schema.users.lastSeenAt, periodStart)
+          sql`${schema.users.did} = ANY(${domainUserDids})`,
+          gte(schema.users.updatedAt, previousPeriodStart),
+          lte(schema.users.updatedAt, periodStart)
         )
       );
 
@@ -236,22 +277,35 @@ export class AnalyticsService {
 
   /**
    * Get content metrics
+   * Filters by domain users when domainId is provided
    */
   async getContentMetrics(domainId: string, period: AnalyticsPeriod): Promise<ContentMetrics> {
     const periodStart = this.getPeriodStart(period);
+    const domainUserDids = await this.getDomainUserDids(domainId);
 
-    // Videos uploaded in period
+    if (domainUserDids.length === 0) {
+      return {
+        videosUploaded: 0,
+        videoViews: 0,
+        avgWatchTime: 0,
+        completionRate: 0,
+        topVideos: [],
+        topCreators: [],
+      };
+    }
+
+    // Videos uploaded in period by domain users
     const [uploadedResult] = await this.db
       .select({ count: count() })
       .from(schema.videos)
       .where(
         and(
-          eq(schema.videos.domainId, domainId),
+          sql`${schema.videos.authorDid} = ANY(${domainUserDids})`,
           gte(schema.videos.createdAt, periodStart)
         )
       );
 
-    // Total views in period (simplified - would need view events)
+    // Total views in period by domain users
     const [viewsResult] = await this.db
       .select({
         views: sql<number>`COALESCE(SUM(${schema.videos.viewCount}), 0)`,
@@ -259,12 +313,12 @@ export class AnalyticsService {
       .from(schema.videos)
       .where(
         and(
-          eq(schema.videos.domainId, domainId),
+          sql`${schema.videos.authorDid} = ANY(${domainUserDids})`,
           gte(schema.videos.createdAt, periodStart)
         )
       );
 
-    // Top videos
+    // Top videos from domain users
     const topVideos = await this.db
       .select({
         uri: schema.videos.uri,
@@ -276,14 +330,14 @@ export class AnalyticsService {
       .from(schema.videos)
       .where(
         and(
-          eq(schema.videos.domainId, domainId),
+          sql`${schema.videos.authorDid} = ANY(${domainUserDids})`,
           eq(schema.videos.visibility, 'public')
         )
       )
       .orderBy(desc(schema.videos.viewCount))
       .limit(10);
 
-    // Top creators
+    // Top creators from domain
     const topCreators = await this.db
       .select({
         did: schema.users.did,
@@ -294,16 +348,53 @@ export class AnalyticsService {
       })
       .from(schema.users)
       .leftJoin(schema.videos, eq(schema.users.did, schema.videos.authorDid))
-      .where(eq(schema.users.domainId, domainId))
+      .where(sql`${schema.users.did} = ANY(${domainUserDids})`)
       .groupBy(schema.users.did, schema.users.handle, schema.users.avatar)
       .orderBy(desc(sql`SUM(${schema.videos.viewCount})`))
       .limit(10);
 
+    // Get average watch time from video_views table
+    // Join with videos to filter by domain authors
+    const [watchTimeResult] = await this.db
+      .select({
+        avgWatchTime: sql<number>`COALESCE(AVG(${schema.videoViews.watchDuration}), 0)`,
+        completionRate: sql<number>`COALESCE(AVG(CASE WHEN ${schema.videoViews.completedView} THEN 1.0 ELSE 0.0 END), 0)`,
+      })
+      .from(schema.videoViews)
+      .innerJoin(schema.videos, eq(schema.videoViews.videoUri, schema.videos.uri))
+      .where(
+        and(
+          sql`${schema.videos.authorDid} = ANY(${domainUserDids})`,
+          gte(schema.videoViews.watchedAt, periodStart)
+        )
+      );
+
+    // Calculate completion rate from userInteractions as fallback
+    const [interactionResult] = await this.db
+      .select({
+        avgCompletion: sql<number>`COALESCE(AVG(${schema.userInteractions.completionRate}), 0)`,
+      })
+      .from(schema.userInteractions)
+      .innerJoin(schema.videos, eq(schema.userInteractions.videoUri, schema.videos.uri))
+      .where(
+        and(
+          sql`${schema.videos.authorDid} = ANY(${domainUserDids})`,
+          gte(schema.userInteractions.createdAt, periodStart),
+          sql`${schema.userInteractions.interactionType} = 'view'`
+        )
+      );
+
+    const avgWatchTime = Number(watchTimeResult?.avgWatchTime) || 0;
+    const completionRate =
+      Number(watchTimeResult?.completionRate) ||
+      Number(interactionResult?.avgCompletion) ||
+      0;
+
     return {
       videosUploaded: Number(uploadedResult?.count) || 0,
       videoViews: Number(viewsResult?.views) || 0,
-      avgWatchTime: 0, // Would need watch events
-      completionRate: 0, // Would need completion events
+      avgWatchTime: Math.round(avgWatchTime),
+      completionRate: Math.round(completionRate * 100) / 100, // As decimal 0-1
       topVideos: topVideos.map((v) => ({
         uri: v.uri,
         caption: v.caption || undefined,
@@ -323,21 +414,35 @@ export class AnalyticsService {
 
   /**
    * Get engagement metrics
+   * Filters by domain users when domainId is provided
    */
   async getEngagementMetrics(
     domainId: string,
     period: AnalyticsPeriod
   ): Promise<EngagementMetrics> {
     const periodStart = this.getPeriodStart(period);
+    const domainUserDids = await this.getDomainUserDids(domainId);
 
-    // Get engagement counts
+    if (domainUserDids.length === 0) {
+      return {
+        likes: 0,
+        comments: 0,
+        shares: 0,
+        bookmarks: 0,
+        follows: 0,
+        engagementRate: 0,
+        avgLikesPerVideo: 0,
+        avgCommentsPerVideo: 0,
+      };
+    }
+
+    // Get engagement counts from domain users
     const [likesResult] = await this.db
       .select({ count: count() })
       .from(schema.likes)
-      .innerJoin(schema.videos, eq(schema.likes.subjectUri, schema.videos.uri))
       .where(
         and(
-          eq(schema.videos.domainId, domainId),
+          sql`${schema.likes.authorDid} = ANY(${domainUserDids})`,
           gte(schema.likes.createdAt, periodStart)
         )
       );
@@ -345,10 +450,9 @@ export class AnalyticsService {
     const [commentsResult] = await this.db
       .select({ count: count() })
       .from(schema.comments)
-      .innerJoin(schema.videos, eq(schema.comments.videoUri, schema.videos.uri))
       .where(
         and(
-          eq(schema.videos.domainId, domainId),
+          sql`${schema.comments.authorDid} = ANY(${domainUserDids})`,
           gte(schema.comments.createdAt, periodStart)
         )
       );
@@ -356,38 +460,61 @@ export class AnalyticsService {
     const [followsResult] = await this.db
       .select({ count: count() })
       .from(schema.follows)
-      .innerJoin(schema.users, eq(schema.follows.followeeDid, schema.users.did))
       .where(
         and(
-          eq(schema.users.domainId, domainId),
+          sql`${schema.follows.followerDid} = ANY(${domainUserDids})`,
           gte(schema.follows.createdAt, periodStart)
         )
       );
 
-    // Video count for averages
+    // Shares (reposts) from domain users
+    const [sharesResult] = await this.db
+      .select({ count: count() })
+      .from(schema.reposts)
+      .where(
+        and(
+          sql`${schema.reposts.authorDid} = ANY(${domainUserDids})`,
+          gte(schema.reposts.createdAt, periodStart)
+        )
+      );
+
+    // Bookmarks from domain users
+    const [bookmarksResult] = await this.db
+      .select({ count: count() })
+      .from(schema.bookmarks)
+      .where(
+        and(
+          sql`${schema.bookmarks.authorDid} = ANY(${domainUserDids})`,
+          gte(schema.bookmarks.createdAt, periodStart)
+        )
+      );
+
+    // Video count for averages from domain users
     const [videoCountResult] = await this.db
       .select({ count: count() })
       .from(schema.videos)
       .where(
         and(
-          eq(schema.videos.domainId, domainId),
+          sql`${schema.videos.authorDid} = ANY(${domainUserDids})`,
           gte(schema.videos.createdAt, periodStart)
         )
       );
 
     const likes = Number(likesResult?.count) || 0;
     const comments = Number(commentsResult?.count) || 0;
+    const shares = Number(sharesResult?.count) || 0;
+    const bookmarksCount = Number(bookmarksResult?.count) || 0;
     const follows = Number(followsResult?.count) || 0;
     const videoCount = Number(videoCountResult?.count) || 1;
 
-    const totalEngagements = likes + comments;
+    const totalEngagements = likes + comments + shares + bookmarksCount;
     const engagementRate = videoCount > 0 ? (totalEngagements / videoCount) * 100 : 0;
 
     return {
       likes,
       comments,
-      shares: 0, // Would need share tracking
-      bookmarks: 0, // Would need bookmark tracking
+      shares,
+      bookmarks: bookmarksCount,
       follows,
       engagementRate: Math.round(engagementRate * 10) / 10,
       avgLikesPerVideo: Math.round((likes / videoCount) * 10) / 10,
@@ -397,12 +524,23 @@ export class AnalyticsService {
 
   /**
    * Get growth time series
+   * Filters by domain users when domainId is provided
    */
   async getGrowthMetrics(
     domainId: string,
     period: AnalyticsPeriod
   ): Promise<GrowthMetrics> {
     const periodStart = this.getPeriodStart(period);
+    const domainUserDids = await this.getDomainUserDids(domainId);
+
+    if (domainUserDids.length === 0) {
+      return {
+        userGrowth: [],
+        videoGrowth: [],
+        viewGrowth: [],
+        engagementGrowth: [],
+      };
+    }
 
     // Determine grouping interval
     let interval: string;
@@ -423,60 +561,117 @@ export class AnalyticsService {
         interval = '1 month';
     }
 
-    // User growth
-    const userGrowth = await this.db.execute(sql`
+    // Domain user growth (new domain memberships)
+    const userGrowth = await this.db.execute<{ timestamp: Date; value: number }>(sql`
       SELECT
-        date_trunc(${interval}, ${schema.users.createdAt}) as timestamp,
+        date_trunc(${interval}, ${schema.domainUsers.createdAt}) as timestamp,
         COUNT(*) as value
-      FROM ${schema.users}
-      WHERE ${schema.users.domainId} = ${domainId}
-        AND ${schema.users.createdAt} >= ${periodStart}
+      FROM ${schema.domainUsers}
+      WHERE ${schema.domainUsers.domainId} = ${domainId}
+        AND ${schema.domainUsers.createdAt} >= ${periodStart}
       GROUP BY timestamp
       ORDER BY timestamp
     `);
 
-    // Video growth
-    const videoGrowth = await this.db.execute(sql`
+    // Video growth by domain users
+    const videoGrowth = await this.db.execute<{ timestamp: Date; value: number }>(sql`
       SELECT
         date_trunc(${interval}, ${schema.videos.createdAt}) as timestamp,
         COUNT(*) as value
       FROM ${schema.videos}
-      WHERE ${schema.videos.domainId} = ${domainId}
+      WHERE ${schema.videos.authorDid} = ANY(${domainUserDids})
         AND ${schema.videos.createdAt} >= ${periodStart}
       GROUP BY timestamp
       ORDER BY timestamp
     `);
 
+    // View growth - video views of domain users' content
+    const viewGrowth = await this.db.execute<{ timestamp: Date; value: number }>(sql`
+      SELECT
+        date_trunc(${interval}, vv.watched_at) as timestamp,
+        COUNT(*) as value
+      FROM video_views vv
+      INNER JOIN videos v ON vv.video_uri = v.uri
+      WHERE v.author_did = ANY(${domainUserDids})
+        AND vv.watched_at >= ${periodStart}
+      GROUP BY timestamp
+      ORDER BY timestamp
+    `);
+
+    // Engagement growth - likes and comments on domain users' content
+    const engagementGrowth = await this.db.execute<{ timestamp: Date; value: number }>(sql`
+      SELECT
+        date_trunc(${interval}, created_at) as timestamp,
+        SUM(engagement_count) as value
+      FROM (
+        SELECT created_at, 1 as engagement_count
+        FROM likes
+        WHERE author_did = ANY(${domainUserDids})
+          AND created_at >= ${periodStart}
+        UNION ALL
+        SELECT created_at, 1 as engagement_count
+        FROM comments
+        WHERE author_did = ANY(${domainUserDids})
+          AND created_at >= ${periodStart}
+        UNION ALL
+        SELECT created_at, 1 as engagement_count
+        FROM reposts
+        WHERE author_did = ANY(${domainUserDids})
+          AND created_at >= ${periodStart}
+      ) engagements
+      GROUP BY timestamp
+      ORDER BY timestamp
+    `);
+
     return {
-      userGrowth: (userGrowth.rows as Array<{ timestamp: Date; value: number }>).map((r) => ({
+      userGrowth: (Array.isArray(userGrowth) ? userGrowth : []).map((r) => ({
         timestamp: new Date(r.timestamp),
         value: Number(r.value),
       })),
-      videoGrowth: (videoGrowth.rows as Array<{ timestamp: Date; value: number }>).map((r) => ({
+      videoGrowth: (Array.isArray(videoGrowth) ? videoGrowth : []).map((r) => ({
         timestamp: new Date(r.timestamp),
         value: Number(r.value),
       })),
-      viewGrowth: [], // Would need view events
-      engagementGrowth: [], // Would need engagement events
+      viewGrowth: (Array.isArray(viewGrowth) ? viewGrowth : []).map((r) => ({
+        timestamp: new Date(r.timestamp),
+        value: Number(r.value),
+      })),
+      engagementGrowth: (Array.isArray(engagementGrowth) ? engagementGrowth : []).map((r) => ({
+        timestamp: new Date(r.timestamp),
+        value: Number(r.value),
+      })),
     };
   }
 
   /**
    * Get moderation metrics
+   * Filters by domain when domainId is provided
    */
   async getModerationMetrics(
     domainId: string,
     period: AnalyticsPeriod
   ): Promise<ModerationMetrics> {
     const periodStart = this.getPeriodStart(period);
+    const domainUserDids = await this.getDomainUserDids(domainId);
 
-    // Report counts
+    if (domainUserDids.length === 0) {
+      return {
+        totalReports: 0,
+        pendingReports: 0,
+        resolvedReports: 0,
+        avgResolutionTime: 0,
+        reportsByType: [],
+        actionsTaken: [],
+      };
+    }
+
+    // Report counts - reports about domain users' content
     const [totalResult] = await this.db
       .select({ count: count() })
       .from(schema.moderationReports)
       .where(
         and(
-          eq(schema.moderationReports.domainId, domainId),
+          sql`${schema.moderationReports.reportedBy} = ANY(${domainUserDids})`,
           gte(schema.moderationReports.createdAt, periodStart)
         )
       );
@@ -486,8 +681,8 @@ export class AnalyticsService {
       .from(schema.moderationReports)
       .where(
         and(
-          eq(schema.moderationReports.domainId, domainId),
-          eq(schema.moderationReports.status, 'pending'),
+          sql`${schema.moderationReports.reportedBy} = ANY(${domainUserDids})`,
+          eq(schema.moderationReports.status, 'open'),
           gte(schema.moderationReports.createdAt, periodStart)
         )
       );
@@ -501,7 +696,7 @@ export class AnalyticsService {
       .from(schema.moderationReports)
       .where(
         and(
-          eq(schema.moderationReports.domainId, domainId),
+          sql`${schema.moderationReports.reportedBy} = ANY(${domainUserDids})`,
           gte(schema.moderationReports.createdAt, periodStart)
         )
       )

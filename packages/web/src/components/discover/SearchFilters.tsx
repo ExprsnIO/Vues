@@ -13,15 +13,22 @@ export interface SearchFiltersState {
   duration: Duration;
   timeRange: TimeRange;
   sortBy: SortBy;
+  verifiedOnly: boolean;
 }
 
 interface SearchFiltersProps {
   filters: SearchFiltersState;
   onChange: (filters: SearchFiltersState) => void;
   showDuration?: boolean; // Only show for video searches
+  showVerifiedToggle?: boolean; // Only relevant when searching users
 }
 
-export function SearchFilters({ filters, onChange, showDuration = true }: SearchFiltersProps) {
+export function SearchFilters({
+  filters,
+  onChange,
+  showDuration = true,
+  showVerifiedToggle = false,
+}: SearchFiltersProps) {
   const [expandedSection, setExpandedSection] = useState<string | null>(null);
 
   const updateFilter = <K extends keyof SearchFiltersState>(
@@ -36,7 +43,8 @@ export function SearchFilters({ filters, onChange, showDuration = true }: Search
     filters.contentType !== 'all' ||
     filters.duration !== 'all' ||
     filters.timeRange !== 'all' ||
-    filters.sortBy !== 'relevance';
+    filters.sortBy !== 'relevance' ||
+    filters.verifiedOnly;
 
   const resetFilters = () => {
     onChange({
@@ -44,6 +52,7 @@ export function SearchFilters({ filters, onChange, showDuration = true }: Search
       duration: 'all',
       timeRange: 'all',
       sortBy: 'relevance',
+      verifiedOnly: false,
     });
   };
 
@@ -114,6 +123,23 @@ export function SearchFilters({ filters, onChange, showDuration = true }: Search
         onToggle={() => setExpandedSection(expandedSection === 'sort' ? null : 'sort')}
         icon={<SortIcon />}
       />
+
+      {/* Verified creators toggle */}
+      {showVerifiedToggle && (
+        <button
+          onClick={() => updateFilter('verifiedOnly', !filters.verifiedOnly)}
+          aria-pressed={filters.verifiedOnly}
+          className={cn(
+            'px-3 py-1.5 rounded-full text-sm font-medium transition-colors flex items-center gap-2',
+            filters.verifiedOnly
+              ? 'bg-accent text-white'
+              : 'bg-surface text-text-primary hover:bg-surface-hover border border-border'
+          )}
+        >
+          <VerifiedShieldIcon />
+          <span>Verified only</span>
+        </button>
+      )}
 
       {/* Reset Button */}
       {hasActiveFilters && (
@@ -237,6 +263,14 @@ function XIcon({ className }: { className?: string }) {
   return (
     <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
       <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+    </svg>
+  );
+}
+
+function VerifiedShieldIcon() {
+  return (
+    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M12 1L3 5v6c0 5.25 3.75 10.15 9 11.35C17.25 21.15 21 16.25 21 11V5l-9-4zm-1 13l-3-3 1.41-1.41L11 11.17l4.59-4.58L17 8l-6 6z" />
     </svg>
   );
 }

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll } from 'vitest';
-import { encrypt, decrypt, encryptCredentials, decryptCredentials, isEncrypted, canDecrypt } from '../encryption';
+import { encrypt, decrypt, encryptCredentials, decryptCredentials, isEncrypted, canDecrypt } from '../encryption.js';
 
 describe('Encryption Utility', () => {
   beforeAll(() => {
@@ -226,32 +226,40 @@ describe('Encryption Utility', () => {
       const originalEnv = process.env.NODE_ENV;
       const originalKey = process.env.ENCRYPTION_KEY;
 
-      process.env.NODE_ENV = 'production';
-      process.env.ENCRYPTION_KEY = 'short';
+      try {
+        process.env.NODE_ENV = 'production';
+        process.env.ENCRYPTION_KEY = 'short';
 
-      expect(() => encrypt('test')).toThrow('ENCRYPTION_KEY must be at least 32 characters long');
-
-      // Restore
-      process.env.NODE_ENV = originalEnv;
-      process.env.ENCRYPTION_KEY = originalKey;
+        expect(() => encrypt('test')).toThrow('ENCRYPTION_KEY must be at least 32 characters long');
+      } finally {
+        // Restore - use finally to ensure cleanup even if test fails
+        process.env.NODE_ENV = originalEnv;
+        process.env.ENCRYPTION_KEY = originalKey!;
+      }
     });
 
     it('should throw error if encryption key is not set in production', () => {
       const originalEnv = process.env.NODE_ENV;
       const originalKey = process.env.ENCRYPTION_KEY;
 
-      process.env.NODE_ENV = 'production';
-      delete process.env.ENCRYPTION_KEY;
+      try {
+        process.env.NODE_ENV = 'production';
+        delete process.env.ENCRYPTION_KEY;
 
-      expect(() => encrypt('test')).toThrow('ENCRYPTION_KEY environment variable is required in production');
-
-      // Restore
-      process.env.NODE_ENV = originalEnv;
-      process.env.ENCRYPTION_KEY = originalKey;
+        expect(() => encrypt('test')).toThrow('CRITICAL: ENCRYPTION_KEY environment variable is required');
+      } finally {
+        // Restore - use finally to ensure cleanup even if test fails
+        process.env.NODE_ENV = originalEnv;
+        process.env.ENCRYPTION_KEY = originalKey!;
+      }
     });
   });
 
   describe('real-world scenarios', () => {
+    // Ensure ENCRYPTION_KEY is set for these tests
+    beforeAll(() => {
+      process.env.ENCRYPTION_KEY = 'test-encryption-key-for-unit-tests-minimum-32-chars';
+    });
     it('should handle Stripe credentials', () => {
       const credentials = {
         secretKey: 'sk_test_51234567890abcdefghijklmnop',

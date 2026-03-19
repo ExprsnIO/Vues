@@ -344,6 +344,10 @@ adminPaymentsRouter.post(
 
     const [config] = await db.select().from(paymentConfigs).where(eq(paymentConfigs.id, id)).limit(1);
 
+    if (!config) {
+      return c.json({ error: 'Provider configuration not found' }, 404);
+    }
+
     return c.json({
       success: true,
       provider: {
@@ -433,6 +437,10 @@ adminPaymentsRouter.put(
     );
 
     const [config] = await db.select().from(paymentConfigs).where(eq(paymentConfigs.id, id)).limit(1);
+
+    if (!config) {
+      return c.json({ error: 'Provider configuration not found' }, 404);
+    }
 
     return c.json({
       success: true,
@@ -580,11 +588,18 @@ adminPaymentsRouter.get(
 
     const supportedProviders = PaymentGatewayFactory.getSupportedProviders();
 
+    const getFieldsWithMetadata = (fields: string[]) => fields.map(field => ({
+      field,
+      ...PaymentGatewayFactory.getCredentialMetadata(field),
+    }));
+
     if (provider) {
       return c.json({
         provider,
         requiredCredentials: PaymentGatewayFactory.getRequiredCredentials(provider),
         optionalCredentials: PaymentGatewayFactory.getOptionalCredentials(provider),
+        requiredFields: getFieldsWithMetadata(PaymentGatewayFactory.getRequiredCredentials(provider)),
+        optionalFields: getFieldsWithMetadata(PaymentGatewayFactory.getOptionalCredentials(provider)),
       });
     }
 
@@ -592,8 +607,14 @@ adminPaymentsRouter.get(
       supportedProviders,
       providers: supportedProviders.map((p) => ({
         provider: p,
+        displayName: p === 'stripe' ? 'Stripe' : p === 'paypal' ? 'PayPal' : 'Authorize.Net',
+        description: p === 'stripe' ? 'Accept credit cards, Apple Pay, Google Pay, and more' :
+                     p === 'paypal' ? 'Accept PayPal payments and credit cards' :
+                     'Accept credit cards via Authorize.Net gateway',
         requiredCredentials: PaymentGatewayFactory.getRequiredCredentials(p),
         optionalCredentials: PaymentGatewayFactory.getOptionalCredentials(p),
+        requiredFields: getFieldsWithMetadata(PaymentGatewayFactory.getRequiredCredentials(p)),
+        optionalFields: getFieldsWithMetadata(PaymentGatewayFactory.getOptionalCredentials(p)),
       })),
     });
   }

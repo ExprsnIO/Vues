@@ -83,6 +83,19 @@ export const videos = pgTable(
     angryCount: integer('angry_count').default(0).notNull(),
     // Organization publishing - when video is published on behalf of an org
     publishedAsOrgId: text('published_as_org_id'),
+    // Adaptive streaming fields
+    hlsMasterUrl: text('hls_master_url'), // Master HLS playlist URL
+    dashManifestUrl: text('dash_manifest_url'), // DASH manifest URL
+    thumbnailSpriteUrl: text('thumbnail_sprite_url'), // Thumbnail sprite image URL
+    thumbnailVttUrl: text('thumbnail_vtt_url'), // WebVTT for thumbnail seeking
+    availableQualities: jsonb('available_qualities').$type<string[]>().default([]), // ['360p', '480p', '720p', '1080p']
+    transcodeStatus: text('transcode_status').default('pending'), // 'pending' | 'processing' | 'completed' | 'failed'
+    transcodeJobId: text('transcode_job_id'), // Reference to active transcode job
+    // Cryptographic signature (did:exprsn content signing)
+    contentSignature: text('content_signature'),
+    contentSignatureTimestamp: text('content_signature_timestamp'),
+    signingCertificateId: text('signing_certificate_id'),
+    signatureVerified: boolean('signature_verified').default(false),
     // Moderation and deletion
     moderationStatus: text('moderation_status').default('approved').notNull(), // 'pending_review' | 'approved' | 'rejected' | 'auto_approved'
     deletedAt: timestamp('deleted_at'),
@@ -112,6 +125,7 @@ export const likes = pgTable(
     videoUri: text('video_uri')
       .notNull()
       .references(() => videos.uri, { onDelete: 'cascade' }),
+    subjectUri: text('subject_uri'), // Generic subject URI (alias for videoUri in some contexts)
     authorDid: text('author_did')
       .notNull()
       .references(() => users.did, { onDelete: 'cascade' }),
@@ -121,6 +135,7 @@ export const likes = pgTable(
   (table) => ({
     videoIdx: index('likes_video_idx').on(table.videoUri),
     authorIdx: index('likes_author_idx').on(table.authorDid),
+    subjectIdx: index('likes_subject_idx').on(table.subjectUri),
     uniqueLike: uniqueIndex('likes_unique_idx').on(table.videoUri, table.authorDid),
   })
 );
@@ -217,13 +232,137 @@ export const follows = pgTable(
     followeeDid: text('followee_did')
       .notNull()
       .references(() => users.did, { onDelete: 'cascade' }),
+    subjectDid: text('subject_did'), // Generic subject DID (alias for followeeDid in some contexts)
     createdAt: timestamp('created_at').notNull(),
     indexedAt: timestamp('indexed_at').defaultNow().notNull(),
   },
   (table) => ({
     followerIdx: index('follows_follower_idx').on(table.followerDid),
     followeeIdx: index('follows_followee_idx').on(table.followeeDid),
+    subjectIdx: index('follows_subject_idx').on(table.subjectDid),
     uniqueFollow: uniqueIndex('follows_unique_idx').on(table.followerDid, table.followeeDid),
+  })
+);
+
+// Video views table - tracks video view events
+export const videoViews = pgTable(
+  'video_views',
+  {
+    id: text('id').primaryKey(),
+    videoUri: text('video_uri')
+      .notNull()
+      .references(() => videos.uri, { onDelete: 'cascade' }),
+    viewerDid: text('viewer_did'),
+    watchedAt: timestamp('watched_at').defaultNow().notNull(),
+    watchDuration: integer('watch_duration'), // seconds watched
+    completedView: boolean('completed_view').default(false).notNull(),
+    source: text('source'), // 'feed', 'profile', 'direct', etc.
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    videoIdx: index('video_views_video_idx').on(table.videoUri),
+    viewerIdx: index('video_views_viewer_idx').on(table.viewerDid),
+    watchedAtIdx: index('video_views_watched_at_idx').on(table.watchedAt),
+  })
+);
+
+// Video hashtags table - stores hashtags used in videos
+export const videoHashtags = pgTable(
+  'video_hashtags',
+  {
+    id: text('id').primaryKey(),
+    videoUri: text('video_uri')
+      .notNull()
+      .references(() => videos.uri, { onDelete: 'cascade' }),
+    tag: text('tag').notNull(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    videoIdx: index('video_hashtags_video_idx').on(table.videoUri),
+    tagIdx: index('video_hashtags_tag_idx').on(table.tag),
+    uniqueVideoHashtag: uniqueIndex('video_hashtags_unique_idx').on(table.videoUri, table.tag),
+  })
+);
+
+// Hashtags table - tracks hashtag usage and statistics
+export const hashtags = pgTable(
+  'hashtags',
+  {
+    tag: text('tag').primaryKey(),
+    videoCount: integer('video_count').default(0).notNull(),
+    viewCount: integer('view_count').default(0).notNull(),
+    followerCount: integer('follower_count').default(0).notNull(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    lastUsedAt: timestamp('last_used_at'),
+  },
+  (table) => ({
+    videoCountIdx: index('hashtags_video_count_idx').on(table.videoCount),
+    viewCountIdx: index('hashtags_view_count_idx').on(table.viewCount),
+    lastUsedIdx: index('hashtags_last_used_idx').on(table.lastUsedAt),
+  })
+);
+
+// Trending hashtags table - caches trending calculations
+export const trendingHashtags = pgTable(
+  'trending_hashtags',
+  {
+    tag: text('tag').primaryKey(),
+    videoCount: integer('video_count').notNull(),
+    viewCount: integer('view_count').notNull(),
+    velocity: real('velocity').notNull(), // rate of use increase
+    previousVelocity: real('previous_velocity'), // velocity from prior period for direction
+    direction: text('direction').default('stable').notNull(), // 'up' | 'down' | 'stable'
+    rank: integer('rank').notNull(),
+    calculatedAt: timestamp('calculated_at').notNull(),
+  },
+  (table) => ({
+    rankIdx: index('trending_hashtags_rank_idx').on(table.rank),
+    velocityIdx: index('trending_hashtags_velocity_idx').on(table.velocity),
+  })
+);
+
+// Hashtag follows table - tracks which hashtags a user follows
+export const hashtagFollows = pgTable(
+  'hashtag_follows',
+  {
+    id: text('id').primaryKey(),
+    userDid: text('user_did').notNull().references(() => users.did, { onDelete: 'cascade' }),
+    tag: text('tag').notNull(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    userTagIdx: uniqueIndex('hashtag_follows_user_tag_idx').on(table.userDid, table.tag),
+    tagIdx: index('hashtag_follows_tag_idx').on(table.tag),
+  })
+);
+
+// Tips table - stores tip/donation transactions
+export const tips = pgTable(
+  'tips',
+  {
+    id: text('id').primaryKey(),
+    senderDid: text('sender_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    recipientDid: text('recipient_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    videoUri: text('video_uri')
+      .references(() => videos.uri, { onDelete: 'set null' }),
+    amount: integer('amount').notNull(), // Amount in smallest currency unit (cents)
+    currency: text('currency').default('USD').notNull(),
+    status: text('status').default('pending').notNull(), // pending, completed, failed, refunded
+    paymentIntentId: text('payment_intent_id'),
+    message: text('message'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    completedAt: timestamp('completed_at'),
+  },
+  (table) => ({
+    senderIdx: index('tips_sender_idx').on(table.senderDid),
+    recipientIdx: index('tips_recipient_idx').on(table.recipientDid),
+    videoIdx: index('tips_video_idx').on(table.videoUri),
+    statusIdx: index('tips_status_idx').on(table.status),
+    createdAtIdx: index('tips_created_at_idx').on(table.createdAt),
   })
 );
 
@@ -325,12 +464,16 @@ export const uploadJobs = pgTable(
     maxRetries: integer('max_retries').default(5).notNull(),
     lastRetryAt: timestamp('last_retry_at'),
     retryHistory: jsonb('retry_history').$type<Array<{ attemptedAt: string; error: string }>>().default([]),
+    // Dead letter queue support
+    movedToDlq: boolean('moved_to_dlq').default(false).notNull(),
+    dlqId: text('dlq_id'),
     createdAt: timestamp('created_at').defaultNow().notNull(),
     updatedAt: timestamp('updated_at').defaultNow().notNull(),
   },
   (table) => ({
     userIdx: index('upload_jobs_user_idx').on(table.userDid),
     statusIdx: index('upload_jobs_status_idx').on(table.status),
+    dlqIdx: index('upload_jobs_dlq_idx').on(table.movedToDlq),
   })
 );
 
@@ -349,7 +492,7 @@ export const userSettings = pgTable('user_settings', {
   }>(),
   playback: jsonb('playback').$type<{
     autoplay: boolean;
-    defaultQuality: 'auto' | '1080p' | '720p' | '480p' | '360p';
+    defaultQuality: 'auto' | '1080p' | '720p' | '480p' | '360p' | 'high' | 'medium' | 'low';
     defaultMuted: boolean;
     loopVideos: boolean;
     dataSaver: boolean;
@@ -367,8 +510,8 @@ export const userSettings = pgTable('user_settings', {
     showActivityStatus: boolean;
     allowDuets: boolean;
     allowStitches: boolean;
-    allowComments: 'everyone' | 'following' | 'none';
-    allowMessages: 'everyone' | 'following' | 'none';
+    allowComments: 'everyone' | 'following' | 'none' | 'nobody';
+    allowMessages: 'everyone' | 'following' | 'none' | 'nobody';
   }>(),
   content: jsonb('content').$type<{
     language: string;
@@ -512,6 +655,9 @@ export const repoBlocks = pgTable(
 );
 
 // PDS sessions
+// SECURITY: Tokens are stored as SHA-256 hashes, not plaintext.
+// This prevents token theft if the database is compromised.
+// Raw tokens are only returned to the user once at session creation.
 export const sessions = pgTable(
   'sessions',
   {
@@ -519,7 +665,9 @@ export const sessions = pgTable(
     did: text('did')
       .notNull()
       .references(() => actorRepos.did, { onDelete: 'cascade' }),
+    // SHA-256 hash of the access token (not the raw token)
     accessJwt: text('access_jwt').notNull(),
+    // SHA-256 hash of the refresh token (not the raw token)
     refreshJwt: text('refresh_jwt').notNull(),
     expiresAt: timestamp('expires_at').notNull(),
     createdAt: timestamp('created_at').defaultNow().notNull(),
@@ -836,11 +984,17 @@ export const conversations = pgTable(
   'conversations',
   {
     id: text('id').primaryKey(),
+    // 'direct' for 1:1 DMs, 'group' for group conversations
+    type: text('type').default('direct').notNull(),
+    // Group-only fields (null for direct conversations)
+    name: text('name'),
+    avatarUrl: text('avatar_url'),
+    createdBy: text('created_by'),
+    maxMembers: integer('max_members').default(50),
+    // Direct conversation participant fields (null for group conversations)
     participant1Did: text('participant1_did')
-      .notNull()
       .references(() => users.did, { onDelete: 'cascade' }),
     participant2Did: text('participant2_did')
-      .notNull()
       .references(() => users.did, { onDelete: 'cascade' }),
     lastMessageAt: timestamp('last_message_at'),
     lastMessageText: text('last_message_text'),
@@ -855,6 +1009,7 @@ export const conversations = pgTable(
       table.participant2Did
     ),
     lastMessageIdx: index('conversations_last_message_idx').on(table.lastMessageAt),
+    typeIdx: index('conversations_type_idx').on(table.type),
   })
 );
 
@@ -884,7 +1039,7 @@ export const messages = pgTable(
   })
 );
 
-// Conversation participants state (for muting, read status per user)
+// Conversation participants state (for muting, read status per user, group roles)
 export const conversationParticipants = pgTable(
   'conversation_participants',
   {
@@ -895,6 +1050,8 @@ export const conversationParticipants = pgTable(
     participantDid: text('participant_did')
       .notNull()
       .references(() => users.did, { onDelete: 'cascade' }),
+    // 'admin' | 'member' — used for group conversations
+    role: text('role').default('member').notNull(),
     lastReadAt: timestamp('last_read_at'),
     muted: boolean('muted').default(false).notNull(),
     createdAt: timestamp('created_at').defaultNow().notNull(),
@@ -1144,6 +1301,8 @@ export const notifications = pgTable(
     reasonSubject: text('reason_subject'), // URI of the subject (video, comment, etc)
     targetUri: text('target_uri'), // URI of the target record
     targetCid: text('target_cid'),
+    subjectUri: text('subject_uri'), // URI of the subject being acted upon (for mentions)
+    subjectType: text('subject_type'), // Type of subject: 'video' | 'comment' | etc
     isRead: boolean('is_read').default(false).notNull(),
     createdAt: timestamp('created_at').defaultNow().notNull(),
     indexedAt: timestamp('indexed_at').defaultNow().notNull(),
@@ -1621,6 +1780,8 @@ export const organizationInvites = pgTable(
     token: text('token').notNull(), // Unique invite token
     message: text('message'), // Optional invite message
     status: text('status').default('pending').notNull(), // 'pending' | 'accepted' | 'expired' | 'revoked'
+    maxUses: integer('max_uses').default(1), // Max number of times invite can be used (null = unlimited)
+    uses: integer('uses').default(0).notNull(), // Current number of uses
     expiresAt: timestamp('expires_at').notNull(),
     acceptedAt: timestamp('accepted_at'),
     createdAt: timestamp('created_at').defaultNow().notNull(),
@@ -1735,8 +1896,10 @@ export const liveStreams = pgTable(
     tags: jsonb('tags').$type<string[]>().default([]),
     visibility: text('visibility').default('public').notNull(), // 'public' | 'followers' | 'private'
     chatEnabled: boolean('chat_enabled').default(true).notNull(),
+    chatSettings: jsonb('chat_settings').$type<Record<string, unknown>>().default({}),
     recordingEnabled: boolean('recording_enabled').default(true).notNull(),
     recordingUrl: text('recording_url'),
+    isAgeRestricted: boolean('is_age_restricted').default(false).notNull(),
     scheduledAt: timestamp('scheduled_at'),
     startedAt: timestamp('started_at'),
     endedAt: timestamp('ended_at'),
@@ -1848,6 +2011,30 @@ export const streamViewers = pgTable(
     userIdx: index('stream_viewers_user_idx').on(table.userDid),
     sessionIdx: index('stream_viewers_session_idx').on(table.sessionId),
     joinedIdx: index('stream_viewers_joined_idx').on(table.joinedAt),
+  })
+);
+
+// Stream webhooks - webhook configurations for stream events
+export const streamWebhooks = pgTable(
+  'stream_webhooks',
+  {
+    id: text('id').primaryKey(),
+    userDid: text('user_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    url: text('url').notNull(),
+    secret: text('secret').notNull(),
+    events: jsonb('events').$type<string[]>().notNull(),
+    active: boolean('active').default(true).notNull(),
+    failureCount: integer('failure_count').default(0).notNull(),
+    lastTriggeredAt: timestamp('last_triggered_at'),
+    lastError: text('last_error'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    userIdx: index('stream_webhooks_user_idx').on(table.userDid),
+    activeIdx: index('stream_webhooks_active_idx').on(table.active),
   })
 );
 
@@ -2357,6 +2544,62 @@ export const caCertificateRevocationLists = pgTable(
 );
 
 // ============================================
+// Invite Codes (Certificate-backed)
+// ============================================
+
+// Invite codes for user registration, cryptographically signed by CA certificates
+export const inviteCodes = pgTable(
+  'invite_codes',
+  {
+    id: text('id').primaryKey(),
+    code: text('code').notNull().unique(), // The actual invite code (user-friendly format)
+    codeHash: text('code_hash').notNull(), // SHA-256 of the code for secure lookup
+    issuerDid: text('issuer_did')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    issuerCertificateId: text('issuer_certificate_id')
+      .references(() => caEntityCertificates.id, { onDelete: 'set null' }),
+    domainId: text('domain_id')
+      .references(() => domains.id, { onDelete: 'cascade' }),
+
+    // Usage controls
+    maxUses: integer('max_uses').default(1), // null = unlimited
+    usedCount: integer('used_count').default(0).notNull(),
+    expiresAt: timestamp('expires_at'), // null = never expires
+
+    // Tracking
+    usedBy: jsonb('used_by').$type<string[]>().default([]).notNull(), // Array of DIDs that used this code
+    metadata: jsonb('metadata').$type<{
+      name?: string;
+      description?: string;
+      tags?: string[];
+      [key: string]: any;
+    }>(),
+
+    // Status
+    status: text('status').default('active').notNull(), // 'active' | 'revoked' | 'expired' | 'exhausted'
+
+    // Cryptographic signature
+    signature: text('signature'), // Certificate signature of the code (base64)
+    signatureAlgorithm: text('signature_algorithm').default('RSA-SHA256'),
+
+    // Timestamps
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    revokedAt: timestamp('revoked_at'),
+    revokedBy: text('revoked_by').references(() => users.did),
+    revokedReason: text('revoked_reason'),
+  },
+  (table) => ({
+    codeHashIdx: uniqueIndex('invite_codes_hash_idx').on(table.codeHash),
+    issuerIdx: index('invite_codes_issuer_idx').on(table.issuerDid),
+    domainIdx: index('invite_codes_domain_idx').on(table.domainId),
+    statusIdx: index('invite_codes_status_idx').on(table.status),
+    expiresIdx: index('invite_codes_expires_idx').on(table.expiresAt),
+    certIdx: index('invite_codes_cert_idx').on(table.issuerCertificateId),
+  })
+);
+
+// ============================================
 // did:exprsn Certificate Integration
 // ============================================
 
@@ -2470,6 +2713,10 @@ export type CAEntityCertificate = typeof caEntityCertificates.$inferSelect;
 export type NewCAEntityCertificate = typeof caEntityCertificates.$inferInsert;
 export type CACRL = typeof caCertificateRevocationLists.$inferSelect;
 export type NewCACRL = typeof caCertificateRevocationLists.$inferInsert;
+
+// Invite Code type exports
+export type InviteCode = typeof inviteCodes.$inferSelect;
+export type NewInviteCode = typeof inviteCodes.$inferInsert;
 
 // did:exprsn Certificate type exports
 export type ExprsnDidCertificate = typeof exprsnDidCertificates.$inferSelect;
@@ -3604,6 +3851,48 @@ export const moderationAppeals = pgTable('moderation_appeals', {
   sanctionIdIdx: index('moderation_appeals_sanction_id_idx').on(table.sanctionId),
 }));
 
+// Appeal History - tracks all changes to an appeal
+export const appealHistory = pgTable('appeal_history', {
+  id: text('id').primaryKey(),
+  appealId: text('appeal_id')
+    .notNull()
+    .references(() => moderationAppeals.id, { onDelete: 'cascade' }),
+  action: text('action').notNull(), // 'created' | 'assigned' | 'escalated' | 'reviewed' | 'decision_made' | 'info_requested' | 'info_provided' | 'reopened' | 'closed'
+  actorDid: text('actor_did'), // Who performed the action (null for system actions)
+  actorType: text('actor_type').notNull().default('user'), // 'user' | 'moderator' | 'admin' | 'system'
+  previousStatus: text('previous_status'),
+  newStatus: text('new_status'),
+  previousAssignee: text('previous_assignee'),
+  newAssignee: text('new_assignee'),
+  notes: text('notes'),
+  metadata: jsonb('metadata').$type<Record<string, unknown>>().default({}),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  appealIdIdx: index('appeal_history_appeal_id_idx').on(table.appealId),
+  actionIdx: index('appeal_history_action_idx').on(table.action),
+  actorDidIdx: index('appeal_history_actor_did_idx').on(table.actorDid),
+  createdAtIdx: index('appeal_history_created_at_idx').on(table.createdAt),
+}));
+
+// Appeal Info Requests - requests for additional information from appellant
+export const appealInfoRequests = pgTable('appeal_info_requests', {
+  id: text('id').primaryKey(),
+  appealId: text('appeal_id')
+    .notNull()
+    .references(() => moderationAppeals.id, { onDelete: 'cascade' }),
+  requestedBy: text('requested_by').notNull(), // Moderator DID
+  question: text('question').notNull(),
+  response: text('response'),
+  respondedAt: timestamp('responded_at'),
+  dueAt: timestamp('due_at'),
+  status: text('status').notNull().default('pending'), // 'pending' | 'responded' | 'expired'
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  appealIdIdx: index('appeal_info_requests_appeal_id_idx').on(table.appealId),
+  statusIdx: index('appeal_info_requests_status_idx').on(table.status),
+}));
+
 // AI Agents - configured AI moderation agents
 export const moderationAiAgents = pgTable('moderation_ai_agents', {
   id: text('id').primaryKey(),
@@ -3716,6 +4005,10 @@ export type ModerationUserAction = typeof moderationUserActions.$inferSelect;
 export type NewModerationUserAction = typeof moderationUserActions.$inferInsert;
 export type ModerationAppeal = typeof moderationAppeals.$inferSelect;
 export type NewModerationAppeal = typeof moderationAppeals.$inferInsert;
+export type AppealHistory = typeof appealHistory.$inferSelect;
+export type NewAppealHistory = typeof appealHistory.$inferInsert;
+export type AppealInfoRequest = typeof appealInfoRequests.$inferSelect;
+export type NewAppealInfoRequest = typeof appealInfoRequests.$inferInsert;
 export type ModerationAiAgent = typeof moderationAiAgents.$inferSelect;
 export type NewModerationAiAgent = typeof moderationAiAgents.$inferInsert;
 export type ModerationAgentExecution = typeof moderationAgentExecutions.$inferSelect;
@@ -3888,6 +4181,9 @@ export const authConfig = pgTable('auth_config', {
   // Rate limiting - burst
   userBurstLimit: integer('user_burst_limit').default(20).notNull(),
   adminBurstLimit: integer('admin_burst_limit').default(50).notNull(),
+  // Rate limiting - did:exprsn tier (between admin and user)
+  exprsnRateLimitPerMinute: integer('exprsn_rate_limit_per_minute').default(90).notNull(),
+  exprsnBurstLimit: integer('exprsn_burst_limit').default(35).notNull(),
   // OAuth settings
   oauthEnabled: boolean('oauth_enabled').default(true).notNull(),
   allowedOauthProviders: jsonb('allowed_oauth_providers').$type<string[]>().default(['atproto']),
@@ -4013,15 +4309,38 @@ export const renderClusters = pgTable(
   {
     id: text('id').primaryKey(),
     name: text('name').notNull(),
-    type: text('type').notNull(), // 'docker' | 'kubernetes'
-    endpoint: text('endpoint'), // API server URL for k8s
+    type: text('type').notNull(), // 'docker' | 'kubernetes' | 'docker-compose' | 'docker-swarm'
+    endpoint: text('endpoint'), // API server URL for k8s / Docker host
     config: jsonb('config').$type<{
       kubeconfig?: string;
       namespace?: string;
+      context?: string;
+      kubeconfigPath?: string;
       dockerHost?: string;
       labels?: Record<string, string>;
     }>(),
-    status: text('status').notNull().default('active'), // 'active' | 'draining' | 'offline' | 'error'
+    // TLS Configuration
+    tls: jsonb('tls').$type<{
+      enabled: boolean;
+      caCert?: string;
+      clientCert?: string;
+      clientKey?: string;
+      skipVerify?: boolean;
+    }>(),
+    // Authentication Configuration
+    auth: jsonb('auth').$type<{
+      type: 'none' | 'basic' | 'token' | 'certificate';
+      username?: string;
+      password?: string;
+      token?: string;
+    }>(),
+    // Resource limits
+    resources: jsonb('resources').$type<{
+      maxCpu?: string;
+      maxMemory?: string;
+      maxGpu?: number;
+    }>(),
+    status: text('status').notNull().default('active'), // 'active' | 'draining' | 'offline' | 'error' | 'inactive'
     region: text('region'),
     maxWorkers: integer('max_workers'),
     currentWorkers: integer('current_workers').default(0),
@@ -4261,7 +4580,7 @@ export const challenges = pgTable(
     id: text('id').primaryKey(),
     name: text('name').notNull(),
     description: text('description'),
-    hashtag: text('hashtag').notNull(), // e.g., "DanceChallenge2024"
+    tag: text('tag').notNull(), // e.g., "DanceChallenge2024"
     rules: text('rules'), // Challenge rules/guidelines
     coverImageUrl: text('cover_image_url'),
     bannerImageUrl: text('banner_image_url'),
@@ -4283,7 +4602,7 @@ export const challenges = pgTable(
     updatedAt: timestamp('updated_at').defaultNow().notNull(),
   },
   (table) => ({
-    hashtagIdx: uniqueIndex('challenges_hashtag_idx').on(table.hashtag),
+    tagIdx: uniqueIndex('challenges_tag_idx').on(table.tag),
     statusIdx: index('challenges_status_idx').on(table.status),
     startAtIdx: index('challenges_start_at_idx').on(table.startAt),
     endAtIdx: index('challenges_end_at_idx').on(table.endAt),
@@ -4759,6 +5078,11 @@ export const domains = pgTable(
       blockedDomains: [],
     }),
 
+    // Domain hierarchy
+    parentDomainId: text('parent_domain_id'), // Self-referencing parent for domain tree
+    hierarchyPath: text('hierarchy_path'), // Materialized path: /root-id/parent-id/current-id/
+    hierarchyLevel: integer('hierarchy_level').default(0).notNull(),
+
     // Stats
     userCount: integer('user_count').default(0).notNull(),
     groupCount: integer('group_count').default(0).notNull(),
@@ -4776,6 +5100,8 @@ export const domains = pgTable(
     ownerOrgIdx: index('domains_owner_org_idx').on(table.ownerOrgId),
     ownerUserIdx: index('domains_owner_user_idx').on(table.ownerUserDid),
     handleSuffixIdx: index('domains_handle_suffix_idx').on(table.handleSuffix),
+    parentDomainIdx: index('domains_parent_domain_idx').on(table.parentDomainId),
+    hierarchyPathIdx: index('domains_hierarchy_path_idx').on(table.hierarchyPath),
   })
 );
 
@@ -5175,6 +5501,145 @@ export const domainModerationQueue = pgTable(
     authorIdx: index('domain_mod_queue_author_idx').on(table.authorDid),
     assignedIdx: index('domain_mod_queue_assigned_idx').on(table.assignedTo),
     createdIdx: index('domain_mod_queue_created_idx').on(table.createdAt),
+  })
+);
+
+// Domain Moderation Policies - configurable moderation rules per domain
+export const moderationPolicies = pgTable(
+  'moderation_policies',
+  {
+    id: text('id').primaryKey(),
+    domainId: text('domain_id')
+      .notNull()
+      .references(() => domains.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    description: text('description'),
+    type: text('type').notNull(), // 'content_filter' | 'word_filter' | 'spam_prevention' | 'rate_limit' | 'user_restriction' | 'media_policy' | 'auto_moderation' | 'custom'
+    enabled: boolean('enabled').default(true).notNull(),
+    priority: integer('priority').default(0).notNull(),
+    conditions: jsonb('conditions').$type<any[]>().default([]).notNull(),
+    actions: jsonb('actions').$type<any[]>().default([]).notNull(),
+    exceptionRules: jsonb('exception_rules').$type<any[]>().default([]),
+    inheritFromParent: boolean('inherit_from_parent').default(false).notNull(),
+    allowChildOverride: boolean('allow_child_override').default(true).notNull(),
+    metadata: jsonb('metadata').$type<Record<string, any>>().default({}),
+    createdBy: text('created_by').references(() => users.did, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    domainIdx: index('moderation_policies_domain_idx').on(table.domainId),
+    typeIdx: index('moderation_policies_type_idx').on(table.type),
+    enabledIdx: index('moderation_policies_enabled_idx').on(table.enabled),
+    priorityIdx: index('moderation_policies_priority_idx').on(table.priority),
+  })
+);
+
+// Word Filters - domain-specific word and pattern filters
+export const wordFilters = pgTable(
+  'word_filters',
+  {
+    id: text('id').primaryKey(),
+    domainId: text('domain_id')
+      .notNull()
+      .references(() => domains.id, { onDelete: 'cascade' }),
+    category: text('category').notNull(), // 'profanity' | 'slurs' | 'hate_speech' | 'spam' | 'scam' | 'adult' | 'violence' | 'custom'
+    words: jsonb('words').$type<string[]>().default([]).notNull(),
+    patterns: jsonb('patterns').$type<string[]>().default([]),
+    action: text('action').notNull(), // 'block' | 'flag' | 'quarantine' | 'shadow_ban' | 'rate_limit' | 'warn' | 'notify_moderator' | 'auto_remove' | 'require_review' | 'restrict_user' | 'custom_webhook'
+    severity: text('severity').notNull().default('medium'), // 'low' | 'medium' | 'high' | 'critical'
+    enabled: boolean('enabled').default(true).notNull(),
+    caseSensitive: boolean('case_sensitive').default(false).notNull(),
+    wholeWord: boolean('whole_word').default(true).notNull(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    domainIdx: index('word_filters_domain_idx').on(table.domainId),
+    categoryIdx: index('word_filters_category_idx').on(table.category),
+    severityIdx: index('word_filters_severity_idx').on(table.severity),
+    enabledIdx: index('word_filters_enabled_idx').on(table.enabled),
+  })
+);
+
+// Shadow Bans - restricted visibility for users
+export const shadowBans = pgTable(
+  'shadow_bans',
+  {
+    id: text('id').primaryKey(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    domainId: text('domain_id')
+      .notNull()
+      .references(() => domains.id, { onDelete: 'cascade' }),
+    scope: text('scope').notNull(), // 'full' | 'comments' | 'posts' | 'replies'
+    visibleTo: text('visible_to').notNull(), // 'self_only' | 'followers_only' | 'none'
+    reason: text('reason').notNull(),
+    expiresAt: timestamp('expires_at'),
+    createdBy: text('created_by')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    userIdx: index('shadow_bans_user_idx').on(table.userId),
+    domainIdx: index('shadow_bans_domain_idx').on(table.domainId),
+    expiresIdx: index('shadow_bans_expires_idx').on(table.expiresAt),
+    uniqueUserDomain: uniqueIndex('shadow_bans_unique_idx').on(table.userId, table.domainId),
+  })
+);
+
+// Domain Moderation Config - per-domain moderation settings
+export const domainModerationConfig = pgTable(
+  'domain_moderation_config',
+  {
+    id: text('id').primaryKey(),
+    domainId: text('domain_id')
+      .notNull()
+      .references(() => domains.id, { onDelete: 'cascade' })
+      .unique(),
+    autoModerationEnabled: boolean('auto_moderation_enabled').default(true).notNull(),
+    aiModerationEnabled: boolean('ai_moderation_enabled').default(true).notNull(),
+    requireReviewNewUsers: boolean('require_review_new_users').default(false).notNull(),
+    newUserReviewDays: integer('new_user_review_days').default(7).notNull(),
+    trustLevelThresholds: jsonb('trust_level_thresholds').$type<any[]>().default([]),
+    appealEnabled: boolean('appeal_enabled').default(true).notNull(),
+    appealCooldownHours: integer('appeal_cooldown_hours').default(72).notNull(),
+    maxActiveAppeals: integer('max_active_appeals').default(3).notNull(),
+    shadowBanEnabled: boolean('shadow_ban_enabled').default(true).notNull(),
+    notifyOnFlag: boolean('notify_on_flag').default(true).notNull(),
+    notifyOnRemoval: boolean('notify_on_removal').default(true).notNull(),
+    escalationThresholds: jsonb('escalation_thresholds').$type<any[]>().default([]),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    domainIdx: index('domain_moderation_config_domain_idx').on(table.domainId),
+  })
+);
+
+// Moderation Audit Log - log of all moderation actions
+export const moderationAuditLog = pgTable(
+  'moderation_audit_log',
+  {
+    id: text('id').primaryKey(),
+    actionType: text('action_type').notNull(),
+    targetUserId: text('target_user_id').references(() => users.did, { onDelete: 'set null' }),
+    domainId: text('domain_id').references(() => domains.id, { onDelete: 'set null' }),
+    actorId: text('actor_id')
+      .notNull()
+      .references(() => users.did, { onDelete: 'cascade' }),
+    reason: text('reason').notNull(),
+    details: jsonb('details').$type<Record<string, any>>().default({}),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    actionTypeIdx: index('moderation_audit_log_action_type_idx').on(table.actionType),
+    targetUserIdx: index('moderation_audit_log_target_user_idx').on(table.targetUserId),
+    domainIdx: index('moderation_audit_log_domain_idx').on(table.domainId),
+    actorIdx: index('moderation_audit_log_actor_idx').on(table.actorId),
+    createdAtIdx: index('moderation_audit_log_created_at_idx').on(table.createdAt),
   })
 );
 
@@ -6672,3 +7137,340 @@ export type SyncSubscription = typeof syncSubscriptions.$inferSelect;
 export type NewSyncSubscription = typeof syncSubscriptions.$inferInsert;
 export type SyncEvent = typeof syncEvents.$inferSelect;
 export type NewSyncEvent = typeof syncEvents.$inferInsert;
+
+// ====================
+// Dead Letter Queue
+// ====================
+
+export const deadLetterQueue = pgTable(
+  'dead_letter_queue',
+  {
+    id: text('id').primaryKey(),
+    originalJobId: text('original_job_id').notNull(),
+    uploadId: text('upload_id').notNull(),
+    userId: text('user_id').notNull(),
+    failureReason: text('failure_reason').notNull(),
+    failedAt: timestamp('failed_at').defaultNow().notNull(),
+    attempts: integer('attempts').default(0).notNull(),
+    lastError: text('last_error'),
+    jobData: jsonb('job_data').$type<Record<string, unknown>>(),
+    canRequeue: boolean('can_requeue').default(true).notNull(),
+    requeuedAt: timestamp('requeued_at'),
+    requeuedBy: text('requeued_by'), // Admin who requeued the job
+    processedAt: timestamp('processed_at'),
+    resolvedAt: timestamp('resolved_at'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    uploadIdIdx: index('dlq_upload_id_idx').on(table.uploadId),
+    userIdIdx: index('dlq_user_id_idx').on(table.userId),
+    failedAtIdx: index('dlq_failed_at_idx').on(table.failedAt),
+    canRequeueIdx: index('dlq_can_requeue_idx').on(table.canRequeue),
+  })
+);
+
+// ====================
+// Webhook Tables
+// ====================
+
+export const webhookSubscriptions = pgTable(
+  'webhook_subscriptions',
+  {
+    id: text('id').primaryKey(),
+    userId: text('user_id').notNull(),
+    url: text('url').notNull(),
+    secret: text('secret').notNull(),
+    events: jsonb('events').$type<string[]>().default([]).notNull(),
+    active: boolean('active').default(true).notNull(),
+    failureCount: integer('failure_count').default(0).notNull(),
+    lastDeliveryAt: timestamp('last_delivery_at'),
+    lastFailureAt: timestamp('last_failure_at'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    userIdIdx: index('webhook_subs_user_id_idx').on(table.userId),
+    activeIdx: index('webhook_subs_active_idx').on(table.active),
+  })
+);
+
+export const webhookDeliveries = pgTable(
+  'webhook_deliveries',
+  {
+    id: text('id').primaryKey(),
+    subscriptionId: text('subscription_id')
+      .notNull()
+      .references(() => webhookSubscriptions.id, { onDelete: 'cascade' }),
+    eventId: text('event_id').notNull(), // Unique event identifier
+    eventType: text('event_type').notNull(),
+    payload: jsonb('payload').$type<Record<string, unknown>>().notNull(),
+    statusCode: integer('status_code'),
+    responseBody: text('response_body'),
+    error: text('error'), // Error message if delivery failed
+    success: boolean('success').default(false).notNull(),
+    duration: integer('duration'), // Delivery duration in milliseconds
+    attemptNumber: integer('attempt_number').default(1).notNull(),
+    attempts: integer('attempts').default(1).notNull(),
+    nextRetryAt: timestamp('next_retry_at'),
+    deliveredAt: timestamp('delivered_at'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    subscriptionIdIdx: index('webhook_del_sub_id_idx').on(table.subscriptionId),
+    eventTypeIdx: index('webhook_del_event_type_idx').on(table.eventType),
+    eventIdIdx: index('webhook_del_event_id_idx').on(table.eventId),
+    successIdx: index('webhook_del_success_idx').on(table.success),
+    createdAtIdx: index('webhook_del_created_at_idx').on(table.createdAt),
+  })
+);
+
+// ====================
+// Theme Configuration Tables
+// ====================
+
+export interface ThemeConfig {
+  colors: {
+    // Base colors
+    background: string;
+    surface: string;
+    surfaceHover: string;
+    // Text colors
+    textPrimary: string;
+    textSecondary: string;
+    textMuted: string;
+    textInverse: string;
+    // Accent/Brand colors
+    accent: string;
+    accentHover: string;
+    // Semantic colors
+    success: string;
+    warning: string;
+    error: string;
+    info: string;
+    // Border
+    border: string;
+  };
+  typography: {
+    fontFamily: string;
+    headingFontFamily: string;
+    monoFontFamily: string;
+    baseFontSize: string;
+  };
+  spacing: {
+    borderRadius: string;
+    containerPadding: string;
+  };
+}
+
+export const themes = pgTable(
+  'themes',
+  {
+    id: text('id').primaryKey(),
+    name: text('name').notNull(),
+    description: text('description'),
+    domainId: text('domain_id').references(() => domains.id, { onDelete: 'cascade' }),
+    isDefault: boolean('is_default').default(false).notNull(),
+    isDark: boolean('is_dark').default(true).notNull(),
+    config: jsonb('config').$type<ThemeConfig>().notNull(),
+    createdBy: text('created_by').references(() => users.did),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    domainIdIdx: index('themes_domain_id_idx').on(table.domainId),
+    isDefaultIdx: index('themes_is_default_idx').on(table.isDefault),
+    createdByIdx: index('themes_created_by_idx').on(table.createdBy),
+  })
+);
+
+// ============================================================================
+// ADAPTIVE STREAMING TABLES
+// ============================================================================
+
+// Quality preset type for transcoding
+export type QualityPreset = '360p' | '480p' | '720p' | '1080p' | '1440p' | '4k';
+
+// Video variants table - tracks transcoded quality levels
+export const videoVariants = pgTable(
+  'video_variants',
+  {
+    id: text('id').primaryKey(),
+    videoUri: text('video_uri')
+      .notNull()
+      .references(() => videos.uri, { onDelete: 'cascade' }),
+    quality: text('quality').notNull(), // '360p' | '480p' | '720p' | '1080p'
+    width: integer('width').notNull(),
+    height: integer('height').notNull(),
+    bitrate: integer('bitrate').notNull(), // kbps
+    codec: text('codec').notNull(), // 'h264' | 'hevc' | 'vp9' | 'av1'
+    format: text('format').notNull(), // 'hls' | 'dash' | 'mp4'
+    segmentDuration: real('segment_duration'), // seconds per segment
+    playlistUrl: text('playlist_url'), // HLS/DASH playlist URL
+    initSegmentUrl: text('init_segment_url'), // DASH init segment
+    segmentCount: integer('segment_count'),
+    fileSize: integer('file_size'), // bytes
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    videoIdx: index('video_variants_video_idx').on(table.videoUri),
+    qualityIdx: index('video_variants_quality_idx').on(table.quality),
+    formatIdx: index('video_variants_format_idx').on(table.format),
+    videoQualityFormatIdx: uniqueIndex('video_variants_unique_idx').on(
+      table.videoUri,
+      table.quality,
+      table.format
+    ),
+  })
+);
+
+// Transcode job data type for JSON storage
+export interface TranscodeJobConfig {
+  targetQualities: QualityPreset[];
+  enableHls: boolean;
+  enableDash: boolean;
+  enableThumbnails: boolean;
+  enableOffline: boolean;
+  offlineQualities: QualityPreset[];
+  segmentDuration: number;
+  thumbnailInterval: number;
+}
+
+// Transcode jobs table - tracks ABR transcoding progress
+export const transcodeJobs = pgTable(
+  'transcode_jobs',
+  {
+    id: text('id').primaryKey(),
+    videoUri: text('video_uri').references(() => videos.uri, { onDelete: 'cascade' }),
+    userDid: text('user_did').notNull(),
+    status: text('status').notNull(), // 'pending' | 'probing' | 'transcoding' | 'packaging' | 'uploading' | 'completed' | 'failed'
+    phase: text('phase'), // current phase: 'hls_360p' | 'hls_480p' | 'dash' | 'thumbnails' | etc.
+    progress: integer('progress').default(0).notNull(), // 0-100
+    // Input metadata
+    inputKey: text('input_key').notNull(), // S3 key of source file
+    inputWidth: integer('input_width'),
+    inputHeight: integer('input_height'),
+    inputDuration: real('input_duration'), // seconds
+    inputCodec: text('input_codec'),
+    inputBitrate: integer('input_bitrate'), // kbps
+    inputFps: real('input_fps'),
+    // Output configuration
+    config: jsonb('config').$type<TranscodeJobConfig>().notNull(),
+    // Output URLs
+    outputBasePath: text('output_base_path'), // S3 prefix for all outputs
+    hlsMasterUrl: text('hls_master_url'),
+    dashManifestUrl: text('dash_manifest_url'),
+    thumbnailSpriteUrl: text('thumbnail_sprite_url'),
+    thumbnailVttUrl: text('thumbnail_vtt_url'),
+    // Offline download URLs by quality
+    offlineDownloads: jsonb('offline_downloads').$type<Record<string, string>>(),
+    // Worker tracking
+    workerId: text('worker_id'),
+    workerStartedAt: timestamp('worker_started_at'),
+    // Error handling
+    error: text('error'),
+    errorPhase: text('error_phase'),
+    errorStack: text('error_stack'),
+    retryCount: integer('retry_count').default(0).notNull(),
+    maxRetries: integer('max_retries').default(3).notNull(),
+    // Timing
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    startedAt: timestamp('started_at'),
+    completedAt: timestamp('completed_at'),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    videoIdx: index('transcode_jobs_video_idx').on(table.videoUri),
+    userIdx: index('transcode_jobs_user_idx').on(table.userDid),
+    statusIdx: index('transcode_jobs_status_idx').on(table.status),
+    workerIdx: index('transcode_jobs_worker_idx').on(table.workerId),
+    createdAtIdx: index('transcode_jobs_created_at_idx').on(table.createdAt),
+  })
+);
+
+// Thumbnail sprites metadata
+export const thumbnailSprites = pgTable(
+  'thumbnail_sprites',
+  {
+    id: text('id').primaryKey(),
+    videoUri: text('video_uri')
+      .notNull()
+      .references(() => videos.uri, { onDelete: 'cascade' }),
+    spriteUrl: text('sprite_url').notNull(),
+    vttUrl: text('vtt_url').notNull(),
+    spriteWidth: integer('sprite_width').notNull(),
+    spriteHeight: integer('sprite_height').notNull(),
+    thumbnailWidth: integer('thumbnail_width').notNull(),
+    thumbnailHeight: integer('thumbnail_height').notNull(),
+    columns: integer('columns').notNull(),
+    rows: integer('rows').notNull(),
+    interval: real('interval').notNull(), // seconds between thumbnails
+    totalThumbnails: integer('total_thumbnails').notNull(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    videoIdx: uniqueIndex('thumbnail_sprites_video_idx').on(table.videoUri),
+  })
+);
+
+// Offline downloads tracking
+export const offlineDownloads = pgTable(
+  'offline_downloads',
+  {
+    id: text('id').primaryKey(),
+    videoUri: text('video_uri')
+      .notNull()
+      .references(() => videos.uri, { onDelete: 'cascade' }),
+    userDid: text('user_did').notNull(),
+    quality: text('quality').notNull(), // '360p' | '720p'
+    downloadUrl: text('download_url').notNull(),
+    fileSize: integer('file_size').notNull(),
+    expiresAt: timestamp('expires_at').notNull(),
+    downloadedAt: timestamp('downloaded_at'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    videoIdx: index('offline_downloads_video_idx').on(table.videoUri),
+    userIdx: index('offline_downloads_user_idx').on(table.userDid),
+    videoUserIdx: uniqueIndex('offline_downloads_video_user_quality_idx').on(
+      table.videoUri,
+      table.userDid,
+      table.quality
+    ),
+    expiresIdx: index('offline_downloads_expires_idx').on(table.expiresAt),
+  })
+);
+
+// Type exports for adaptive streaming tables
+export type VideoVariant = typeof videoVariants.$inferSelect;
+export type NewVideoVariant = typeof videoVariants.$inferInsert;
+export type TranscodeJob = typeof transcodeJobs.$inferSelect;
+export type NewTranscodeJob = typeof transcodeJobs.$inferInsert;
+export type ThumbnailSprite = typeof thumbnailSprites.$inferSelect;
+export type NewThumbnailSprite = typeof thumbnailSprites.$inferInsert;
+export type OfflineDownload = typeof offlineDownloads.$inferSelect;
+export type NewOfflineDownload = typeof offlineDownloads.$inferInsert;
+
+// Type exports for video processing tables
+export type DeadLetterQueueEntry = typeof deadLetterQueue.$inferSelect;
+export type NewDeadLetterQueueEntry = typeof deadLetterQueue.$inferInsert;
+export type WebhookSubscription = typeof webhookSubscriptions.$inferSelect;
+export type NewWebhookSubscription = typeof webhookSubscriptions.$inferInsert;
+export type WebhookDelivery = typeof webhookDeliveries.$inferSelect;
+export type NewWebhookDelivery = typeof webhookDeliveries.$inferInsert;
+
+// Type exports for domain management
+export type DomainTransfer = typeof domainTransfers.$inferSelect;
+export type NewDomainTransfer = typeof domainTransfers.$inferInsert;
+
+// Type exports for analytics tables
+export type VideoView = typeof videoViews.$inferSelect;
+export type NewVideoView = typeof videoViews.$inferInsert;
+export type VideoHashtag = typeof videoHashtags.$inferSelect;
+export type NewVideoHashtag = typeof videoHashtags.$inferInsert;
+export type Tip = typeof tips.$inferSelect;
+export type NewTip = typeof tips.$inferInsert;
+
+// Type exports for theme tables
+export type Theme = typeof themes.$inferSelect;
+export type NewTheme = typeof themes.$inferInsert;

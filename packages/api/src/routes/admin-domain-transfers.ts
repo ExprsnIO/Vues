@@ -77,7 +77,7 @@ adminDomainTransfersRouter.use('*', adminAuthMiddleware);
  */
 adminDomainTransfersRouter.post(
   '/io.exprsn.admin.domains.transfer.initiate',
-  requirePermission(ADMIN_PERMISSIONS.MANAGE_DOMAINS),
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
   async (c) => {
     const body = await c.req.json<{
       domainId: string;
@@ -228,12 +228,12 @@ adminDomainTransfersRouter.post(
     }
 
     // Broadcast admin activity
-    await broadcastAdminActivity({
-      type: 'domain_transfer_initiated',
-      actorDid,
-      actorHandle: actorDid,
-      message: `Initiated transfer for domain "${domain.name}"`,
-      metadata: { transferId, domainId: body.domainId },
+    broadcastAdminActivity({
+      adminDid: actorDid,
+      adminHandle: actorDid,
+      action: 'domain_transfer_initiated',
+      targetType: 'domain',
+      targetId: body.domainId,
     });
 
     // Fetch and return the created transfer
@@ -256,7 +256,7 @@ adminDomainTransfersRouter.post(
  */
 adminDomainTransfersRouter.post(
   '/io.exprsn.admin.domains.transfer.approve',
-  requirePermission(ADMIN_PERMISSIONS.MANAGE_DOMAINS),
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
   async (c) => {
     const body = await c.req.json<{
       transferId: string;
@@ -359,12 +359,12 @@ adminDomainTransfersRouter.post(
     });
 
     // Broadcast admin activity
-    await broadcastAdminActivity({
-      type: 'domain_transfer_approved',
-      actorDid,
-      actorHandle: actorDid,
-      message: `Approved transfer for domain "${domain.name}"`,
-      metadata: { transferId: body.transferId, domainId: transfer.domainId },
+    broadcastAdminActivity({
+      adminDid: actorDid,
+      adminHandle: actorDid,
+      action: 'domain_transfer_approved',
+      targetType: 'domain',
+      targetId: transfer.domainId,
     });
 
     return c.json({
@@ -380,7 +380,7 @@ adminDomainTransfersRouter.post(
  */
 adminDomainTransfersRouter.post(
   '/io.exprsn.admin.domains.transfer.reject',
-  requirePermission(ADMIN_PERMISSIONS.MANAGE_DOMAINS),
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
   async (c) => {
     const body = await c.req.json<{
       transferId: string;
@@ -461,12 +461,12 @@ adminDomainTransfersRouter.post(
     });
 
     // Broadcast admin activity
-    await broadcastAdminActivity({
-      type: 'domain_transfer_rejected',
-      actorDid,
-      actorHandle: actorDid,
-      message: `Rejected transfer for domain "${domain.name}"`,
-      metadata: { transferId: body.transferId, domainId: transfer.domainId },
+    broadcastAdminActivity({
+      adminDid: actorDid,
+      adminHandle: actorDid,
+      action: 'domain_transfer_rejected',
+      targetType: 'domain',
+      targetId: transfer.domainId,
     });
 
     return c.json({
@@ -482,7 +482,7 @@ adminDomainTransfersRouter.post(
  */
 adminDomainTransfersRouter.post(
   '/io.exprsn.admin.domains.transfer.cancel',
-  requirePermission(ADMIN_PERMISSIONS.MANAGE_DOMAINS),
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
   async (c) => {
     const body = await c.req.json<{
       transferId: string;
@@ -562,12 +562,12 @@ adminDomainTransfersRouter.post(
     });
 
     // Broadcast admin activity
-    await broadcastAdminActivity({
-      type: 'domain_transfer_cancelled',
-      actorDid,
-      actorHandle: actorDid,
-      message: `Cancelled transfer for domain "${domain.name}"`,
-      metadata: { transferId: body.transferId, domainId: transfer.domainId },
+    broadcastAdminActivity({
+      adminDid: actorDid,
+      adminHandle: actorDid,
+      action: 'domain_transfer_cancelled',
+      targetType: 'domain',
+      targetId: transfer.domainId,
     });
 
     return c.json({
@@ -583,7 +583,7 @@ adminDomainTransfersRouter.post(
  */
 adminDomainTransfersRouter.get(
   '/io.exprsn.admin.domains.transfer.pending',
-  requirePermission(ADMIN_PERMISSIONS.MANAGE_DOMAINS),
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
   async (c) => {
     const domainId = c.req.query('domainId');
     const organizationId = c.req.query('organizationId');
@@ -591,7 +591,32 @@ adminDomainTransfersRouter.get(
     const limit = Math.min(parseInt(c.req.query('limit') || '50', 10), 100);
     const offset = parseInt(c.req.query('offset') || '0', 10);
 
-    let query = db
+    // Build where conditions
+    const conditions: any[] = [eq(domainTransfers.status, 'pending')];
+
+    // Filter by domain
+    if (domainId) {
+      conditions.push(eq(domainTransfers.domainId, domainId));
+    }
+
+    // Filter by organization and direction
+    if (organizationId && direction) {
+      if (direction === 'incoming') {
+        conditions.push(eq(domainTransfers.targetOrganizationId, organizationId));
+      } else if (direction === 'outgoing') {
+        conditions.push(eq(domainTransfers.sourceOrganizationId, organizationId));
+      }
+    } else if (organizationId) {
+      // Show both incoming and outgoing
+      conditions.push(
+        or(
+          eq(domainTransfers.sourceOrganizationId, organizationId),
+          eq(domainTransfers.targetOrganizationId, organizationId)
+        )
+      );
+    }
+
+    const query = db
       .select({
         transfer: domainTransfers,
         domain: domains,
@@ -608,32 +633,10 @@ adminDomainTransfersRouter.get(
         organizations,
         eq(domainTransfers.targetOrganizationId, organizations.id)
       )
-      .where(eq(domainTransfers.status, 'pending'))
+      .where(conditions.length > 0 ? and(...conditions) : undefined)
       .orderBy(desc(domainTransfers.initiatedAt))
       .limit(limit)
       .offset(offset);
-
-    // Filter by domain
-    if (domainId) {
-      query = query.where(eq(domainTransfers.domainId, domainId)) as typeof query;
-    }
-
-    // Filter by organization and direction
-    if (organizationId && direction) {
-      if (direction === 'incoming') {
-        query = query.where(eq(domainTransfers.targetOrganizationId, organizationId)) as typeof query;
-      } else if (direction === 'outgoing') {
-        query = query.where(eq(domainTransfers.sourceOrganizationId, organizationId)) as typeof query;
-      }
-    } else if (organizationId) {
-      // Show both incoming and outgoing
-      query = query.where(
-        or(
-          eq(domainTransfers.sourceOrganizationId, organizationId),
-          eq(domainTransfers.targetOrganizationId, organizationId)
-        )
-      ) as typeof query;
-    }
 
     const results = await query;
 
@@ -659,7 +662,7 @@ adminDomainTransfersRouter.get(
  */
 adminDomainTransfersRouter.get(
   '/io.exprsn.admin.domains.transfer.history',
-  requirePermission(ADMIN_PERMISSIONS.MANAGE_DOMAINS),
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
   async (c) => {
     const domainId = c.req.query('domainId');
     const limit = Math.min(parseInt(c.req.query('limit') || '50', 10), 100);
@@ -713,7 +716,7 @@ adminDomainTransfersRouter.get(
  */
 adminDomainTransfersRouter.get(
   '/io.exprsn.admin.domains.transfer.get',
-  requirePermission(ADMIN_PERMISSIONS.MANAGE_DOMAINS),
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
   async (c) => {
     const transferId = c.req.query('transferId');
 

@@ -64,6 +64,13 @@ class MemoryCache {
     entry.expiresAt = Date.now() + ttlSeconds * 1000;
     return 1;
   }
+
+  async ttl(key: string): Promise<number> {
+    const entry = this.store.get(key);
+    if (!entry || !entry.expiresAt) return -1;
+    const remaining = Math.ceil((entry.expiresAt - Date.now()) / 1000);
+    return remaining > 0 ? remaining : -2;
+  }
 }
 
 type CacheBackend = InstanceType<typeof Redis> | MemoryCache;
@@ -120,10 +127,42 @@ cacheType = initResult.type;
 
 export { redis, cacheType };
 
+/**
+ * Get the Redis connection for BullMQ queues.
+ * Returns connection options compatible with BullMQ.
+ */
+export function getRedisConnection(): { host: string; port: number; password?: string; db?: number } {
+  if (!redisUrl) {
+    return { host: 'localhost', port: 6379 };
+  }
+
+  try {
+    const url = new URL(redisUrl);
+    return {
+      host: url.hostname,
+      port: parseInt(url.port || '6379', 10),
+      password: url.password || undefined,
+      db: url.pathname ? parseInt(url.pathname.slice(1), 10) : 0,
+    };
+  } catch {
+    return { host: 'localhost', port: 6379 };
+  }
+}
+
+/**
+ * Get the raw Redis URL for services that need it.
+ */
+export function getRedisUrl(): string {
+  return redisUrl || 'redis://localhost:6379';
+}
+
 export const CacheKeys = {
   // User data (TTL: 5 min)
   user: (did: string) => `user:${did}`,
   userProfile: (did: string) => `user:profile:${did}`,
+
+  // DID resolution (TTL: 1 hour)
+  did: (did: string) => `did:${did}`,
 
   // Video data (TTL: 1 min)
   video: (uri: string) => `video:${uri}`,

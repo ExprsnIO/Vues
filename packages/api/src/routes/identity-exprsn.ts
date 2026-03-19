@@ -6,8 +6,16 @@
 
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
-import { adminAuthMiddleware, requirePermission, ADMIN_PERMISSIONS, authMiddleware } from '../auth/middleware.js';
+import { adminAuthMiddleware, requirePermission, ADMIN_PERMISSIONS, authMiddleware, optionalAuthMiddleware } from '../auth/middleware.js';
 import { ExprsnDidService } from '../services/did/exprsn.js';
+import { db } from '../db/index.js';
+import {
+  organizations,
+  exprsnDidCertificates,
+  organizationIntermediateCAs,
+  caEntityCertificates,
+} from '../db/schema.js';
+import { eq, and } from 'drizzle-orm';
 import type { OrganizationType } from '@exprsn/shared';
 
 const identityExprsnRouter = new Hono();
@@ -52,13 +60,26 @@ identityExprsnRouter.post('/io.exprsn.identity.createDid', async (c) => {
           throw new HTTPException(400, { message: 'organizationId required for organization certificate' });
         }
 
-        // Get organization details (would need to fetch from DB)
-        // For now, we'll use placeholder values - this should be integrated with org service
+        // Get organization details from database
+        const [org] = await db
+          .select({
+            id: organizations.id,
+            name: organizations.name,
+            type: organizations.type,
+          })
+          .from(organizations)
+          .where(eq(organizations.id, body.organizationId))
+          .limit(1);
+
+        if (!org) {
+          throw new HTTPException(404, { message: 'Organization not found' });
+        }
+
         result = await ExprsnDidService.createOrganizationDid({
           handle,
           organizationId: body.organizationId,
-          organizationType: 'enterprise' as OrganizationType, // TODO: fetch from org record
-          organizationName: 'Organization', // TODO: fetch from org record
+          organizationType: (org.type || 'enterprise') as OrganizationType,
+          organizationName: org.name,
           email: body.email,
         });
         break;
@@ -401,6 +422,58 @@ identityExprsnRouter.get('/io.exprsn.identity.getDidDocument', async (c) => {
       message: error instanceof Error ? error.message : 'Failed to fetch DID document',
     });
   }
+});
+
+/**
+ * GET /xrpc/io.exprsn.identity.verifyMembership
+ * Verify that a DID is a certified member of an organization via certificate chain
+ */
+identityExprsnRouter.get('/io.exprsn.identity.verifyMembership', optionalAuthMiddleware, async (c) => {
+  const memberDid = c.req.query('memberDid');
+  const orgId = c.req.query('orgId');
+
+  if (!memberDid || !orgId) return c.json({ error: 'memberDid and orgId required' }, 400);
+
+  // Look up member's certificate
+  const [memberCert] = await db.select()
+    .from(exprsnDidCertificates)
+    .where(eq(exprsnDidCertificates.did, memberDid))
+    .limit(1);
+
+  if (!memberCert || !memberCert.issuerIntermediateId) {
+    return c.json({ verified: false, reason: 'No org-issued certificate' });
+  }
+
+  // Check if the intermediate CA belongs to this org
+  const [intermediateCa] = await db.select()
+    .from(organizationIntermediateCAs)
+    .where(and(
+      eq(organizationIntermediateCAs.id, memberCert.issuerIntermediateId),
+      eq(organizationIntermediateCAs.organizationId, orgId)
+    ))
+    .limit(1);
+
+  if (!intermediateCa) {
+    return c.json({ verified: false, reason: 'Certificate not issued by this organization' });
+  }
+
+  // Get org info
+  const [org] = await db.select({ name: organizations.name })
+    .from(organizations).where(eq(organizations.id, orgId)).limit(1);
+
+  // Get certificate validity
+  const [entityCert] = await db.select()
+    .from(caEntityCertificates)
+    .where(eq(caEntityCertificates.id, memberCert.certificateId))
+    .limit(1);
+
+  return c.json({
+    verified: true,
+    orgName: org?.name,
+    certifiedSince: entityCert?.notBefore,
+    certifiedUntil: entityCert?.notAfter,
+    certificateStatus: memberCert.status,
+  });
 });
 
 export { identityExprsnRouter };

@@ -1,10 +1,11 @@
 'use client';
 
-import { ReactNode, useState, useMemo, useCallback } from 'react';
+import { ReactNode, useState, useMemo, useCallback, useRef, useEffect } from 'react';
 import { NoResultsState, NoDataState } from './EmptyState';
 import { TableSkeleton } from './LoadingSkeleton';
 
 export type SortDirection = 'asc' | 'desc' | null;
+export type RowDensity = 'compact' | 'default' | 'comfortable';
 
 export interface Column<T> {
   key: string;
@@ -13,6 +14,8 @@ export interface Column<T> {
   width?: string;
   align?: 'left' | 'center' | 'right';
   render?: (row: T, index: number) => ReactNode;
+  /** Whether this column can be hidden. Defaults to true. */
+  hideable?: boolean;
 }
 
 interface DataTableProps<T> {
@@ -20,6 +23,7 @@ interface DataTableProps<T> {
   columns: Column<T>[];
   keyExtractor: (row: T) => string;
   loading?: boolean;
+  isLoading?: boolean;
   emptyState?: ReactNode;
   emptyMessage?: string;
   // Selection
@@ -38,16 +42,37 @@ interface DataTableProps<T> {
   pageSize?: number;
   currentPage?: number;
   onPageChange?: (page: number) => void;
-  // Compact mode
+  // Compact mode (legacy)
   compact?: boolean;
   className?: string;
+  // Column visibility
+  columnVisibility?: boolean;
+  hiddenColumns?: string[];
+  onHiddenColumnsChange?: (keys: string[]) => void;
+  // Row density
+  density?: RowDensity;
+  showDensityToggle?: boolean;
+  onDensityChange?: (density: RowDensity) => void;
+  // Virtual scrolling
+  virtualScroll?: boolean;
+  virtualRowHeight?: number;
+  virtualContainerHeight?: number;
+  // Toolbar slot
+  toolbar?: ReactNode;
 }
+
+const DENSITY_PADDING: Record<RowDensity, string> = {
+  compact: 'px-3 py-1.5',
+  default: 'px-4 py-3',
+  comfortable: 'px-4 py-4',
+};
 
 export function DataTable<T extends Record<string, any>>({
   data,
   columns,
   keyExtractor,
-  loading = false,
+  loading: loadingProp,
+  isLoading,
   emptyState,
   emptyMessage,
   selectable = false,
@@ -64,7 +89,55 @@ export function DataTable<T extends Record<string, any>>({
   onPageChange,
   compact = false,
   className = '',
+  columnVisibility = false,
+  hiddenColumns: hiddenColumnsProp,
+  onHiddenColumnsChange,
+  density: densityProp,
+  showDensityToggle = false,
+  onDensityChange,
+  virtualScroll = false,
+  virtualRowHeight = 48,
+  virtualContainerHeight = 600,
+  toolbar,
 }: DataTableProps<T>) {
+  const loading = loadingProp ?? isLoading ?? false;
+
+  // Column visibility state (internal or controlled)
+  const [internalHiddenCols, setInternalHiddenCols] = useState<string[]>([]);
+  const hiddenColumns = hiddenColumnsProp ?? internalHiddenCols;
+  const setHiddenColumns = onHiddenColumnsChange ?? setInternalHiddenCols;
+  const [showColumnMenu, setShowColumnMenu] = useState(false);
+  const columnMenuRef = useRef<HTMLDivElement>(null);
+
+  // Density state (internal or controlled)
+  const [internalDensity, setInternalDensity] = useState<RowDensity>('default');
+  const density = densityProp ?? (compact ? 'compact' : internalDensity);
+  const setDensity = onDensityChange ?? setInternalDensity;
+
+  const cellPadding = DENSITY_PADDING[density];
+
+  // Virtual scrolling state
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+
+  // Close column menu on outside click
+  useEffect(() => {
+    if (!showColumnMenu) return;
+    const handleClick = (e: MouseEvent) => {
+      if (columnMenuRef.current && !columnMenuRef.current.contains(e.target as Node)) {
+        setShowColumnMenu(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [showColumnMenu]);
+
+  // Filter visible columns
+  const visibleColumns = useMemo(
+    () => columns.filter((col) => !hiddenColumns.includes(col.key)),
+    [columns, hiddenColumns]
+  );
+
   const allKeys = useMemo(() => data.map(keyExtractor), [data, keyExtractor]);
   const allSelected = allKeys.length > 0 && allKeys.every((k) => selectedKeys.includes(k));
   const someSelected = selectedKeys.length > 0 && !allSelected;
@@ -91,7 +164,6 @@ export function DataTable<T extends Record<string, any>>({
   const handleSort = useCallback(
     (key: string) => {
       if (!onSort) return;
-
       let newDirection: SortDirection = 'asc';
       if (sortKey === key) {
         if (sortDirection === 'asc') newDirection = 'desc';
@@ -102,10 +174,35 @@ export function DataTable<T extends Record<string, any>>({
     [sortKey, sortDirection, onSort]
   );
 
+  const toggleColumnVisibility = useCallback(
+    (key: string) => {
+      if (hiddenColumns.includes(key)) {
+        setHiddenColumns(hiddenColumns.filter((k) => k !== key));
+      } else {
+        setHiddenColumns([...hiddenColumns, key]);
+      }
+    },
+    [hiddenColumns, setHiddenColumns]
+  );
+
   const totalPages = totalCount ? Math.ceil(totalCount / pageSize) : 1;
 
+  // Virtual scrolling calculations
+  const virtualStartIndex = virtualScroll ? Math.floor(scrollTop / virtualRowHeight) : 0;
+  const virtualEndIndex = virtualScroll
+    ? Math.min(data.length, virtualStartIndex + Math.ceil(virtualContainerHeight / virtualRowHeight) + 2)
+    : data.length;
+  const virtualVisibleData = virtualScroll ? data.slice(virtualStartIndex, virtualEndIndex) : data;
+  const totalVirtualHeight = virtualScroll ? data.length * virtualRowHeight : 0;
+
+  const handleScroll = useCallback(() => {
+    if (scrollContainerRef.current) {
+      setScrollTop(scrollContainerRef.current.scrollTop);
+    }
+  }, []);
+
   if (loading) {
-    return <TableSkeleton rows={5} columns={columns.length + (selectable ? 1 : 0)} />;
+    return <TableSkeleton rows={5} columns={visibleColumns.length + (selectable ? 1 : 0)} />;
   }
 
   if (data.length === 0) {
@@ -118,14 +215,88 @@ export function DataTable<T extends Record<string, any>>({
     );
   }
 
+  const showToolbar = columnVisibility || showDensityToggle || toolbar;
+
   return (
     <div className={`overflow-hidden rounded-xl border border-border ${className}`}>
-      <div className="overflow-x-auto">
+      {/* Toolbar */}
+      {showToolbar && (
+        <div className="px-4 py-2 border-b border-border flex items-center gap-2 bg-surface">
+          {toolbar}
+          <div className="flex-1" />
+
+          {/* Density Toggle */}
+          {showDensityToggle && (
+            <div className="flex items-center bg-surface-hover rounded-md p-0.5">
+              {(['compact', 'default', 'comfortable'] as RowDensity[]).map((d) => (
+                <button
+                  key={d}
+                  onClick={() => setDensity(d)}
+                  className={`px-2 py-1 text-xs rounded transition-colors ${
+                    density === d
+                      ? 'bg-surface text-text-primary shadow-sm'
+                      : 'text-text-muted hover:text-text-secondary'
+                  }`}
+                  title={`${d.charAt(0).toUpperCase() + d.slice(1)} density`}
+                >
+                  <DensityIcon density={d} className="w-3.5 h-3.5" />
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* Column Visibility */}
+          {columnVisibility && (
+            <div className="relative" ref={columnMenuRef}>
+              <button
+                onClick={() => setShowColumnMenu(!showColumnMenu)}
+                className="p-1.5 rounded-md text-text-muted hover:text-text-primary hover:bg-surface-hover transition-colors"
+                title="Toggle columns"
+              >
+                <ColumnsIcon className="w-4 h-4" />
+              </button>
+              {showColumnMenu && (
+                <div className="absolute right-0 top-full mt-1 w-48 bg-surface border border-border rounded-lg shadow-lg z-50 py-1">
+                  <p className="px-3 py-1.5 text-xs font-medium text-text-muted">Visible Columns</p>
+                  {columns.map((col) => {
+                    if (col.hideable === false) return null;
+                    const isHidden = hiddenColumns.includes(col.key);
+                    return (
+                      <label
+                        key={col.key}
+                        className="flex items-center gap-2 px-3 py-1.5 hover:bg-surface-hover cursor-pointer text-sm"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={!isHidden}
+                          onChange={() => toggleColumnVisibility(col.key)}
+                          className="w-3.5 h-3.5 rounded border-border text-accent focus:ring-accent"
+                        />
+                        <span className={isHidden ? 'text-text-muted' : 'text-text-primary'}>
+                          {col.header}
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Table */}
+      <div
+        ref={virtualScroll ? scrollContainerRef : undefined}
+        onScroll={virtualScroll ? handleScroll : undefined}
+        className="overflow-x-auto"
+        style={virtualScroll ? { maxHeight: virtualContainerHeight, overflowY: 'auto' } : undefined}
+      >
         <table className="w-full">
-          <thead className="bg-surface-hover">
+          <thead className="bg-surface-hover sticky top-0 z-10">
             <tr>
               {selectable && (
-                <th className={`${compact ? 'px-3 py-2' : 'px-4 py-3'} w-12`}>
+                <th className={`${cellPadding} w-12`}>
                   <input
                     type="checkbox"
                     checked={allSelected}
@@ -138,11 +309,11 @@ export function DataTable<T extends Record<string, any>>({
                   />
                 </th>
               )}
-              {columns.map((column) => (
+              {visibleColumns.map((column) => (
                 <th
                   key={column.key}
                   className={`
-                    ${compact ? 'px-3 py-2' : 'px-4 py-3'}
+                    ${cellPadding}
                     text-xs font-medium text-text-muted uppercase tracking-wider
                     ${column.align === 'center' ? 'text-center' : ''}
                     ${column.align === 'right' ? 'text-right' : 'text-left'}
@@ -166,12 +337,7 @@ export function DataTable<T extends Record<string, any>>({
                           viewBox="0 0 24 24"
                           stroke="currentColor"
                         >
-                          <path
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            strokeWidth={2}
-                            d="M5 15l7-7 7 7"
-                          />
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" />
                         </svg>
                         <svg
                           className={`w-3 h-3 -mt-1 ${
@@ -183,12 +349,7 @@ export function DataTable<T extends Record<string, any>>({
                           viewBox="0 0 24 24"
                           stroke="currentColor"
                         >
-                          <path
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            strokeWidth={2}
-                            d="M19 9l-7 7-7-7"
-                          />
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
                         </svg>
                       </span>
                     </button>
@@ -200,7 +361,18 @@ export function DataTable<T extends Record<string, any>>({
             </tr>
           </thead>
           <tbody className="divide-y divide-border">
-            {data.map((row, index) => {
+            {/* Virtual scroll spacer (top) */}
+            {virtualScroll && virtualStartIndex > 0 && (
+              <tr>
+                <td
+                  colSpan={visibleColumns.length + (selectable ? 1 : 0)}
+                  style={{ height: virtualStartIndex * virtualRowHeight }}
+                />
+              </tr>
+            )}
+
+            {virtualVisibleData.map((row, visibleIndex) => {
+              const actualIndex = virtualScroll ? virtualStartIndex + visibleIndex : visibleIndex;
               const key = keyExtractor(row);
               const isSelected = selectedKeys.includes(key);
 
@@ -214,12 +386,10 @@ export function DataTable<T extends Record<string, any>>({
                     ${rowClassName?.(row) || ''}
                   `}
                   onClick={() => onRowClick?.(row)}
+                  style={virtualScroll ? { height: virtualRowHeight } : undefined}
                 >
                   {selectable && (
-                    <td
-                      className={`${compact ? 'px-3 py-2' : 'px-4 py-3'}`}
-                      onClick={(e) => e.stopPropagation()}
-                    >
+                    <td className={cellPadding} onClick={(e) => e.stopPropagation()}>
                       <input
                         type="checkbox"
                         checked={isSelected}
@@ -229,24 +399,34 @@ export function DataTable<T extends Record<string, any>>({
                       />
                     </td>
                   )}
-                  {columns.map((column) => (
+                  {visibleColumns.map((column) => (
                     <td
                       key={column.key}
                       className={`
-                        ${compact ? 'px-3 py-2' : 'px-4 py-3'}
+                        ${cellPadding}
                         text-sm text-text-primary
                         ${column.align === 'center' ? 'text-center' : ''}
                         ${column.align === 'right' ? 'text-right' : 'text-left'}
                       `}
                     >
                       {column.render
-                        ? column.render(row, index)
+                        ? column.render(row, actualIndex)
                         : (row[column.key] as ReactNode)}
                     </td>
                   ))}
                 </tr>
               );
             })}
+
+            {/* Virtual scroll spacer (bottom) */}
+            {virtualScroll && virtualEndIndex < data.length && (
+              <tr>
+                <td
+                  colSpan={visibleColumns.length + (selectable ? 1 : 0)}
+                  style={{ height: (data.length - virtualEndIndex) * virtualRowHeight }}
+                />
+              </tr>
+            )}
           </tbody>
         </table>
       </div>
@@ -322,6 +502,29 @@ function generatePageNumbers(
   }
 
   return pages;
+}
+
+// Density icon
+function DensityIcon({ density, className }: { density: RowDensity; className?: string }) {
+  const gaps = { compact: 2, default: 4, comfortable: 6 };
+  const gap = gaps[density];
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" d={`M4 ${6}h16`} />
+      <path strokeLinecap="round" d={`M4 ${6 + gap}h16`} />
+      <path strokeLinecap="round" d={`M4 ${6 + gap * 2}h16`} />
+      {density !== 'compact' && <path strokeLinecap="round" d={`M4 ${6 + gap * 3}h16`} />}
+    </svg>
+  );
+}
+
+// Columns visibility icon
+function ColumnsIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M9 4.5v15m6-15v15M4.5 19.5h15a1.5 1.5 0 001.5-1.5V6a1.5 1.5 0 00-1.5-1.5h-15A1.5 1.5 0 003 6v12a1.5 1.5 0 001.5 1.5z" />
+    </svg>
+  );
 }
 
 // Simple table for basic use cases

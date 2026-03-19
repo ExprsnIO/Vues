@@ -229,7 +229,7 @@ export class SecurityService {
         AND revoked = 0
     `);
 
-    const count = Number((activeTokens.rows[0] as any)?.count) || 0;
+    const count = Number((activeTokens[0] as any)?.count) || 0;
     if (count >= this.tokenConfig.maxActiveTokens) {
       // Revoke oldest token
       await db.execute(sql`
@@ -302,9 +302,9 @@ export class SecurityService {
         AND revoked = 0
     `);
 
-    if (result.rows.length === 0) return null;
+    if (result.length === 0) return null;
 
-    const row = result.rows[0] as any;
+    const row = result[0] as any;
 
     // Verify token hash
     const isValid = await this.verifyToken(tokenValue, row.token_hash);
@@ -351,11 +351,11 @@ export class SecurityService {
         AND rt.revoked = 0
     `);
 
-    if (result.rows.length === 0) {
+    if (result.length === 0) {
       throw new Error('Invalid or expired refresh token');
     }
 
-    const row = result.rows[0] as any;
+    const row = result[0] as any;
 
     // Verify token hash
     const isValid = await this.verifyToken(tokenValue, row.token_hash);
@@ -610,9 +610,9 @@ export class SecurityService {
         AND mc.attempts < mc.max_attempts
     `);
 
-    if (result.rows.length === 0) return false;
+    if (result.length === 0) return false;
 
-    const challenge = result.rows[0] as any;
+    const challenge = result[0] as any;
 
     // Increment attempts
     await db.execute(sql`
@@ -668,9 +668,9 @@ export class SecurityService {
       WHERE user_id = ${userId} AND method = ${method}
     `);
 
-    if (result.rows.length === 0) return null;
+    if (result.length === 0) return null;
 
-    const row = result.rows[0] as any;
+    const row = result[0] as any;
     return {
       userId: row.user_id,
       method: row.method,
@@ -696,7 +696,7 @@ export class SecurityService {
       WHERE user_id = ${userId} AND enabled = 1
     `);
 
-    return (result.rows as any[]).map(row => ({
+    return (result as any[]).map(row => ({
       userId: row.user_id,
       method: row.method,
       enabled: Boolean(row.enabled),
@@ -831,7 +831,7 @@ export class SecurityService {
     const bytes = new Uint8Array(length);
     crypto.getRandomValues(bytes);
     for (let i = 0; i < length; i++) {
-      code += (bytes[i] % 10).toString();
+      code += ((bytes[i] ?? 0) % 10).toString();
     }
     return code;
   }
@@ -902,8 +902,8 @@ export class SecurityService {
       LIMIT 1
     `);
 
-    if (result.rows.length > 0) {
-      const row = result.rows[0] as any;
+    if (result.length > 0) {
+      const row = result[0] as any;
       this.encryptionKeys.set(row.id, {
         id: row.id,
         key: row.key_value,
@@ -945,8 +945,8 @@ export class SecurityService {
       SELECT * FROM encryption_keys WHERE id = ${keyId}
     `);
 
-    if (result.rows.length > 0) {
-      const row = result.rows[0] as any;
+    if (result.length > 0) {
+      const row = result[0] as any;
       this.encryptionKeys.set(row.id, {
         id: row.id,
         key: row.key_value,

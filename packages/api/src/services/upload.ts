@@ -5,17 +5,31 @@ import { generateId } from '@exprsn/shared';
 import { redis, CacheKeys } from '../cache/redis.js';
 import { db, uploadJobs } from '../db/index.js';
 import { eq } from 'drizzle-orm';
+import { adaptiveTranscodeService } from './streaming/index.js';
 
-// S3 client for DigitalOcean Spaces
-const s3 = new S3Client({
-  endpoint: process.env.DO_SPACES_ENDPOINT || `https://${process.env.DO_SPACES_REGION}.digitaloceanspaces.com`,
-  region: process.env.DO_SPACES_REGION || 'nyc3',
-  credentials: {
-    accessKeyId: process.env.DO_SPACES_KEY!,
-    secretAccessKey: process.env.DO_SPACES_SECRET!,
-  },
-  forcePathStyle: true, // Required for MinIO compatibility in local dev
-});
+// S3 client for DigitalOcean Spaces (lazy-initialized)
+const s3Key = process.env.DO_SPACES_KEY || process.env.S3_ACCESS_KEY;
+const s3Secret = process.env.DO_SPACES_SECRET || process.env.S3_SECRET_KEY;
+
+if (!s3Key || !s3Secret) {
+  console.warn('[upload] S3 credentials not configured — uploads will fail');
+}
+
+let _s3: S3Client | null = null;
+function getS3Client(): S3Client {
+  if (!_s3) {
+    _s3 = new S3Client({
+      endpoint: process.env.DO_SPACES_ENDPOINT || `https://${process.env.DO_SPACES_REGION}.digitaloceanspaces.com`,
+      region: process.env.DO_SPACES_REGION || 'nyc3',
+      credentials: {
+        accessKeyId: s3Key || '',
+        secretAccessKey: s3Secret || '',
+      },
+      forcePathStyle: true, // Required for MinIO compatibility in local dev
+    });
+  }
+  return _s3;
+}
 
 // BullMQ queue for video transcoding jobs
 const transcodeQueue = new Queue('transcode', {
@@ -36,13 +50,27 @@ export interface UploadStatus {
   progress: number;
   cdnUrl?: string;
   hlsPlaylist?: string;
+  dashManifest?: string;
   thumbnail?: string;
+  thumbnailSprite?: string;
+  availableQualities?: string[];
   error?: string;
   // Retry information
   retryCount?: number;
   maxRetries?: number;
   canRetry?: boolean;
   lastRetryAt?: string;
+}
+
+export interface AdaptiveStreamingOptions {
+  enableAdaptive?: boolean;
+  targetQualities?: ('360p' | '480p' | '720p' | '1080p' | '1440p' | '4k')[];
+  enableHls?: boolean;
+  enableDash?: boolean;
+  enableThumbnails?: boolean;
+  enableOffline?: boolean;
+  offlineQualities?: ('360p' | '480p' | '720p' | '1080p')[];
+  priority?: 'low' | 'normal' | 'high';
 }
 
 class UploadService {
@@ -59,7 +87,7 @@ class UploadService {
       ContentType: contentType,
     });
 
-    const uploadUrl = await getSignedUrl(s3, command, { expiresIn: 3600 });
+    const uploadUrl = await getSignedUrl(getS3Client(), command, { expiresIn: 3600 });
 
     // Store upload metadata in Redis
     const uploadData: UploadStatus & { userId: string; key: string } = {
@@ -89,8 +117,13 @@ class UploadService {
 
   /**
    * Mark upload as complete and queue transcoding job
+   * @param uploadId - The upload ID to complete
+   * @param options - Optional adaptive streaming configuration
    */
-  async completeUpload(uploadId: string): Promise<void> {
+  async completeUpload(
+    uploadId: string,
+    options: AdaptiveStreamingOptions = {}
+  ): Promise<{ transcodeJobId?: string }> {
     const cached = await redis.get(CacheKeys.upload(uploadId));
     if (!cached) {
       throw new Error('Upload not found');
@@ -109,7 +142,36 @@ class UploadService {
       .set({ status: 'processing', progress: 10, updatedAt: new Date() })
       .where(eq(uploadJobs.id, uploadId));
 
-    // Queue transcoding job
+    // Use adaptive transcode service if enabled (default: true)
+    const enableAdaptive = options.enableAdaptive !== false;
+
+    if (enableAdaptive) {
+      // Queue adaptive streaming transcode job
+      const transcodeJobId = await adaptiveTranscodeService.queueTranscode({
+        userDid: uploadData.userId,
+        videoUri: `at://${uploadData.userId}/app.bsky.feed.post/${uploadId}`,
+        inputKey: uploadData.key,
+        config: {
+          targetQualities: options.targetQualities || ['360p', '480p', '720p', '1080p'],
+          enableHls: options.enableHls !== false,
+          enableDash: options.enableDash !== false,
+          enableThumbnails: options.enableThumbnails !== false,
+          enableOffline: options.enableOffline !== false,
+          offlineQualities: options.offlineQualities || ['360p', '720p'],
+          segmentDuration: 4,
+          thumbnailInterval: 1,
+        },
+        priority: options.priority || 'normal',
+      });
+
+      // Store transcode job ID reference
+      uploadData.transcodeJobId = transcodeJobId;
+      await redis.setex(CacheKeys.upload(uploadId), 7200, JSON.stringify(uploadData));
+
+      return { transcodeJobId };
+    }
+
+    // Fallback to legacy single-quality transcode
     await transcodeQueue.add(
       'transcode',
       {
@@ -125,6 +187,8 @@ class UploadService {
         },
       }
     );
+
+    return {};
   }
 
   /**

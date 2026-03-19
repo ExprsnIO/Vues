@@ -1,5 +1,5 @@
 import { CronJob } from 'cron';
-import { dbType, executeRawSql } from '../db.js';
+import { executeRawSql } from '../db.js';
 import { sql } from 'drizzle-orm';
 
 export class TrendingCalculator {
@@ -23,12 +23,6 @@ export class TrendingCalculator {
   async calculate() {
     console.log('Calculating trending scores...');
 
-    // SQLite doesn't support the PostgreSQL-specific SQL syntax used here
-    if (dbType === 'sqlite') {
-      console.log('Trending calculation skipped (SQLite mode - use PostgreSQL for full functionality)');
-      return;
-    }
-
     try {
       // Calculate trending scores for videos from the last 48 hours
       // Score = (views*0.1 + likes + comments*2 + shares*3) / hours_since_post^1.5
@@ -38,6 +32,7 @@ export class TrendingCalculator {
         WITH video_scores AS (
           SELECT
             v.uri,
+            v.author_did,
             v.view_count,
             v.like_count,
             v.comment_count,
@@ -61,14 +56,16 @@ export class TrendingCalculator {
         ranked_videos AS (
           SELECT
             uri,
-            -- Trending score with time decay and velocity bonus
-            (engagement / POWER(GREATEST(hours_old, 1) + 2, 1.5)) + (recent_engagement * 10 / GREATEST(hours_old, 1)) AS score,
+            -- Trending score with time decay, velocity bonus, and did:exprsn identity boost
+            ((engagement / POWER(GREATEST(hours_old, 1) + 2, 1.5)) + (recent_engagement * 10 / GREATEST(hours_old, 1)))
+              * CASE WHEN v.author_did LIKE 'did:exprsn:%' THEN 1.15 ELSE 1.0 END AS score,
             recent_engagement / GREATEST(hours_old, 1) AS velocity,
             ROW_NUMBER() OVER (ORDER BY
-              (engagement / POWER(GREATEST(hours_old, 1) + 2, 1.5)) + (recent_engagement * 10 / GREATEST(hours_old, 1))
+              ((engagement / POWER(GREATEST(hours_old, 1) + 2, 1.5)) + (recent_engagement * 10 / GREATEST(hours_old, 1)))
+                * CASE WHEN v.author_did LIKE 'did:exprsn:%' THEN 1.15 ELSE 1.0 END
               DESC
             ) AS rank
-          FROM video_scores
+          FROM video_scores v
         )
         INSERT INTO trending_videos (video_uri, score, velocity, rank, updated_at)
         SELECT uri, score, velocity, rank, NOW()

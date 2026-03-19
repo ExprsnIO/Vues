@@ -148,12 +148,10 @@ export async function configureServices(
       }
     }
 
+    // During initial setup, missing config is a warning not a blocker
+    // Services can be fully configured after setup via environment variables
     if (missingConfig.length > 0) {
-      return {
-        success: false,
-        services: [],
-        error: `Missing configuration: ${missingConfig.join('; ')}`,
-      };
+      console.warn(`[setup] Services with missing config (will need env vars): ${missingConfig.join('; ')}`);
     }
 
     // Build final config with defaults

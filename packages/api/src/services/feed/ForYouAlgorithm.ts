@@ -244,9 +244,13 @@ export class ForYouAlgorithm {
         const normalizedTrending = candidate.trendingScore / maxTrendingScore;
 
         // Combined score: weighted average
-        const combinedScore =
+        const baseCombinedScore =
           normalizedTrending * this.trendingWeight +
           personalScore * (1 - this.trendingWeight);
+
+        // Identity boost for did:exprsn authors
+        const identityBoost = candidate.authorDid.startsWith('did:exprsn:') ? 1.15 : 1.0;
+        const combinedScore = baseCombinedScore * identityBoost;
 
         return {
           ...candidate,

@@ -65,6 +65,16 @@ const PROVIDER_TEMPLATES = [
     },
   },
   {
+    id: 'exprsn',
+    name: 'Exprsn',
+    type: 'oidc' as const,
+    description: 'Connect another Exprsn instance with scope management and role mapping',
+    config: {
+      scopes: ['openid', 'profile', 'email'],
+    },
+    isExprsn: true,
+  },
+  {
     id: 'custom-oidc',
     name: 'Custom OIDC',
     type: 'oidc' as const,
@@ -103,6 +113,15 @@ export default function NewSSOProviderPage() {
     }
   }, [domainId, setSelectedDomain]);
 
+  const handleTemplateSelect = (template: typeof PROVIDER_TEMPLATES[0]) => {
+    // Route Exprsn to dedicated config page with discovery, scope management, and role mapping
+    if (template.id === 'exprsn') {
+      router.push(`/admin/d/${domainId}/settings/sso/exprsn`);
+      return;
+    }
+    setSelectedTemplate(template);
+  };
+
   const createMutation = useMutation({
     mutationFn: (data: any) => api.adminDomainSSOProvidersAdd(domainId, data),
     onSuccess: (result) => {
@@ -127,11 +146,21 @@ export default function NewSSOProviderPage() {
           {PROVIDER_TEMPLATES.map((template) => (
             <button
               key={template.id}
-              onClick={() => setSelectedTemplate(template)}
-              className="p-5 bg-surface hover:bg-surface-hover border border-border hover:border-accent/50 rounded-xl text-left transition-all group"
+              onClick={() => handleTemplateSelect(template)}
+              className={`p-5 bg-surface hover:bg-surface-hover border rounded-xl text-left transition-all group ${
+                template.id === 'exprsn'
+                  ? 'border-accent/30 hover:border-accent ring-1 ring-accent/10'
+                  : 'border-border hover:border-accent/50'
+              }`}
             >
               <div className="flex items-start gap-4">
-                {template.logo ? (
+                {template.id === 'exprsn' ? (
+                  <div className="w-10 h-10 rounded-lg flex items-center justify-center bg-accent/10">
+                    <svg className="w-5 h-5 text-accent" viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M12 1L3 5v6c0 5.25 3.75 10.15 9 11.35C17.25 21.15 21 16.25 21 11V5l-9-4zm-1 13l-3-3 1.41-1.41L11 11.17l4.59-4.58L17 8l-6 6z" />
+                    </svg>
+                  </div>
+                ) : template.logo ? (
                   <img src={template.logo} alt="" className="w-10 h-10 object-contain" />
                 ) : (
                   <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${
@@ -152,10 +181,11 @@ export default function NewSSOProviderPage() {
                       {template.name}
                     </h4>
                     <Badge variant={
+                      template.id === 'exprsn' ? 'accent' :
                       template.type === 'oidc' ? 'info' :
                       template.type === 'saml' ? 'purple' : 'success'
                     } size="sm">
-                      {template.type.toUpperCase()}
+                      {template.id === 'exprsn' ? 'OIDC + SCOPES' : template.type.toUpperCase()}
                     </Badge>
                   </div>
                   <p className="text-xs text-text-muted mt-1">{template.description}</p>

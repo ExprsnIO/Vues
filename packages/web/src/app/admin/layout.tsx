@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
@@ -9,7 +9,9 @@ import { useAuth } from '@/lib/auth-context';
 import { api, QuickStats } from '@/lib/api';
 import { AdminDomainProvider, useAdminDomain } from '@/lib/admin-domain-context';
 import { DomainSelector } from '@/components/admin/DomainSelector';
-import { CommandPaletteProvider, useAdminCommands } from '@/components/admin/ui/CommandPalette';
+import { CommandPaletteProvider } from '@/components/admin/ui/CommandPalette';
+import { useSettingsStore } from '@/stores/settings-store';
+import { useAdminNavStore } from '@/stores/admin-nav-store';
 
 interface AdminSession {
   admin: {
@@ -40,40 +42,23 @@ interface NavGroup {
   items: NavItem[];
 }
 
-const STORAGE_KEY = 'admin-nav-expanded';
-const SIDEBAR_COLLAPSED_KEY = 'admin-sidebar-collapsed';
-
-function getInitialExpandedState(): string[] {
-  if (typeof window === 'undefined') return ['users', 'content'];
-  try {
-    const stored = localStorage.getItem(STORAGE_KEY);
-    return stored ? JSON.parse(stored) : ['users', 'content'];
-  } catch {
-    return ['users', 'content'];
-  }
-}
-
-function getInitialSidebarCollapsed(): boolean {
-  if (typeof window === 'undefined') return false;
-  try {
-    return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === 'true';
-  } catch {
-    return false;
-  }
-}
-
 // Navigation configuration for domain-scoped view
 function getDomainNavGroups(domainId: string, stats?: QuickStats): NavGroup[] {
   return [
     {
-      id: 'users',
-      label: 'Users & Access',
+      id: 'identity',
+      label: 'Identity & Access',
       icon: UsersGroupIcon,
       items: [
         { href: `/admin/d/${domainId}/users`, label: 'Users', icon: UsersIcon },
         { href: `/admin/d/${domainId}/groups`, label: 'Groups', icon: TeamIcon },
         { href: `/admin/d/${domainId}/roles`, label: 'Roles', icon: RolesIcon },
         { href: `/admin/d/${domainId}/admins`, label: 'Admins', icon: TeamIcon },
+        { href: `/admin/d/${domainId}/settings/sso`, label: 'SSO', icon: IdentityIcon },
+        { href: `/admin/d/${domainId}/settings/sso/exprsn`, label: 'Exprsn SSO', icon: IdentityIcon },
+        { href: `/admin/d/${domainId}/settings/oauth`, label: 'OAuth Providers', icon: IdentityIcon },
+        { href: `/admin/d/${domainId}/settings/mfa`, label: 'MFA Settings', icon: CertificatesIcon },
+        { href: `/admin/d/${domainId}/settings/invite-codes`, label: 'Invite Codes', icon: InviteCodesIcon },
       ],
     },
     {
@@ -83,16 +68,6 @@ function getDomainNavGroups(domainId: string, stats?: QuickStats): NavGroup[] {
       items: [
         { href: `/admin/d/${domainId}/organizations`, label: 'All Organizations', icon: OrganizationsIcon },
         { href: `/admin/d/${domainId}/organizations/create`, label: 'Create Organization', icon: OrganizationsIcon },
-      ],
-    },
-    {
-      id: 'authentication',
-      label: 'Authentication',
-      icon: IdentityIcon,
-      items: [
-        { href: `/admin/d/${domainId}/settings/sso`, label: 'SSO Configuration', icon: IdentityIcon },
-        { href: `/admin/d/${domainId}/settings/oauth`, label: 'OAuth Providers', icon: IdentityIcon },
-        { href: `/admin/d/${domainId}/settings/mfa`, label: 'MFA Settings', icon: CertificatesIcon },
       ],
     },
     {
@@ -118,11 +93,13 @@ function getDomainNavGroups(domainId: string, stats?: QuickStats): NavGroup[] {
         { href: `/admin/d/${domainId}/payments`, label: 'Payments', icon: PaymentsIcon },
         { href: `/admin/d/${domainId}/live`, label: 'Live Streams', icon: LiveIcon, badge: stats?.activeLiveStreams, badgeColor: 'bg-green-500' },
         { href: `/admin/d/${domainId}/render`, label: 'Render Pipeline', icon: RenderIcon },
+        { href: `/admin/d/${domainId}/settings/prefetch`, label: 'Prefetch Config', icon: RenderIcon },
+        { href: `/admin/d/${domainId}/workers`, label: 'Workers', icon: WorkersIcon },
       ],
     },
     {
       id: 'settings',
-      label: 'Domain Settings',
+      label: 'Settings',
       icon: SettingsIcon,
       items: [
         { href: `/admin/d/${domainId}/settings`, label: 'Overview', icon: SettingsIcon },
@@ -132,6 +109,7 @@ function getDomainNavGroups(domainId: string, stats?: QuickStats): NavGroup[] {
         { href: `/admin/d/${domainId}/settings/tokens`, label: 'API Tokens', icon: TokensIcon },
         { href: `/admin/d/${domainId}/settings/branding`, label: 'Branding', icon: FeaturedIcon },
         { href: `/admin/d/${domainId}/settings/federation`, label: 'Federation', icon: DomainsIcon },
+        { href: `/admin/d/${domainId}/settings`, label: 'Access & Security', icon: RolesIcon },
       ],
     },
     {
@@ -143,9 +121,9 @@ function getDomainNavGroups(domainId: string, stats?: QuickStats): NavGroup[] {
       ],
     },
     {
-      id: 'system',
-      label: 'System',
-      icon: SystemIcon,
+      id: 'audit',
+      label: 'Audit & Activity',
+      icon: AuditIcon,
       items: [
         { href: `/admin/d/${domainId}/audit`, label: 'Audit Log', icon: AuditIcon },
         { href: `/admin/d/${domainId}/activity`, label: 'Activity Feed', icon: ActivityIcon },
@@ -163,11 +141,11 @@ function getGlobalNavGroups(stats?: QuickStats): NavGroup[] {
       icon: DomainsIcon,
       items: [
         { href: '/admin/domains', label: 'All Domains', icon: DomainsIcon },
-        { href: '/admin/domains?filter=unverified', label: 'Unverified Domains', icon: DomainsIcon },
-        { href: '/admin/domains?filter=verified', label: 'Verified Domains', icon: DomainsIcon },
-        { href: '/admin/domains?filter=pending', label: 'Pending Domains', icon: DomainsIcon },
-        { href: '/admin/domains?filter=hosted', label: 'Hosted Domains', icon: DomainsIcon },
-        { href: '/admin/domains?filter=federated', label: 'Federated Domains', icon: DomainsIcon },
+        { href: '/admin/domains?filter=unverified', label: 'Unverified', icon: DomainsIcon },
+        { href: '/admin/domains?filter=verified', label: 'Verified', icon: DomainsIcon },
+        { href: '/admin/domains?filter=pending', label: 'Pending', icon: DomainsIcon },
+        { href: '/admin/domains?filter=hosted', label: 'Hosted', icon: DomainsIcon },
+        { href: '/admin/domains?filter=federated', label: 'Federated', icon: DomainsIcon },
       ],
     },
     {
@@ -179,34 +157,41 @@ function getGlobalNavGroups(stats?: QuickStats): NavGroup[] {
       ],
     },
     {
+      id: 'identity',
+      label: 'Identity & Security',
+      icon: CertificatesIcon,
+      items: [
+        { href: '/admin/users', label: 'Users', icon: UsersIcon },
+        { href: '/admin/authentication', label: 'Authentication', icon: IdentityIcon },
+        { href: '/admin/certificates', label: 'Certificates', icon: CertificatesIcon },
+        { href: '/admin/certificates/ocsp', label: 'OCSP & CRL', icon: CertificatesIcon },
+        { href: '/admin/tokens', label: 'API Tokens', icon: TokensIcon },
+        { href: '/admin/settings/rate-limits', label: 'Rate Limits', icon: TokensIcon },
+        { href: '/admin/invite-codes', label: 'Invite Codes', icon: InviteCodesIcon },
+      ],
+    },
+    {
       id: 'platform',
       label: 'Platform Services',
       icon: PlatformIcon,
       items: [
-        { href: '/admin/payments', label: 'Payment Configurations', icon: PaymentsIcon },
         { href: '/admin/analytics', label: 'Analytics', icon: AnalyticsIcon },
+        { href: '/admin/payments', label: 'Payments', icon: PaymentsIcon },
         { href: '/admin/live', label: 'Live Streams', icon: LiveIcon, badge: stats?.activeLiveStreams, badgeColor: 'bg-green-500' },
         { href: '/admin/render', label: 'Render Pipeline', icon: RenderIcon },
-      ],
-    },
-    {
-      id: 'security',
-      label: 'Security',
-      icon: CertificatesIcon,
-      items: [
-        { href: '/admin/certificates', label: 'Certificates', icon: CertificatesIcon },
-        { href: '/admin/authentication', label: 'Authentication', icon: IdentityIcon },
-        { href: '/admin/tokens', label: 'API Tokens', icon: TokensIcon },
-        { href: '/admin/certificates/ocsp', label: 'OCSP & CRL Management', icon: CertificatesIcon },
+        { href: '/admin/prefetch', label: 'Prefetch Engine', icon: RenderIcon },
+        { href: '/admin/workers', label: 'Workers', icon: WorkersIcon },
       ],
     },
     {
       id: 'cluster',
-      label: 'Cluster',
+      label: 'Infrastructure',
       icon: InfraGroupIcon,
       items: [
         { href: '/admin/federation', label: 'Federation', icon: DomainsIcon },
-        { href: '/admin/infrastructure', label: 'Clusters', icon: InfrastructureIcon },
+        { href: '/admin/relay', label: 'Relay & Firehose', icon: DomainsIcon },
+        { href: '/admin/infrastructure/clusters', label: 'Clusters', icon: InfrastructureIcon },
+        { href: '/admin/infrastructure/gpu', label: 'GPU Resources', icon: GpuIcon },
         { href: '/admin/plc', label: 'PLC Directories', icon: IdentityIcon },
         { href: '/admin/exprsn-directories', label: 'Exprsn Directories', icon: DomainsIcon },
       ],
@@ -217,6 +202,15 @@ function getGlobalNavGroups(stats?: QuickStats): NavGroup[] {
       icon: SystemIcon,
       items: [
         { href: '/admin/settings', label: 'System Settings', icon: SettingsIcon },
+        { href: '/admin/settings/themes', label: 'Themes', icon: ThemesIcon },
+        { href: '/admin/preferences', label: 'Preferences', icon: PreferencesIcon },
+      ],
+    },
+    {
+      id: 'audit',
+      label: 'Audit & Activity',
+      icon: AuditIcon,
+      items: [
         { href: '/admin/audit', label: 'Audit Logs', icon: AuditIcon },
         { href: '/admin/activity', label: 'Activity', icon: ActivityIcon },
       ],
@@ -231,27 +225,28 @@ function AdminLayoutContent({ children }: { children: React.ReactNode }) {
   const [adminSession, setAdminSession] = useState<AdminSession | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [expandedGroups, setExpandedGroups] = useState<string[]>(getInitialExpandedState);
-  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(getInitialSidebarCollapsed);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
-  const { selectedDomainId, isGlobal } = useAdminDomain();
+  // Zustand store for nav state (persisted)
+  const {
+    expandedGroups,
+    toggleGroup,
+    expandGroup,
+    isSidebarCollapsed,
+    toggleSidebar,
+    pinnedItems,
+    pinItem,
+    unpinItem,
+    searchQuery,
+    setSearchQuery,
+  } = useAdminNavStore();
 
-  // Persist sidebar collapsed state
-  useEffect(() => {
-    if (typeof window !== 'undefined') {
-      localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(isSidebarCollapsed));
-    }
-  }, [isSidebarCollapsed]);
+  const { selectedDomainId, isGlobal } = useAdminDomain();
 
   // Close mobile menu on route change
   useEffect(() => {
     setIsMobileMenuOpen(false);
   }, [pathname]);
-
-  const toggleSidebar = useCallback(() => {
-    setIsSidebarCollapsed(prev => !prev);
-  }, []);
 
   // Poll quick stats every 30 seconds
   const { data: quickStats } = useQuery<QuickStats>({
@@ -261,21 +256,6 @@ function AdminLayoutContent({ children }: { children: React.ReactNode }) {
     enabled: !!adminSession,
     staleTime: 15000,
   });
-
-  // Persist expanded state
-  useEffect(() => {
-    if (typeof window !== 'undefined') {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(expandedGroups));
-    }
-  }, [expandedGroups]);
-
-  const toggleGroup = useCallback((groupId: string) => {
-    setExpandedGroups(prev =>
-      prev.includes(groupId)
-        ? prev.filter(id => id !== groupId)
-        : [...prev, groupId]
-    );
-  }, []);
 
   useEffect(() => {
     async function checkAdminAccess() {
@@ -315,6 +295,25 @@ function AdminLayoutContent({ children }: { children: React.ReactNode }) {
     ? getGlobalNavGroups(quickStats)
     : getDomainNavGroups(selectedDomainId, quickStats);
 
+  // Filter nav items by search query
+  const filteredNavGroups = searchQuery.trim()
+    ? navGroups
+        .map((group) => ({
+          ...group,
+          items: group.items.filter(
+            (item) =>
+              item.label.toLowerCase().includes(searchQuery.toLowerCase()) ||
+              group.label.toLowerCase().includes(searchQuery.toLowerCase())
+          ),
+        }))
+        .filter((group) => group.items.length > 0)
+    : navGroups;
+
+  // Collect pinned items from nav groups
+  const pinnedNavItems = navGroups
+    .flatMap((g) => g.items)
+    .filter((item) => pinnedItems.includes(item.href));
+
   // Auto-expand group containing active route
   useEffect(() => {
     for (const group of navGroups) {
@@ -322,11 +321,11 @@ function AdminLayoutContent({ children }: { children: React.ReactNode }) {
         item.href === '/admin' ? pathname === '/admin' : pathname.startsWith(item.href)
       );
       if (hasActiveItem && !expandedGroups.includes(group.id)) {
-        setExpandedGroups(prev => [...prev, group.id]);
+        expandGroup(group.id);
         break;
       }
     }
-  }, [pathname, navGroups]);
+  }, [pathname, navGroups, expandedGroups, expandGroup]);
 
   if (authLoading || isLoading) {
     return (
@@ -432,8 +431,35 @@ function AdminLayoutContent({ children }: { children: React.ReactNode }) {
 
         {/* Domain Selector */}
         {!isSidebarCollapsed && (
-          <div className="p-3 border-b border-border">
+          <div className="p-3 border-b border-border space-y-2">
             <DomainSelector />
+            {!isGlobal && selectedDomainId && (
+              <OrganizationSelector />
+            )}
+          </div>
+        )}
+
+        {/* Sidebar Search */}
+        {!isSidebarCollapsed && (
+          <div className="px-3 py-2">
+            <div className="relative">
+              <SearchNavIcon className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-text-muted" />
+              <input
+                type="text"
+                placeholder="Search navigation..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full pl-8 pr-3 py-1.5 text-xs bg-surface-hover rounded-md border-0 text-text-primary placeholder-text-muted focus:outline-none focus:ring-1 focus:ring-accent"
+              />
+              {searchQuery && (
+                <button
+                  onClick={() => setSearchQuery('')}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-text-muted hover:text-text-primary"
+                >
+                  <CloseIcon className="w-3 h-3" />
+                </button>
+              )}
+            </div>
           </div>
         )}
 
@@ -456,10 +482,41 @@ function AdminLayoutContent({ children }: { children: React.ReactNode }) {
             </Link>
           </NavTooltip>
 
+          {/* Pinned Items */}
+          {!isSidebarCollapsed && pinnedNavItems.length > 0 && !searchQuery && (
+            <div className="mb-2">
+              <p className="px-3 text-[10px] font-semibold text-text-muted uppercase tracking-wider mb-1">Pinned</p>
+              <ul className="space-y-0.5">
+                {pinnedNavItems.map((item) => (
+                  <li key={`pin-${item.href}`}>
+                    <Link
+                      href={item.href}
+                      className={`flex items-center gap-2 px-3 py-1.5 rounded-md transition-colors text-sm ${
+                        isActive(item.href)
+                          ? 'bg-accent text-text-inverse'
+                          : 'text-text-secondary hover:bg-surface-hover hover:text-text-primary'
+                      }`}
+                    >
+                      <item.icon className="w-4 h-4" />
+                      <span className="flex-1">{item.label}</span>
+                      <button
+                        onClick={(e) => { e.preventDefault(); e.stopPropagation(); unpinItem(item.href); }}
+                        className="opacity-0 group-hover:opacity-100 hover:text-accent p-0.5"
+                        title="Unpin"
+                      >
+                        <PinFilledIcon className="w-3 h-3" />
+                      </button>
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
           {/* Accordion Groups */}
           <div className="space-y-1">
-            {navGroups.map((group) => {
-              const isExpanded = expandedGroups.includes(group.id);
+            {filteredNavGroups.map((group) => {
+              const isExpanded = expandedGroups.includes(group.id) || !!searchQuery;
               const groupActive = isGroupActive(group);
 
               return (
@@ -467,7 +524,7 @@ function AdminLayoutContent({ children }: { children: React.ReactNode }) {
                   {/* Group Header */}
                   <NavTooltip label={group.label} show={isSidebarCollapsed}>
                     <button
-                      onClick={() => !isSidebarCollapsed && toggleGroup(group.id)}
+                      onClick={() => !isSidebarCollapsed && !searchQuery && toggleGroup(group.id)}
                       className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg transition-colors ${
                         isSidebarCollapsed ? 'justify-center' : ''
                       } ${
@@ -480,11 +537,13 @@ function AdminLayoutContent({ children }: { children: React.ReactNode }) {
                       {!isSidebarCollapsed && (
                         <>
                           <span className="flex-1 text-left text-sm font-medium">{group.label}</span>
-                          <ChevronIcon
-                            className={`w-4 h-4 transition-transform duration-200 ${
-                              isExpanded ? 'rotate-180' : ''
-                            }`}
-                          />
+                          {!searchQuery && (
+                            <ChevronIcon
+                              className={`w-4 h-4 transition-transform duration-200 ${
+                                isExpanded ? 'rotate-180' : ''
+                              }`}
+                            />
+                          )}
                         </>
                       )}
                     </button>
@@ -494,34 +553,56 @@ function AdminLayoutContent({ children }: { children: React.ReactNode }) {
                   {!isSidebarCollapsed && (
                     <div
                       className={`overflow-hidden transition-all duration-200 ${
-                        isExpanded ? 'max-h-96 opacity-100' : 'max-h-0 opacity-0'
+                        isExpanded ? 'max-h-[500px] opacity-100' : 'max-h-0 opacity-0'
                       }`}
                     >
                       <ul className="ml-4 mt-1 space-y-0.5 border-l border-border pl-3">
-                        {group.items.map((item) => (
-                          <li key={item.href}>
-                            <Link
-                              href={item.href}
-                              className={`flex items-center gap-2 px-2 py-1.5 rounded-md transition-colors text-sm ${
-                                isActive(item.href)
-                                  ? 'bg-accent text-text-inverse'
-                                  : 'text-text-secondary hover:bg-surface-hover hover:text-text-primary'
-                              }`}
-                            >
-                              <item.icon className="w-4 h-4" />
-                              <span className="flex-1">{item.label}</span>
-                              {item.badge !== undefined && item.badge > 0 && (
-                                <span
-                                  className={`px-1.5 py-0.5 text-xs font-medium rounded-full text-white min-w-[18px] text-center ${
-                                    item.badgeColor || 'bg-accent'
+                        {group.items.map((item) => {
+                          const itemPinned = pinnedItems.includes(item.href);
+                          return (
+                            <li key={item.href} className="group/navitem">
+                              <Link
+                                href={item.href}
+                                className={`flex items-center gap-2 px-2 py-1.5 rounded-md transition-colors text-sm ${
+                                  isActive(item.href)
+                                    ? 'bg-accent text-text-inverse'
+                                    : 'text-text-secondary hover:bg-surface-hover hover:text-text-primary'
+                                }`}
+                              >
+                                <item.icon className="w-4 h-4" />
+                                <span className="flex-1">{item.label}</span>
+                                {item.badge !== undefined && item.badge > 0 && (
+                                  <span
+                                    className={`px-1.5 py-0.5 text-xs font-medium rounded-full text-white min-w-[18px] text-center ${
+                                      item.badgeColor || 'bg-accent'
+                                    }`}
+                                  >
+                                    {item.badge > 99 ? '99+' : item.badge}
+                                  </span>
+                                )}
+                                <button
+                                  onClick={(e) => {
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    itemPinned ? unpinItem(item.href) : pinItem(item.href);
+                                  }}
+                                  className={`p-0.5 transition-opacity ${
+                                    itemPinned
+                                      ? 'opacity-100 text-accent'
+                                      : 'opacity-0 group-hover/navitem:opacity-100 text-text-muted hover:text-accent'
                                   }`}
+                                  title={itemPinned ? 'Unpin' : 'Pin to top'}
                                 >
-                                  {item.badge > 99 ? '99+' : item.badge}
-                                </span>
-                              )}
-                            </Link>
-                          </li>
-                        ))}
+                                  {itemPinned ? (
+                                    <PinFilledIcon className="w-3 h-3" />
+                                  ) : (
+                                    <PinIcon className="w-3 h-3" />
+                                  )}
+                                </button>
+                              </Link>
+                            </li>
+                          );
+                        })}
                       </ul>
                     </div>
                   )}
@@ -529,6 +610,13 @@ function AdminLayoutContent({ children }: { children: React.ReactNode }) {
               );
             })}
           </div>
+
+          {/* No search results */}
+          {searchQuery && filteredNavGroups.length === 0 && !isSidebarCollapsed && (
+            <div className="px-3 py-4 text-center text-text-muted text-xs">
+              No navigation items matching &ldquo;{searchQuery}&rdquo;
+            </div>
+          )}
         </nav>
 
         {/* Quick Stats Summary */}
@@ -557,6 +645,9 @@ function AdminLayoutContent({ children }: { children: React.ReactNode }) {
             </NavTooltip>
           </div>
         )}
+
+        {/* Theme toggle */}
+        <AdminThemeToggle collapsed={isSidebarCollapsed} />
 
         {/* Admin info */}
         <div className="p-3 border-t border-border">
@@ -856,6 +947,30 @@ function RolesIcon({ className }: { className?: string }) {
   );
 }
 
+function ThemesIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M4.098 19.902a3.75 3.75 0 005.304 0l6.401-6.402M6.75 21A3.75 3.75 0 013 17.25V4.125C3 3.504 3.504 3 4.125 3h5.25c.621 0 1.125.504 1.125 1.125v4.072M6.75 21a3.75 3.75 0 003.75-3.75V8.197M6.75 21h13.125c.621 0 1.125-.504 1.125-1.125v-5.25c0-.621-.504-1.125-1.125-1.125h-4.072M10.5 8.197l2.88-2.88c.438-.439 1.15-.439 1.59 0l3.712 3.713c.44.44.44 1.152 0 1.59l-2.879 2.88M6.75 17.25h.008v.008H6.75v-.008z" />
+    </svg>
+  );
+}
+
+function InviteCodesIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 01-2.25 2.25h-15a2.25 2.25 0 01-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25m19.5 0v.243a2.25 2.25 0 01-1.07 1.916l-7.5 4.615a2.25 2.25 0 01-2.36 0L3.32 8.91a2.25 2.25 0 01-1.07-1.916V6.75" />
+    </svg>
+  );
+}
+
+function GpuIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 3v1.5M4.5 8.25H3m18 0h-1.5M4.5 12H3m18 0h-1.5m-15 3.75H3m18 0h-1.5M8.25 19.5V21M12 3v1.5m0 15V21m3.75-18v1.5m0 15V21m-9-1.5h10.5a2.25 2.25 0 002.25-2.25V6.75a2.25 2.25 0 00-2.25-2.25H6.75A2.25 2.25 0 004.5 6.75v10.5a2.25 2.25 0 002.25 2.25zm.75-12h9v9h-9v-9z" />
+    </svg>
+  );
+}
+
 function MenuIcon({ className }: { className?: string }) {
   return (
     <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
@@ -881,6 +996,71 @@ function CollapseIcon({ className }: { className?: string }) {
 }
 
 // Tooltip wrapper for collapsed sidebar items
+function AdminThemeToggle({ collapsed }: { collapsed: boolean }) {
+  const { settings, setColorMode } = useSettingsStore();
+  const colorMode = settings.colorMode;
+
+  const cycle = () => {
+    const modes: Array<'light' | 'dark' | 'system'> = ['light', 'dark', 'system'];
+    const idx = modes.indexOf(colorMode);
+    setColorMode(modes[(idx + 1) % modes.length]);
+  };
+
+  // Apply dark class to html element
+  useEffect(() => {
+    const resolved = colorMode === 'system'
+      ? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+      : colorMode;
+    if (resolved === 'dark') {
+      document.documentElement.classList.add('dark');
+    } else {
+      document.documentElement.classList.remove('dark');
+    }
+  }, [colorMode]);
+
+  const icon = colorMode === 'dark' ? (
+    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" /></svg>
+  ) : colorMode === 'light' ? (
+    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" /></svg>
+  ) : (
+    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" /></svg>
+  );
+
+  const label = colorMode === 'dark' ? 'Dark' : colorMode === 'light' ? 'Light' : 'System';
+
+  return (
+    <div className="px-3 py-2 border-t border-border">
+      <NavTooltip label={`Theme: ${label}`} show={collapsed}>
+        <button
+          onClick={cycle}
+          className={`flex items-center gap-2 w-full px-2 py-1.5 rounded-lg text-text-secondary hover:bg-surface-hover hover:text-text-primary transition-colors text-sm ${
+            collapsed ? 'justify-center' : ''
+          }`}
+        >
+          {icon}
+          {!collapsed && <span>{label}</span>}
+        </button>
+      </NavTooltip>
+    </div>
+  );
+}
+
+function PreferencesIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06A1.65 1.65 0 0019.32 9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z" />
+    </svg>
+  );
+}
+
+function WorkersIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M21 7.5l-9-5.25L3 7.5m18 0l-9 5.25m9-5.25v9l-9 5.25M3 7.5l9 5.25M3 7.5v9l9 5.25m0-9v9" />
+    </svg>
+  );
+}
+
 function NavTooltip({ children, label, show }: { children: React.ReactNode; label: string; show: boolean }) {
   if (!show) return <>{children}</>;
 
@@ -891,5 +1071,161 @@ function NavTooltip({ children, label, show }: { children: React.ReactNode; labe
         {label}
       </div>
     </div>
+  );
+}
+
+// Organization Selector for admin sidebar (domain-scoped)
+function OrganizationSelector() {
+  const {
+    selectedOrganizationId,
+    selectedOrganization,
+    setSelectedOrganization,
+    organizations,
+    isLoadingOrganizations,
+  } = useAdminDomain();
+  const [isOpen, setIsOpen] = useState(false);
+  const [search, setSearch] = useState('');
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+        setIsOpen(false);
+        setSearch('');
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  // Build hierarchy-aware list: sort by hierarchyLevel and indent
+  const sortedOrgs = [...organizations].sort((a, b) => {
+    const pathA = a.hierarchyPath || a.id;
+    const pathB = b.hierarchyPath || b.id;
+    return pathA.localeCompare(pathB);
+  });
+
+  const filteredOrgs = sortedOrgs.filter(
+    (o) =>
+      (o.displayName || o.name).toLowerCase().includes(search.toLowerCase()) ||
+      o.name.toLowerCase().includes(search.toLowerCase())
+  );
+
+  return (
+    <div className="relative" ref={dropdownRef}>
+      <button
+        onClick={() => setIsOpen(!isOpen)}
+        className="w-full flex items-center gap-2 px-3 py-2 bg-surface-hover hover:bg-border rounded-lg transition-colors"
+      >
+        <OrganizationsIcon className="w-4 h-4 text-text-muted flex-shrink-0" />
+        <div className="flex-1 text-left min-w-0">
+          <p className="text-xs font-medium text-text-primary truncate">
+            {selectedOrganization
+              ? selectedOrganization.displayName || selectedOrganization.name
+              : 'All Organizations'}
+          </p>
+        </div>
+        <ChevronIcon className={`w-3 h-3 text-text-muted transition-transform ${isOpen ? 'rotate-180' : ''}`} />
+      </button>
+
+      {isOpen && (
+        <div className="absolute top-full left-0 right-0 mt-1 bg-surface border border-border rounded-lg shadow-lg overflow-hidden z-50">
+          {/* Search */}
+          {organizations.length > 3 && (
+            <div className="p-2 border-b border-border">
+              <input
+                type="text"
+                placeholder="Search organizations..."
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className="w-full px-3 py-1.5 text-sm bg-surface-hover rounded-md border-0 text-text-primary placeholder-text-muted focus:outline-none focus:ring-1 focus:ring-accent"
+                autoFocus
+              />
+            </div>
+          )}
+
+          <div className="max-h-52 overflow-y-auto">
+            {/* All Organizations option */}
+            <button
+              onClick={() => { setSelectedOrganization(null); setIsOpen(false); setSearch(''); }}
+              className={`w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-surface-hover transition-colors text-sm ${
+                !selectedOrganizationId ? 'bg-accent/10' : ''
+              }`}
+            >
+              <OrganizationsIcon className="w-4 h-4 text-text-muted" />
+              <span className="flex-1 text-text-primary">All Organizations</span>
+              {!selectedOrganizationId && <CheckIcon className="w-3.5 h-3.5 text-accent" />}
+            </button>
+
+            {filteredOrgs.length > 0 && <div className="h-px bg-border" />}
+
+            {isLoadingOrganizations ? (
+              <div className="px-3 py-3 text-center text-text-muted text-xs">Loading...</div>
+            ) : filteredOrgs.length === 0 && search ? (
+              <div className="px-3 py-3 text-center text-text-muted text-xs">No organizations found</div>
+            ) : (
+              filteredOrgs.map((org) => {
+                const indent = (org.hierarchyLevel || 0) * 12;
+                return (
+                  <button
+                    key={org.id}
+                    onClick={() => { setSelectedOrganization(org.id); setIsOpen(false); setSearch(''); }}
+                    className={`w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-surface-hover transition-colors text-sm ${
+                      selectedOrganizationId === org.id ? 'bg-accent/10' : ''
+                    }`}
+                    style={{ paddingLeft: `${12 + indent}px` }}
+                  >
+                    <div className="w-5 h-5 rounded bg-accent/10 flex items-center justify-center flex-shrink-0">
+                      <span className="text-accent text-[10px] font-bold">
+                        {(org.displayName || org.name)[0]?.toUpperCase()}
+                      </span>
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <span className="text-text-primary truncate block">{org.displayName || org.name}</span>
+                      {org.memberCount !== undefined && (
+                        <span className="text-[10px] text-text-muted">{org.memberCount} members</span>
+                      )}
+                    </div>
+                    {selectedOrganizationId === org.id && <CheckIcon className="w-3.5 h-3.5 text-accent" />}
+                  </button>
+                );
+              })
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CheckIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+    </svg>
+  );
+}
+
+function SearchNavIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+    </svg>
+  );
+}
+
+function PinIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 3.75V16.5L12 14.25 7.5 16.5V3.75h9z" />
+    </svg>
+  );
+}
+
+function PinFilledIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="currentColor" viewBox="0 0 24 24">
+      <path d="M16.5 3.75V16.5L12 14.25 7.5 16.5V3.75h9z" />
+    </svg>
   );
 }

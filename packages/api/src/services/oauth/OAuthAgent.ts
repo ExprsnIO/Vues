@@ -407,17 +407,28 @@ export class OAuthAgentService {
       };
     }
 
-    if (options.did) {
+    // did:exprsn tier (between admin and regular user)
+    if (options.did?.startsWith('did:exprsn:')) {
+      const isDev = process.env.NODE_ENV !== 'production';
       return {
-        requestsPerMinute: config?.userRateLimitPerMinute || 60,
-        burstLimit: config?.userBurstLimit || 20,
+        requestsPerMinute: config?.exprsnRateLimitPerMinute || (isDev ? 600 : 90),
+        burstLimit: config?.exprsnBurstLimit || (isDev ? 100 : 35),
       };
     }
 
-    // Anonymous
+    if (options.did) {
+      const isDev = process.env.NODE_ENV !== 'production';
+      return {
+        requestsPerMinute: config?.userRateLimitPerMinute || (isDev ? 600 : 60),
+        burstLimit: config?.userBurstLimit || (isDev ? 100 : 20),
+      };
+    }
+
+    // Anonymous — higher in dev to avoid hitting limits during local testing
+    const isDev = process.env.NODE_ENV !== 'production';
     return {
-      requestsPerMinute: config?.anonymousRateLimitPerMinute || 30,
-      burstLimit: 10,
+      requestsPerMinute: config?.anonymousRateLimitPerMinute || (isDev ? 300 : 30),
+      burstLimit: isDev ? 100 : 10,
     };
   }
 }

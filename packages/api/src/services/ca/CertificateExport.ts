@@ -253,21 +253,30 @@ export class CertificateExportService {
     const keyBags = p12.getBags({ bagType: forge.pki.oids.pkcs8ShroudedKeyBag });
 
     // Get certificate
-    const certBag = certBags[forge.pki.oids.certBag];
+    const certBagKey = forge.pki.oids.certBag;
+    const certBag = certBagKey ? certBags[certBagKey] : undefined;
     if (certBag && certBag.length > 0) {
+      const firstCert = certBag[0];
       // First cert is typically the entity cert
-      certificate = forge.pki.certificateToPem(certBag[0].cert!);
+      if (firstCert?.cert) {
+        certificate = forge.pki.certificateToPem(firstCert.cert);
+      }
 
       // Additional certs are chain
       for (let i = 1; i < certBag.length; i++) {
-        chain.push(forge.pki.certificateToPem(certBag[i].cert!));
+        const cert = certBag[i];
+        if (cert?.cert) {
+          chain.push(forge.pki.certificateToPem(cert.cert));
+        }
       }
     }
 
     // Get private key
-    const keyBag = keyBags[forge.pki.oids.pkcs8ShroudedKeyBag];
-    if (keyBag && keyBag.length > 0 && keyBag[0].key) {
-      privateKey = forge.pki.privateKeyToPem(keyBag[0].key);
+    const keyBagKey = forge.pki.oids.pkcs8ShroudedKeyBag;
+    const keyBag = keyBagKey ? keyBags[keyBagKey] : undefined;
+    const firstKeyBag = keyBag?.[0];
+    if (firstKeyBag?.key) {
+      privateKey = forge.pki.privateKeyToPem(firstKeyBag.key);
     }
 
     return { certificate, privateKey, chain };

@@ -8,7 +8,7 @@ import {
   moderationAppeals,
   users,
 } from '../db/index.js';
-import { eq, desc, and, or, gte, sql, isNull } from 'drizzle-orm';
+import { eq, desc, and, or, gte, sql, isNull, lt } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import { zValidator, getValidatedData } from '../utils/zod-validator.js';
 import { submitAppealSchema } from '../utils/validation-schemas.js';
@@ -70,11 +70,11 @@ userModerationRouter.get('/io.exprsn.user.moderation.getMyReports', authMiddlewa
           ? and(
               eq(contentReports.reporterDid, userDid),
               eq(contentReports.status, status),
-              sql`${contentReports.createdAt} < ${cursorDate}`
+              lt(contentReports.createdAt, cursorDate)
             )
           : and(
               eq(contentReports.reporterDid, userDid),
-              sql`${contentReports.createdAt} < ${cursorDate}`
+              lt(contentReports.createdAt, cursorDate)
             )
       )
       .orderBy(desc(contentReports.createdAt))

@@ -53,7 +53,7 @@ export function EditRoleModal({ roleId, isOpen, onClose, onSuccess }: EditRoleMo
 
   const updateMutation = useMutation({
     mutationFn: () =>
-      api.adminDomainRolesUpdate(roleId, {
+      api.adminDomainRolesUpdate(role?.domainId ?? '', roleId, {
         displayName,
         description: description || undefined,
         priority: parseInt(priority, 10),

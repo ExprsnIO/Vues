@@ -1,0 +1,9 @@
+User-agent: *
+Allow: /
+Disallow: /admin/
+Disallow: /settings/
+Disallow: /api/
+Disallow: /oauth/
+Disallow: /onboarding/
+
+Sitemap: https://exprsn.app/sitemap.xml

@@ -277,8 +277,7 @@ describe('Social and Graph Endpoints', () => {
       expect(user2?.followerCount).toBeGreaterThan(0);
     });
 
-    it.skip('should require authentication to follow', async () => {
-      // Skipped: auth middleware not enforced in testClient
+    it('should require authentication to follow', async () => {
       const client = testClient(graphRouter);
 
       const res = await client['io.exprsn.graph.follow'].$post({
@@ -497,8 +496,7 @@ describe('Social and Graph Endpoints', () => {
       expect(followingUser).toHaveProperty('followedAt');
     });
 
-    it.skip('should paginate followers with cursor', async () => {
-      // Skipped: cursor pagination has server-side issues
+    it('should paginate followers with cursor', async () => {
       const client = testClient(graphRouter);
 
       // Get first page with limit 1
@@ -570,8 +568,7 @@ describe('Social and Graph Endpoints', () => {
       expect(block).toBeDefined();
     });
 
-    it.skip('should require authentication to block', async () => {
-      // Skipped: auth middleware not enforced in testClient
+    it('should require authentication to block', async () => {
       const client = testClient(socialRouter);
 
       const res = await client['io.exprsn.graph.block'].$post({
@@ -781,8 +778,7 @@ describe('Social and Graph Endpoints', () => {
       expect(mute).toBeDefined();
     });
 
-    it.skip('should require authentication to mute', async () => {
-      // Skipped: auth middleware not enforced in testClient
+    it('should require authentication to mute', async () => {
       const client = testClient(socialRouter);
 
       const res = await client['io.exprsn.graph.mute'].$post({
@@ -999,8 +995,7 @@ describe('Social and Graph Endpoints', () => {
       expect(video?.repostCount).toBeGreaterThan(0);
     });
 
-    it.skip('should require authentication to repost', async () => {
-      // Skipped: auth middleware not enforced in testClient
+    it('should require authentication to repost', async () => {
       const client = testClient(socialRouter);
 
       const res = await client['io.exprsn.video.repost'].$post({
@@ -1194,8 +1189,7 @@ describe('Social and Graph Endpoints', () => {
       expect(bookmark?.folder).toBe('Favorites');
     });
 
-    it.skip('should require authentication to bookmark', async () => {
-      // Skipped: auth middleware not enforced in testClient
+    it('should require authentication to bookmark', async () => {
       const client = testClient(socialRouter);
 
       const res = await client['io.exprsn.video.bookmark'].$post({
@@ -1394,8 +1388,7 @@ describe('Social and Graph Endpoints', () => {
       expect(list?.purpose).toBe('curatelist');
     });
 
-    it.skip('should require authentication to create list', async () => {
-      // Skipped: auth middleware not enforced in testClient environment
+    it('should require authentication to create list', async () => {
       const client = testClient(graphRouter);
 
       const res = await client['io.exprsn.graph.createList'].$post({
@@ -1829,8 +1822,7 @@ describe('Social and Graph Endpoints', () => {
       expect(item.subject).toHaveProperty('handle');
     });
 
-    it.skip('should paginate list members with cursor', async () => {
-      // Skipped: cursor pagination has server-side issues
+    it('should paginate list members with cursor', async () => {
       const client = testClient(graphRouter);
 
       // Create list and add members

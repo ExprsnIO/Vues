@@ -1,24 +1,17 @@
 import { Hono } from 'hono';
-import { eq, and, or, ilike, desc, asc, sql, count, isNull, gte, lte, inArray } from 'drizzle-orm';
+import { eq, and, or, ilike, desc, asc, sql, count, isNull, gte, lte, inArray, lt } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
+import bcrypt from 'bcryptjs';
 import { db } from '../db/index.js';
 import {
   users,
   videos,
-  comments,
   adminUsers,
-  contentReports,
-  moderationActions,
   userSanctions,
-  featuredContent,
   systemConfig,
   adminAuditLog,
-  analyticsSnapshots,
   organizations,
   organizationMembers,
-  organizationActivity,
-  organizationRoles,
-  sessions,
   domains,
   domainUsers,
   domainRoles,
@@ -28,27 +21,13 @@ import {
   domainDnsRecords,
   domainHealthChecks,
   domainHealthSummaries,
-  renderJobs,
   type AdminUser,
 } from '../db/schema.js';
 import {
   adminAuthMiddleware,
   requirePermission,
-  superAdminMiddleware,
   ADMIN_PERMISSIONS,
-  getAdminPermissions,
 } from '../auth/middleware.js';
-import {
-  exportUsers,
-  exportReports,
-  exportAuditLogs,
-  exportAnalytics,
-  exportPayments,
-  exportRenderJobs,
-  exportOrganizations,
-  exportSanctions,
-  type ExportFormat,
-} from '../services/export/index.js';
 import {
   ensureSystemDomainRoles,
   getDomainPermissionCatalog,
@@ -56,16 +35,30 @@ import {
   getLegacyDomainRole,
   listInheritedGlobalAdmins,
 } from '../services/domain-access.js';
-import { broadcastAdminActivity, notifyAdmins } from '../websocket/admin.js';
+import { broadcastAdminActivity } from '../websocket/admin.js';
 import {
   dnsValidationService,
   domainHealthService,
 } from '../services/domain-health.js';
 
+// Domain-specific sub-routers extracted from this file
+import { adminUsersRouter, sanitizeSearchQuery } from './admin-users.js';
+import { adminOrgsRouter } from './admin-orgs.js';
+import { adminVideosRouter } from './admin-videos.js';
+import { adminAnalyticsRouter } from './admin-analytics.js';
+import { adminAuditRouter } from './admin-audit.js';
+
 export const adminRouter = new Hono();
 
 // Apply admin auth to all routes
 adminRouter.use('*', adminAuthMiddleware);
+
+// Mount domain-specific sub-routers
+adminRouter.route('/', adminUsersRouter);
+adminRouter.route('/', adminOrgsRouter);
+adminRouter.route('/', adminVideosRouter);
+adminRouter.route('/', adminAnalyticsRouter);
+adminRouter.route('/', adminAuditRouter);
 
 // ============================================
 // Session & Access
@@ -107,3915 +100,6 @@ adminRouter.post('/io.exprsn.admin.validateAccess', async (c) => {
     hasAccess: permissions.includes(body.permission),
   });
 });
-
-// ============================================
-// User Management (Sprint 2)
-// ============================================
-
-// List users with filters
-adminRouter.get(
-  '/io.exprsn.admin.users.list',
-  requirePermission(ADMIN_PERMISSIONS.USERS_VIEW),
-  async (c) => {
-    const query = c.req.query('q');
-    const status = c.req.query('status'); // active, suspended, banned
-    const verified = c.req.query('verified');
-    const sort = c.req.query('sort') || 'recent'; // recent, followers, videos
-    const limit = Math.min(parseInt(c.req.query('limit') || '50'), 100);
-    const cursor = c.req.query('cursor');
-
-    let conditions = [];
-
-    if (query) {
-      conditions.push(
-        or(ilike(users.handle, `%${query}%`), ilike(users.displayName, `%${query}%`))
-      );
-    }
-
-    if (verified === 'true') {
-      conditions.push(eq(users.verified, true));
-    } else if (verified === 'false') {
-      conditions.push(eq(users.verified, false));
-    }
-
-    // Build order by
-    let orderBy;
-    switch (sort) {
-      case 'followers':
-        orderBy = desc(users.followerCount);
-        break;
-      case 'videos':
-        orderBy = desc(users.videoCount);
-        break;
-      case 'recent':
-      default:
-        orderBy = desc(users.createdAt);
-    }
-
-    const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
-
-    const userList = await db
-      .select({
-        did: users.did,
-        handle: users.handle,
-        displayName: users.displayName,
-        avatar: users.avatar,
-        followerCount: users.followerCount,
-        videoCount: users.videoCount,
-        verified: users.verified,
-        createdAt: users.createdAt,
-      })
-      .from(users)
-      .where(whereClause)
-      .orderBy(orderBy)
-      .limit(limit + 1);
-
-    const hasMore = userList.length > limit;
-    const items = hasMore ? userList.slice(0, -1) : userList;
-
-    // Get active sanctions for each user
-    const userDids = items.map((u) => u.did);
-    const activeSanctions = userDids.length > 0
-      ? await db
-          .select({
-            userDid: userSanctions.userDid,
-            sanctionType: userSanctions.sanctionType,
-          })
-          .from(userSanctions)
-          .where(
-            and(
-              inArray(userSanctions.userDid, userDids),
-              or(isNull(userSanctions.expiresAt), gte(userSanctions.expiresAt, new Date()))
-            )
-          )
-      : [];
-
-    const sanctionMap = new Map<string, string>();
-    for (const s of activeSanctions) {
-      // Keep the most severe sanction
-      const current = sanctionMap.get(s.userDid);
-      if (!current || severityOrder(s.sanctionType) > severityOrder(current)) {
-        sanctionMap.set(s.userDid, s.sanctionType);
-      }
-    }
-
-    return c.json({
-      users: items.map((u) => ({
-        ...u,
-        status: sanctionMap.get(u.did) || 'active',
-      })),
-      cursor: hasMore && items[items.length - 1] ? items[items.length - 1]!.did : undefined,
-    });
-  }
-);
-
-// Get user details
-adminRouter.get(
-  '/io.exprsn.admin.users.get',
-  requirePermission(ADMIN_PERMISSIONS.USERS_VIEW),
-  async (c) => {
-    const did = c.req.query('did');
-
-    if (!did) {
-      return c.json({ error: 'InvalidRequest', message: 'did is required' }, 400);
-    }
-
-    const [user] = await db.select().from(users).where(eq(users.did, did)).limit(1);
-
-    if (!user) {
-      return c.json({ error: 'NotFound', message: 'User not found' }, 404);
-    }
-
-    // Get user's sanctions
-    const sanctions = await db
-      .select()
-      .from(userSanctions)
-      .where(eq(userSanctions.userDid, did))
-      .orderBy(desc(userSanctions.createdAt))
-      .limit(20);
-
-    // Get user's recent videos
-    const recentVideos = await db
-      .select({
-        uri: videos.uri,
-        caption: videos.caption,
-        thumbnailUrl: videos.thumbnailUrl,
-        viewCount: videos.viewCount,
-        createdAt: videos.createdAt,
-      })
-      .from(videos)
-      .where(eq(videos.authorDid, did))
-      .orderBy(desc(videos.createdAt))
-      .limit(10);
-
-    // Get report count against this user
-    const [reportCount] = await db
-      .select({ count: count() })
-      .from(contentReports)
-      .where(
-        and(eq(contentReports.contentType, 'user'), eq(contentReports.contentUri, did))
-      );
-
-    return c.json({
-      user,
-      sanctions,
-      recentVideos,
-      reportCount: reportCount?.count || 0,
-    });
-  }
-);
-
-// Update user (verify, etc.)
-adminRouter.post(
-  '/io.exprsn.admin.users.update',
-  requirePermission(ADMIN_PERMISSIONS.USERS_EDIT),
-  async (c) => {
-    const body = await c.req.json<{
-      did: string;
-      verified?: boolean;
-      displayName?: string;
-      bio?: string;
-    }>();
-    const adminUser = c.get('adminUser');
-
-    if (!body.did) {
-      return c.json({ error: 'InvalidRequest', message: 'did is required' }, 400);
-    }
-
-    const updates: Partial<typeof users.$inferInsert> = {};
-    if (body.verified !== undefined) updates.verified = body.verified;
-    if (body.displayName !== undefined) updates.displayName = body.displayName;
-    if (body.bio !== undefined) updates.bio = body.bio;
-    updates.updatedAt = new Date();
-
-    await db.update(users).set(updates).where(eq(users.did, body.did));
-
-    // Audit log
-    await db.insert(adminAuditLog).values({
-      id: nanoid(),
-      adminId: adminUser.id,
-      action: 'user.update',
-      targetType: 'user',
-      targetId: body.did,
-      details: updates,
-      createdAt: new Date(),
-    });
-
-    return c.json({ success: true });
-  }
-);
-
-// Issue sanction
-adminRouter.post(
-  '/io.exprsn.admin.users.sanction',
-  requirePermission(ADMIN_PERMISSIONS.USERS_SANCTION),
-  async (c) => {
-    const body = await c.req.json<{
-      userDid: string;
-      sanctionType: 'warning' | 'mute' | 'suspend' | 'ban';
-      reason: string;
-      expiresAt?: string;
-    }>();
-    const adminUser = c.get('adminUser');
-    const permissions = c.get('adminPermissions');
-
-    if (!body.userDid || !body.sanctionType || !body.reason) {
-      return c.json(
-        { error: 'InvalidRequest', message: 'userDid, sanctionType, and reason are required' },
-        400
-      );
-    }
-
-    // Ban requires special permission
-    if (body.sanctionType === 'ban' && !permissions.includes(ADMIN_PERMISSIONS.USERS_BAN)) {
-      return c.json(
-        { error: 'Forbidden', message: 'Ban permission required' },
-        403
-      );
-    }
-
-    const sanctionId = nanoid();
-    await db.insert(userSanctions).values({
-      id: sanctionId,
-      userDid: body.userDid,
-      adminId: adminUser.id,
-      sanctionType: body.sanctionType,
-      reason: body.reason,
-      expiresAt: body.expiresAt ? new Date(body.expiresAt) : null,
-      createdAt: new Date(),
-    });
-
-    // Audit log
-    await db.insert(adminAuditLog).values({
-      id: nanoid(),
-      adminId: adminUser.id,
-      action: `user.sanction.${body.sanctionType}`,
-      targetType: 'user',
-      targetId: body.userDid,
-      details: { sanctionId, reason: body.reason },
-      createdAt: new Date(),
-    });
-
-    return c.json({ success: true, sanctionId });
-  }
-);
-
-// Remove sanction
-adminRouter.post(
-  '/io.exprsn.admin.users.removeSanction',
-  requirePermission(ADMIN_PERMISSIONS.USERS_SANCTION),
-  async (c) => {
-    const body = await c.req.json<{ sanctionId: string; reason?: string }>();
-    const adminUser = c.get('adminUser');
-
-    if (!body.sanctionId) {
-      return c.json({ error: 'InvalidRequest', message: 'sanctionId is required' }, 400);
-    }
-
-    const [sanction] = await db
-      .select()
-      .from(userSanctions)
-      .where(eq(userSanctions.id, body.sanctionId))
-      .limit(1);
-
-    if (!sanction) {
-      return c.json({ error: 'NotFound', message: 'Sanction not found' }, 404);
-    }
-
-    // Set expiry to now to effectively remove it
-    await db
-      .update(userSanctions)
-      .set({ expiresAt: new Date() })
-      .where(eq(userSanctions.id, body.sanctionId));
-
-    // Audit log
-    await db.insert(adminAuditLog).values({
-      id: nanoid(),
-      adminId: adminUser.id,
-      action: 'user.sanction.remove',
-      targetType: 'user',
-      targetId: sanction.userDid,
-      details: { sanctionId: body.sanctionId, reason: body.reason },
-      createdAt: new Date(),
-    });
-
-    return c.json({ success: true });
-  }
-);
-
-// Get user's sanction history
-adminRouter.get(
-  '/io.exprsn.admin.users.getSanctions',
-  requirePermission(ADMIN_PERMISSIONS.USERS_VIEW),
-  async (c) => {
-    const userDid = c.req.query('userDid');
-    const limit = Math.min(parseInt(c.req.query('limit') || '50'), 100);
-
-    if (!userDid) {
-      return c.json({ error: 'InvalidRequest', message: 'userDid is required' }, 400);
-    }
-
-    const sanctions = await db
-      .select()
-      .from(userSanctions)
-      .where(eq(userSanctions.userDid, userDid))
-      .orderBy(desc(userSanctions.createdAt))
-      .limit(limit);
-
-    return c.json({ sanctions });
-  }
-);
-
-// ============================================
-// User Suspension and Ban Management
-// ============================================
-
-// Suspend user
-adminRouter.post(
-  '/io.exprsn.admin.users.suspend',
-  requirePermission(ADMIN_PERMISSIONS.USERS_SANCTION),
-  async (c) => {
-    const body = await c.req.json<{
-      userDid: string;
-      reason: string;
-      duration?: number; // Duration in hours (optional, if not provided = indefinite)
-      note?: string;
-    }>();
-    const adminUser = c.get('adminUser');
-
-    if (!body.userDid || !body.reason) {
-      return c.json(
-        { error: 'InvalidRequest', message: 'userDid and reason are required' },
-        400
-      );
-    }
-
-    // Check if user exists
-    const [user] = await db
-      .select()
-      .from(users)
-      .where(eq(users.did, body.userDid))
-      .limit(1);
-
-    if (!user) {
-      return c.json({ error: 'NotFound', message: 'User not found' }, 404);
-    }
-
-    // Calculate expiry date if duration provided
-    const expiresAt = body.duration
-      ? new Date(Date.now() + body.duration * 60 * 60 * 1000)
-      : null;
-
-    // Create suspension sanction
-    const sanctionId = nanoid();
-    await db.insert(userSanctions).values({
-      id: sanctionId,
-      userDid: body.userDid,
-      adminId: adminUser.id,
-      sanctionType: 'suspend',
-      reason: body.reason,
-      expiresAt,
-      createdAt: new Date(),
-    });
-
-    // Audit log
-    await db.insert(adminAuditLog).values({
-      id: nanoid(),
-      adminId: adminUser.id,
-      action: 'user.suspend',
-      targetType: 'user',
-      targetId: body.userDid,
-      details: {
-        sanctionId,
-        reason: body.reason,
-        duration: body.duration,
-        expiresAt: expiresAt?.toISOString(),
-        note: body.note,
-      },
-      createdAt: new Date(),
-    });
-
-    // Broadcast to admins
-    const adminUserData = await db.query.users.findFirst({
-      where: eq(users.did, adminUser.userDid),
-      columns: { handle: true },
-    });
-
-    broadcastAdminActivity({
-      adminDid: adminUser.userDid,
-      adminHandle: adminUserData?.handle || 'unknown',
-      action: 'user_suspend',
-      targetType: 'user',
-      targetId: user.handle,
-    });
-
-    notifyAdmins({
-      type: 'sanction',
-      title: 'User Suspended',
-      message: `${adminUserData?.handle || 'Admin'} suspended ${user.handle}${body.duration ? ` for ${body.duration} hours` : ' indefinitely'}`,
-      severity: 'warning',
-      data: { userDid: body.userDid, duration: body.duration },
-    });
-
-    return c.json({
-      success: true,
-      sanctionId,
-      expiresAt: expiresAt?.toISOString(),
-    });
-  }
-);
-
-// Unsuspend user
-adminRouter.post(
-  '/io.exprsn.admin.users.unsuspend',
-  requirePermission(ADMIN_PERMISSIONS.USERS_SANCTION),
-  async (c) => {
-    const body = await c.req.json<{
-      userDid: string;
-      reason?: string;
-    }>();
-    const adminUser = c.get('adminUser');
-
-    if (!body.userDid) {
-      return c.json({ error: 'InvalidRequest', message: 'userDid is required' }, 400);
-    }
-
-    // Find active suspension
-    const [suspension] = await db
-      .select()
-      .from(userSanctions)
-      .where(
-        and(
-          eq(userSanctions.userDid, body.userDid),
-          eq(userSanctions.sanctionType, 'suspend'),
-          or(
-            isNull(userSanctions.expiresAt),
-            gte(userSanctions.expiresAt, new Date())
-          )
-        )
-      )
-      .orderBy(desc(userSanctions.createdAt))
-      .limit(1);
-
-    if (!suspension) {
-      return c.json(
-        { error: 'NotFound', message: 'No active suspension found for this user' },
-        404
-      );
-    }
-
-    // Expire the suspension immediately
-    await db
-      .update(userSanctions)
-      .set({ expiresAt: new Date() })
-      .where(eq(userSanctions.id, suspension.id));
-
-    // Audit log
-    await db.insert(adminAuditLog).values({
-      id: nanoid(),
-      adminId: adminUser.id,
-      action: 'user.unsuspend',
-      targetType: 'user',
-      targetId: body.userDid,
-      details: {
-        originalSanctionId: suspension.id,
-        reason: body.reason || 'Suspension lifted',
-      },
-      createdAt: new Date(),
-    });
-
-    // Get user for notification
-    const [user] = await db
-      .select()
-      .from(users)
-      .where(eq(users.did, body.userDid))
-      .limit(1);
-
-    // Broadcast to admins
-    const adminUserData = await db.query.users.findFirst({
-      where: eq(users.did, adminUser.userDid),
-      columns: { handle: true },
-    });
-
-    broadcastAdminActivity({
-      adminDid: adminUser.userDid,
-      adminHandle: adminUserData?.handle || 'unknown',
-      action: 'user_unsuspend',
-      targetType: 'user',
-      targetId: user?.handle || body.userDid,
-    });
-
-    notifyAdmins({
-      type: 'sanction',
-      title: 'User Unsuspended',
-      message: `${adminUserData?.handle || 'Admin'} removed suspension for ${user?.handle || body.userDid}`,
-      severity: 'info',
-      data: { userDid: body.userDid },
-    });
-
-    return c.json({ success: true });
-  }
-);
-
-// Ban user permanently
-adminRouter.post(
-  '/io.exprsn.admin.users.ban',
-  requirePermission(ADMIN_PERMISSIONS.USERS_BAN),
-  async (c) => {
-    const body = await c.req.json<{
-      userDid: string;
-      reason: string;
-      note?: string;
-    }>();
-    const adminUser = c.get('adminUser');
-
-    if (!body.userDid || !body.reason) {
-      return c.json(
-        { error: 'InvalidRequest', message: 'userDid and reason are required' },
-        400
-      );
-    }
-
-    // Check if user exists
-    const [user] = await db
-      .select()
-      .from(users)
-      .where(eq(users.did, body.userDid))
-      .limit(1);
-
-    if (!user) {
-      return c.json({ error: 'NotFound', message: 'User not found' }, 404);
-    }
-
-    // Create permanent ban sanction (no expiry)
-    const sanctionId = nanoid();
-    await db.insert(userSanctions).values({
-      id: sanctionId,
-      userDid: body.userDid,
-      adminId: adminUser.id,
-      sanctionType: 'ban',
-      reason: body.reason,
-      expiresAt: null, // Permanent ban
-      createdAt: new Date(),
-    });
-
-    // Audit log
-    await db.insert(adminAuditLog).values({
-      id: nanoid(),
-      adminId: adminUser.id,
-      action: 'user.ban',
-      targetType: 'user',
-      targetId: body.userDid,
-      details: {
-        sanctionId,
-        reason: body.reason,
-        note: body.note,
-        permanent: true,
-      },
-      createdAt: new Date(),
-    });
-
-    // Broadcast to admins
-    const adminUserData = await db.query.users.findFirst({
-      where: eq(users.did, adminUser.userDid),
-      columns: { handle: true },
-    });
-
-    broadcastAdminActivity({
-      adminDid: adminUser.userDid,
-      adminHandle: adminUserData?.handle || 'unknown',
-      action: 'user_ban',
-      targetType: 'user',
-      targetId: user.handle,
-    });
-
-    notifyAdmins({
-      type: 'sanction',
-      title: 'User Banned',
-      message: `${adminUserData?.handle || 'Admin'} permanently banned ${user.handle}`,
-      severity: 'error',
-      data: { userDid: body.userDid },
-    });
-
-    return c.json({
-      success: true,
-      sanctionId,
-    });
-  }
-);
-
-// Unban user
-adminRouter.post(
-  '/io.exprsn.admin.users.unban',
-  requirePermission(ADMIN_PERMISSIONS.USERS_BAN),
-  async (c) => {
-    const body = await c.req.json<{
-      userDid: string;
-      reason?: string;
-    }>();
-    const adminUser = c.get('adminUser');
-
-    if (!body.userDid) {
-      return c.json({ error: 'InvalidRequest', message: 'userDid is required' }, 400);
-    }
-
-    // Find active ban
-    const [ban] = await db
-      .select()
-      .from(userSanctions)
-      .where(
-        and(
-          eq(userSanctions.userDid, body.userDid),
-          eq(userSanctions.sanctionType, 'ban'),
-          or(
-            isNull(userSanctions.expiresAt),
-            gte(userSanctions.expiresAt, new Date())
-          )
-        )
-      )
-      .orderBy(desc(userSanctions.createdAt))
-      .limit(1);
-
-    if (!ban) {
-      return c.json(
-        { error: 'NotFound', message: 'No active ban found for this user' },
-        404
-      );
-    }
-
-    // Expire the ban immediately
-    await db
-      .update(userSanctions)
-      .set({ expiresAt: new Date() })
-      .where(eq(userSanctions.id, ban.id));
-
-    // Audit log
-    await db.insert(adminAuditLog).values({
-      id: nanoid(),
-      adminId: adminUser.id,
-      action: 'user.unban',
-      targetType: 'user',
-      targetId: body.userDid,
-      details: {
-        originalSanctionId: ban.id,
-        reason: body.reason || 'Ban lifted',
-      },
-      createdAt: new Date(),
-    });
-
-    // Get user for notification
-    const [user] = await db
-      .select()
-      .from(users)
-      .where(eq(users.did, body.userDid))
-      .limit(1);
-
-    // Broadcast to admins
-    const adminUserData = await db.query.users.findFirst({
-      where: eq(users.did, adminUser.userDid),
-      columns: { handle: true },
-    });
-
-    broadcastAdminActivity({
-      adminDid: adminUser.userDid,
-      adminHandle: adminUserData?.handle || 'unknown',
-      action: 'user_unban',
-      targetType: 'user',
-      targetId: user?.handle || body.userDid,
-    });
-
-    notifyAdmins({
-      type: 'sanction',
-      title: 'User Unbanned',
-      message: `${adminUserData?.handle || 'Admin'} removed ban for ${user?.handle || body.userDid}`,
-      severity: 'info',
-      data: { userDid: body.userDid },
-    });
-
-    return c.json({ success: true });
-  }
-);
-
-// Get moderation history for a user
-adminRouter.get(
-  '/io.exprsn.admin.users.moderationHistory',
-  requirePermission(ADMIN_PERMISSIONS.USERS_VIEW),
-  async (c) => {
-    const userDid = c.req.query('userDid');
-    const limit = Math.min(parseInt(c.req.query('limit') || '50'), 100);
-    const offset = parseInt(c.req.query('offset') || '0');
-
-    if (!userDid) {
-      return c.json({ error: 'InvalidRequest', message: 'userDid is required' }, 400);
-    }
-
-    // Get all sanctions
-    const sanctions = await db
-      .select({
-        id: userSanctions.id,
-        sanctionType: userSanctions.sanctionType,
-        reason: userSanctions.reason,
-        expiresAt: userSanctions.expiresAt,
-        appealStatus: userSanctions.appealStatus,
-        appealNote: userSanctions.appealNote,
-        createdAt: userSanctions.createdAt,
-        adminId: userSanctions.adminId,
-        adminHandle: users.handle,
-      })
-      .from(userSanctions)
-      .leftJoin(adminUsers, eq(userSanctions.adminId, adminUsers.id))
-      .leftJoin(users, eq(adminUsers.userDid, users.did))
-      .where(eq(userSanctions.userDid, userDid))
-      .orderBy(desc(userSanctions.createdAt))
-      .limit(limit)
-      .offset(offset);
-
-    // Get moderation actions related to this user
-    const actions = await db
-      .select({
-        id: moderationActions.id,
-        actionType: moderationActions.actionType,
-        contentType: moderationActions.contentType,
-        contentUri: moderationActions.contentUri,
-        reason: moderationActions.reason,
-        createdAt: moderationActions.createdAt,
-        adminId: moderationActions.adminId,
-        adminHandle: users.handle,
-      })
-      .from(moderationActions)
-      .leftJoin(adminUsers, eq(moderationActions.adminId, adminUsers.id))
-      .leftJoin(users, eq(adminUsers.userDid, users.did))
-      .where(eq(moderationActions.contentUri, userDid))
-      .orderBy(desc(moderationActions.createdAt))
-      .limit(limit)
-      .offset(offset);
-
-    // Get audit log entries
-    const auditLogs = await db
-      .select({
-        id: adminAuditLog.id,
-        action: adminAuditLog.action,
-        details: adminAuditLog.details,
-        createdAt: adminAuditLog.createdAt,
-        adminId: adminAuditLog.adminId,
-        adminHandle: users.handle,
-      })
-      .from(adminAuditLog)
-      .leftJoin(adminUsers, eq(adminAuditLog.adminId, adminUsers.id))
-      .leftJoin(users, eq(adminUsers.userDid, users.did))
-      .where(
-        and(
-          eq(adminAuditLog.targetType, 'user'),
-          eq(adminAuditLog.targetId, userDid)
-        )
-      )
-      .orderBy(desc(adminAuditLog.createdAt))
-      .limit(limit)
-      .offset(offset);
-
-    // Get total counts
-    const [sanctionCount] = await db
-      .select({ count: count() })
-      .from(userSanctions)
-      .where(eq(userSanctions.userDid, userDid));
-
-    const [actionCount] = await db
-      .select({ count: count() })
-      .from(moderationActions)
-      .where(eq(moderationActions.contentUri, userDid));
-
-    const [auditCount] = await db
-      .select({ count: count() })
-      .from(adminAuditLog)
-      .where(
-        and(
-          eq(adminAuditLog.targetType, 'user'),
-          eq(adminAuditLog.targetId, userDid)
-        )
-      );
-
-    // Get current active sanctions
-    const activeSanctions = await db
-      .select()
-      .from(userSanctions)
-      .where(
-        and(
-          eq(userSanctions.userDid, userDid),
-          or(
-            isNull(userSanctions.expiresAt),
-            gte(userSanctions.expiresAt, new Date())
-          )
-        )
-      )
-      .orderBy(desc(userSanctions.createdAt));
-
-    return c.json({
-      sanctions,
-      moderationActions: actions,
-      auditLog: auditLogs,
-      activeSanctions,
-      counts: {
-        totalSanctions: sanctionCount?.count || 0,
-        totalActions: actionCount?.count || 0,
-        totalAuditEntries: auditCount?.count || 0,
-      },
-      pagination: {
-        limit,
-        offset,
-      },
-    });
-  }
-);
-
-// ============================================
-// Bulk User Actions
-// ============================================
-
-// Bulk sanction users
-adminRouter.post(
-  '/io.exprsn.admin.users.bulkSanction',
-  requirePermission(ADMIN_PERMISSIONS.USERS_SANCTION),
-  async (c) => {
-    const body = await c.req.json<{
-      userDids: string[];
-      sanctionType: 'warning' | 'mute' | 'suspend' | 'ban';
-      reason: string;
-      expiresAt?: string;
-    }>();
-    const adminUser = c.get('adminUser');
-    const permissions = c.get('adminPermissions');
-
-    if (!body.userDids || !Array.isArray(body.userDids) || body.userDids.length === 0) {
-      return c.json({ error: 'InvalidRequest', message: 'userDids array is required' }, 400);
-    }
-
-    if (!body.sanctionType || !body.reason) {
-      return c.json({ error: 'InvalidRequest', message: 'sanctionType and reason are required' }, 400);
-    }
-
-    // Limit bulk operations to 100 users at a time
-    if (body.userDids.length > 100) {
-      return c.json({ error: 'InvalidRequest', message: 'Maximum 100 users per bulk operation' }, 400);
-    }
-
-    // Ban requires special permission
-    if (body.sanctionType === 'ban' && !permissions.includes(ADMIN_PERMISSIONS.USERS_BAN)) {
-      return c.json({ error: 'Forbidden', message: 'Ban permission required' }, 403);
-    }
-
-    const results: { did: string; success: boolean; sanctionId?: string; error?: string }[] = [];
-    const expiresAt = body.expiresAt ? new Date(body.expiresAt) : null;
-
-    // Verify all users exist first
-    const existingUsers = await db
-      .select({ did: users.did })
-      .from(users)
-      .where(inArray(users.did, body.userDids));
-
-    const existingDids = new Set(existingUsers.map((u) => u.did));
-
-    // Process each user
-    for (const userDid of body.userDids) {
-      if (!existingDids.has(userDid)) {
-        results.push({ did: userDid, success: false, error: 'User not found' });
-        continue;
-      }
-
-      try {
-        const sanctionId = nanoid();
-        await db.insert(userSanctions).values({
-          id: sanctionId,
-          userDid,
-          adminId: adminUser.id,
-          sanctionType: body.sanctionType,
-          reason: body.reason,
-          expiresAt,
-          createdAt: new Date(),
-        });
-
-        // Audit log for each user
-        await db.insert(adminAuditLog).values({
-          id: nanoid(),
-          adminId: adminUser.id,
-          action: `user.bulkSanction.${body.sanctionType}`,
-          targetType: 'user',
-          targetId: userDid,
-          details: { sanctionId, reason: body.reason, bulkOperation: true },
-          createdAt: new Date(),
-        });
-
-        results.push({ did: userDid, success: true, sanctionId });
-      } catch (err) {
-        results.push({ did: userDid, success: false, error: 'Failed to apply sanction' });
-      }
-    }
-
-    const successCount = results.filter((r) => r.success).length;
-    const failureCount = results.filter((r) => !r.success).length;
-
-    // Broadcast activity to admins
-    if (successCount > 0) {
-      const user = await db.query.users.findFirst({
-        where: eq(users.did, adminUser.userDid),
-        columns: { handle: true },
-      });
-
-      broadcastAdminActivity({
-        adminDid: adminUser.userDid,
-        adminHandle: user?.handle || 'unknown',
-        action: `bulk_sanction_${body.sanctionType}`,
-        targetType: 'users',
-        targetId: `${successCount} users`,
-      });
-
-      notifyAdmins({
-        type: 'sanction',
-        title: 'Bulk Sanction Applied',
-        message: `${user?.handle || 'Admin'} applied ${body.sanctionType} to ${successCount} user(s)`,
-        severity: body.sanctionType === 'ban' ? 'error' : 'warning',
-        data: { successCount, sanctionType: body.sanctionType },
-      });
-    }
-
-    return c.json({
-      success: failureCount === 0,
-      summary: {
-        total: body.userDids.length,
-        succeeded: successCount,
-        failed: failureCount,
-      },
-      results,
-    });
-  }
-);
-
-// Bulk password reset
-adminRouter.post(
-  '/io.exprsn.admin.users.bulkResetPassword',
-  requirePermission(ADMIN_PERMISSIONS.USERS_EDIT),
-  async (c) => {
-    const body = await c.req.json<{
-      userDids: string[];
-    }>();
-    const adminUser = c.get('adminUser');
-
-    if (!body.userDids || !Array.isArray(body.userDids) || body.userDids.length === 0) {
-      return c.json({ error: 'InvalidRequest', message: 'userDids array is required' }, 400);
-    }
-
-    // Limit bulk operations to 100 users at a time
-    if (body.userDids.length > 100) {
-      return c.json({ error: 'InvalidRequest', message: 'Maximum 100 users per bulk operation' }, 400);
-    }
-
-    const results: { did: string; success: boolean; temporaryPassword?: string; error?: string }[] = [];
-
-    // Get existing users from actorRepos
-    const existingUsers = await db
-      .select({ did: actorRepos.did, handle: actorRepos.handle })
-      .from(actorRepos)
-      .where(inArray(actorRepos.did, body.userDids));
-
-    const existingMap = new Map(existingUsers.map((u) => [u.did, u]));
-
-    // Process each user
-    for (const userDid of body.userDids) {
-      const user = existingMap.get(userDid);
-      if (!user) {
-        results.push({ did: userDid, success: false, error: 'User account not found' });
-        continue;
-      }
-
-      try {
-        // Generate a random temporary password
-        const tempPassword = `temp_${nanoid(12)}`;
-        const passwordHash = await bcrypt.hash(tempPassword, 10);
-
-        // Update the password
-        await db
-          .update(actorRepos)
-          .set({ passwordHash, updatedAt: new Date() })
-          .where(eq(actorRepos.did, userDid));
-
-        // Invalidate all existing sessions
-        await db.delete(sessions).where(eq(sessions.did, userDid));
-
-        // Audit log
-        await db.insert(adminAuditLog).values({
-          id: nanoid(),
-          adminId: adminUser.id,
-          action: 'user.bulkResetPassword',
-          targetType: 'user',
-          targetId: userDid,
-          details: { handle: user.handle, bulkOperation: true },
-          createdAt: new Date(),
-        });
-
-        results.push({ did: userDid, success: true, temporaryPassword: tempPassword });
-      } catch (err) {
-        results.push({ did: userDid, success: false, error: 'Failed to reset password' });
-      }
-    }
-
-    const successCount = results.filter((r) => r.success).length;
-    const failureCount = results.filter((r) => !r.success).length;
-
-    return c.json({
-      success: failureCount === 0,
-      summary: {
-        total: body.userDids.length,
-        succeeded: successCount,
-        failed: failureCount,
-      },
-      results,
-    });
-  }
-);
-
-// Bulk delete users
-adminRouter.post(
-  '/io.exprsn.admin.users.bulkDelete',
-  requirePermission(ADMIN_PERMISSIONS.USERS_BAN),
-  async (c) => {
-    const body = await c.req.json<{
-      userDids: string[];
-      reason: string;
-      hardDelete?: boolean; // If true, permanently delete; otherwise soft delete (ban + deactivate)
-    }>();
-    const adminUser = c.get('adminUser');
-
-    if (!body.userDids || !Array.isArray(body.userDids) || body.userDids.length === 0) {
-      return c.json({ error: 'InvalidRequest', message: 'userDids array is required' }, 400);
-    }
-
-    if (!body.reason) {
-      return c.json({ error: 'InvalidRequest', message: 'reason is required' }, 400);
-    }
-
-    // Limit bulk operations to 50 users for deletion (more destructive)
-    if (body.userDids.length > 50) {
-      return c.json({ error: 'InvalidRequest', message: 'Maximum 50 users per bulk delete operation' }, 400);
-    }
-
-    const results: { did: string; success: boolean; error?: string }[] = [];
-
-    // Verify all users exist first
-    const existingUsers = await db
-      .select({ did: users.did, handle: users.handle })
-      .from(users)
-      .where(inArray(users.did, body.userDids));
-
-    const existingMap = new Map(existingUsers.map((u) => [u.did, u]));
-
-    // Process each user
-    for (const userDid of body.userDids) {
-      const user = existingMap.get(userDid);
-      if (!user) {
-        results.push({ did: userDid, success: false, error: 'User not found' });
-        continue;
-      }
-
-      try {
-        if (body.hardDelete) {
-          // Hard delete - remove user and related data
-          // Delete sessions first
-          await db.delete(sessions).where(eq(sessions.did, userDid));
-
-          // Delete sanctions
-          await db.delete(userSanctions).where(eq(userSanctions.userDid, userDid));
-
-          // Mark videos as removed
-          await db
-            .update(videos)
-            .set({ visibility: 'removed' })
-            .where(eq(videos.authorDid, userDid));
-
-          // Delete actor repo
-          await db.delete(actorRepos).where(eq(actorRepos.did, userDid));
-
-          // Delete user record
-          await db.delete(users).where(eq(users.did, userDid));
-        } else {
-          // Soft delete - ban the user and deactivate account
-          const sanctionId = nanoid();
-          await db.insert(userSanctions).values({
-            id: sanctionId,
-            userDid,
-            adminId: adminUser.id,
-            sanctionType: 'ban',
-            reason: `Account deleted: ${body.reason}`,
-            expiresAt: null, // Permanent
-            createdAt: new Date(),
-          });
-
-          // Invalidate all sessions
-          await db.delete(sessions).where(eq(sessions.did, userDid));
-
-          // Update actor repo status if it exists
-          await db
-            .update(actorRepos)
-            .set({ status: 'deactivated', updatedAt: new Date() })
-            .where(eq(actorRepos.did, userDid));
-        }
-
-        // Audit log
-        await db.insert(adminAuditLog).values({
-          id: nanoid(),
-          adminId: adminUser.id,
-          action: body.hardDelete ? 'user.bulkHardDelete' : 'user.bulkSoftDelete',
-          targetType: 'user',
-          targetId: userDid,
-          details: { handle: user.handle, reason: body.reason, bulkOperation: true },
-          createdAt: new Date(),
-        });
-
-        results.push({ did: userDid, success: true });
-      } catch (err) {
-        results.push({ did: userDid, success: false, error: 'Failed to delete user' });
-      }
-    }
-
-    const successCount = results.filter((r) => r.success).length;
-    const failureCount = results.filter((r) => !r.success).length;
-
-    return c.json({
-      success: failureCount === 0,
-      summary: {
-        total: body.userDids.length,
-        succeeded: successCount,
-        failed: failureCount,
-        deleteType: body.hardDelete ? 'hard' : 'soft',
-      },
-      results,
-    });
-  }
-);
-
-// Bulk force logout
-adminRouter.post(
-  '/io.exprsn.admin.users.bulkForceLogout',
-  requirePermission(ADMIN_PERMISSIONS.USERS_EDIT),
-  async (c) => {
-    const body = await c.req.json<{
-      userDids: string[];
-    }>();
-    const adminUser = c.get('adminUser');
-
-    if (!body.userDids || !Array.isArray(body.userDids) || body.userDids.length === 0) {
-      return c.json({ error: 'InvalidRequest', message: 'userDids array is required' }, 400);
-    }
-
-    // Limit bulk operations to 100 users at a time
-    if (body.userDids.length > 100) {
-      return c.json({ error: 'InvalidRequest', message: 'Maximum 100 users per bulk operation' }, 400);
-    }
-
-    const results: { did: string; success: boolean; sessionsInvalidated: number; error?: string }[] = [];
-
-    for (const userDid of body.userDids) {
-      try {
-        // Count existing sessions
-        const [sessionCount] = await db
-          .select({ count: count() })
-          .from(sessions)
-          .where(eq(sessions.did, userDid));
-
-        // Delete all sessions for the user
-        await db.delete(sessions).where(eq(sessions.did, userDid));
-
-        // Audit log
-        await db.insert(adminAuditLog).values({
-          id: nanoid(),
-          adminId: adminUser.id,
-          action: 'user.bulkForceLogout',
-          targetType: 'user',
-          targetId: userDid,
-          details: { sessionsInvalidated: sessionCount?.count || 0, bulkOperation: true },
-          createdAt: new Date(),
-        });
-
-        results.push({
-          did: userDid,
-          success: true,
-          sessionsInvalidated: sessionCount?.count || 0,
-        });
-      } catch (err) {
-        results.push({ did: userDid, success: false, sessionsInvalidated: 0, error: 'Failed to invalidate sessions' });
-      }
-    }
-
-    const successCount = results.filter((r) => r.success).length;
-    const totalSessionsInvalidated = results.reduce((sum, r) => sum + r.sessionsInvalidated, 0);
-
-    return c.json({
-      success: true,
-      summary: {
-        total: body.userDids.length,
-        succeeded: successCount,
-        failed: body.userDids.length - successCount,
-        totalSessionsInvalidated,
-      },
-      results,
-    });
-  }
-);
-
-// Preview bulk action (dry run)
-adminRouter.post(
-  '/io.exprsn.admin.users.bulkActionPreview',
-  requirePermission(ADMIN_PERMISSIONS.USERS_VIEW),
-  async (c) => {
-    const body = await c.req.json<{
-      userDids: string[];
-      action: 'sanction' | 'resetPassword' | 'delete' | 'forceLogout';
-      sanctionType?: 'warning' | 'mute' | 'suspend' | 'ban';
-    }>();
-
-    if (!body.userDids || !Array.isArray(body.userDids) || body.userDids.length === 0) {
-      return c.json({ error: 'InvalidRequest', message: 'userDids array is required' }, 400);
-    }
-
-    if (!body.action) {
-      return c.json({ error: 'InvalidRequest', message: 'action is required' }, 400);
-    }
-
-    // Get user details for preview
-    const userDetails = await db
-      .select({
-        did: users.did,
-        handle: users.handle,
-        displayName: users.displayName,
-        avatar: users.avatar,
-        followerCount: users.followerCount,
-        videoCount: users.videoCount,
-        verified: users.verified,
-      })
-      .from(users)
-      .where(inArray(users.did, body.userDids));
-
-    const foundDids = new Set(userDetails.map((u) => u.did));
-    const notFoundDids = body.userDids.filter((did) => !foundDids.has(did));
-
-    // Get current sanction status for each user
-    const activeSanctions = await db
-      .select({
-        userDid: userSanctions.userDid,
-        sanctionType: userSanctions.sanctionType,
-      })
-      .from(userSanctions)
-      .where(
-        and(
-          inArray(userSanctions.userDid, body.userDids),
-          or(isNull(userSanctions.expiresAt), gte(userSanctions.expiresAt, new Date()))
-        )
-      );
-
-    const sanctionMap = new Map<string, string>();
-    for (const s of activeSanctions) {
-      const current = sanctionMap.get(s.userDid);
-      if (!current || severityOrder(s.sanctionType) > severityOrder(current)) {
-        sanctionMap.set(s.userDid, s.sanctionType);
-      }
-    }
-
-    // Build warnings
-    const warnings: string[] = [];
-
-    if (notFoundDids.length > 0) {
-      warnings.push(`${notFoundDids.length} user(s) not found and will be skipped`);
-    }
-
-    if (body.action === 'sanction' && body.sanctionType) {
-      const alreadySanctioned = userDetails.filter((u) => {
-        const currentSanction = sanctionMap.get(u.did);
-        return currentSanction && severityOrder(currentSanction) >= severityOrder(body.sanctionType!);
-      });
-      if (alreadySanctioned.length > 0) {
-        warnings.push(
-          `${alreadySanctioned.length} user(s) already have equal or higher sanctions`
-        );
-      }
-    }
-
-    if (body.action === 'delete') {
-      const verifiedUsers = userDetails.filter((u) => u.verified);
-      if (verifiedUsers.length > 0) {
-        warnings.push(`${verifiedUsers.length} verified user(s) will be deleted`);
-      }
-
-      const totalFollowers = userDetails.reduce((sum, u) => sum + (u.followerCount || 0), 0);
-      if (totalFollowers > 1000) {
-        warnings.push(`Users have combined ${totalFollowers} followers`);
-      }
-    }
-
-    return c.json({
-      preview: {
-        action: body.action,
-        sanctionType: body.sanctionType,
-        affectedCount: userDetails.length,
-        notFoundCount: notFoundDids.length,
-        users: userDetails.map((u) => ({
-          ...u,
-          currentSanction: sanctionMap.get(u.did) || null,
-        })),
-        notFoundDids,
-      },
-      warnings,
-      canProceed: userDetails.length > 0,
-    });
-  }
-);
-
-// ============================================
-// User Domain/Org/Role/Group Management
-// ============================================
-
-// Get user's memberships (domains, organizations, roles, groups)
-adminRouter.get(
-  '/io.exprsn.admin.users.getMemberships',
-  requirePermission(ADMIN_PERMISSIONS.USERS_VIEW),
-  async (c) => {
-    const userDid = c.req.query('did');
-
-    if (!userDid) {
-      return c.json({ error: 'InvalidRequest', message: 'did is required' }, 400);
-    }
-
-    // Get user's domain memberships
-    const domainMemberships = await db
-      .select({
-        domainUser: domainUsers,
-        domain: {
-          id: domains.id,
-          name: domains.name,
-          displayName: domains.name, // domains table uses name as display name
-        },
-      })
-      .from(domainUsers)
-      .innerJoin(domains, eq(domains.id, domainUsers.domainId))
-      .where(eq(domainUsers.userDid, userDid));
-
-    // Get roles for each domain user
-    const domainUserIds = domainMemberships.map((dm) => dm.domainUser.id);
-    const userRoles = domainUserIds.length > 0
-      ? await db
-          .select({
-            domainUserId: domainUserRoles.domainUserId,
-            role: {
-              id: domainRoles.id,
-              name: domainRoles.name,
-              displayName: domainRoles.displayName,
-              permissions: domainRoles.permissions,
-            },
-          })
-          .from(domainUserRoles)
-          .innerJoin(domainRoles, eq(domainRoles.id, domainUserRoles.roleId))
-          .where(inArray(domainUserRoles.domainUserId, domainUserIds))
-      : [];
-
-    // Map roles by domain user ID
-    const rolesByDomainUser = new Map<string, typeof userRoles>();
-    for (const ur of userRoles) {
-      const existing = rolesByDomainUser.get(ur.domainUserId) || [];
-      existing.push(ur);
-      rolesByDomainUser.set(ur.domainUserId, existing);
-    }
-
-    // Get user's group memberships
-    const groupMemberships = await db
-      .select({
-        membership: domainGroupMembers,
-        group: {
-          id: domainGroups.id,
-          name: domainGroups.name,
-          description: domainGroups.description,
-          domainId: domainGroups.domainId,
-        },
-        domain: {
-          id: domains.id,
-          name: domains.name,
-        },
-      })
-      .from(domainGroupMembers)
-      .innerJoin(domainGroups, eq(domainGroups.id, domainGroupMembers.groupId))
-      .innerJoin(domains, eq(domains.id, domainGroups.domainId))
-      .where(eq(domainGroupMembers.userDid, userDid));
-
-    // Get user's organization memberships
-    const orgMemberships = await db
-      .select({
-        member: organizationMembers,
-        org: {
-          id: organizations.id,
-          name: organizations.name,
-          type: organizations.type,
-          avatar: organizations.avatar,
-        },
-      })
-      .from(organizationMembers)
-      .innerJoin(organizations, eq(organizations.id, organizationMembers.organizationId))
-      .where(eq(organizationMembers.userDid, userDid));
-
-    return c.json({
-      domains: domainMemberships.map((dm) => ({
-        id: dm.domainUser.id,
-        domainId: dm.domain.id,
-        domainName: dm.domain.name,
-        domainDisplayName: dm.domain.displayName,
-        role: dm.domainUser.role,
-        handle: dm.domainUser.handle,
-        isActive: dm.domainUser.isActive,
-        createdAt: dm.domainUser.createdAt,
-        roles: (rolesByDomainUser.get(dm.domainUser.id) || []).map((r) => r.role),
-      })),
-      groups: groupMemberships.map((gm) => ({
-        id: gm.membership.id,
-        groupId: gm.group.id,
-        groupName: gm.group.name,
-        groupDescription: gm.group.description,
-        domainId: gm.domain.id,
-        domainName: gm.domain.name,
-        createdAt: gm.membership.createdAt,
-      })),
-      organizations: orgMemberships.map((om) => ({
-        id: om.member.id,
-        orgId: om.org.id,
-        orgName: om.org.name,
-        orgType: om.org.type,
-        orgAvatar: om.org.avatar,
-        role: om.member.role,
-        permissions: om.member.permissions,
-        joinedAt: om.member.joinedAt,
-      })),
-    });
-  }
-);
-
-// Add user to domain
-adminRouter.post(
-  '/io.exprsn.admin.users.addToDomain',
-  requirePermission(ADMIN_PERMISSIONS.USERS_EDIT),
-  async (c) => {
-    const body = await c.req.json<{
-      userDid: string;
-      domainId: string;
-      role?: string;
-      handle?: string;
-    }>();
-    const adminUser = c.get('adminUser');
-
-    if (!body.userDid || !body.domainId) {
-      return c.json({ error: 'InvalidRequest', message: 'userDid and domainId are required' }, 400);
-    }
-
-    // Check domain exists
-    const [domain] = await db.select().from(domains).where(eq(domains.id, body.domainId)).limit(1);
-    if (!domain) {
-      return c.json({ error: 'NotFound', message: 'Domain not found' }, 404);
-    }
-
-    // Check user exists
-    const [user] = await db.select().from(users).where(eq(users.did, body.userDid)).limit(1);
-    if (!user) {
-      return c.json({ error: 'NotFound', message: 'User not found' }, 404);
-    }
-
-    // Check if already a member
-    const [existing] = await db
-      .select()
-      .from(domainUsers)
-      .where(and(eq(domainUsers.domainId, body.domainId), eq(domainUsers.userDid, body.userDid)))
-      .limit(1);
-
-    if (existing) {
-      return c.json({ error: 'Conflict', message: 'User is already a member of this domain' }, 409);
-    }
-
-    const domainUserId = nanoid();
-    await db.insert(domainUsers).values({
-      id: domainUserId,
-      domainId: body.domainId,
-      userDid: body.userDid,
-      role: body.role || 'member',
-      handle: body.handle || user.handle,
-      isActive: true,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    });
-
-    // Audit log
-    await db.insert(adminAuditLog).values({
-      id: nanoid(),
-      adminId: adminUser.id,
-      action: 'user.addToDomain',
-      targetType: 'user',
-      targetId: body.userDid,
-      details: { domainId: body.domainId, role: body.role || 'member' },
-      createdAt: new Date(),
-    });
-
-    return c.json({ success: true, domainUserId });
-  }
-);
-
-// Remove user from domain
-adminRouter.post(
-  '/io.exprsn.admin.users.removeFromDomain',
-  requirePermission(ADMIN_PERMISSIONS.USERS_EDIT),
-  async (c) => {
-    const body = await c.req.json<{
-      userDid: string;
-      domainId: string;
-    }>();
-    const adminUser = c.get('adminUser');
-
-    if (!body.userDid || !body.domainId) {
-      return c.json({ error: 'InvalidRequest', message: 'userDid and domainId are required' }, 400);
-    }
-
-    await db
-      .delete(domainUsers)
-      .where(and(eq(domainUsers.domainId, body.domainId), eq(domainUsers.userDid, body.userDid)));
-
-    // Audit log
-    await db.insert(adminAuditLog).values({
-      id: nanoid(),
-      adminId: adminUser.id,
-      action: 'user.removeFromDomain',
-      targetType: 'user',
-      targetId: body.userDid,
-      details: { domainId: body.domainId },
-      createdAt: new Date(),
-    });
-
-    return c.json({ success: true });
-  }
-);
-
-// Add user to organization
-adminRouter.post(
-  '/io.exprsn.admin.users.addToOrganization',
-  requirePermission(ADMIN_PERMISSIONS.USERS_EDIT),
-  async (c) => {
-    const body = await c.req.json<{
-      userDid: string;
-      organizationId: string;
-      role?: string;
-    }>();
-    const adminUser = c.get('adminUser');
-
-    if (!body.userDid || !body.organizationId) {
-      return c.json({ error: 'InvalidRequest', message: 'userDid and organizationId are required' }, 400);
-    }
-
-    // Check org exists
-    const [org] = await db
-      .select({ id: organizations.id, name: organizations.name, memberCount: organizations.memberCount })
-      .from(organizations)
-      .where(eq(organizations.id, body.organizationId))
-      .limit(1);
-    if (!org) {
-      return c.json({ error: 'NotFound', message: 'Organization not found' }, 404);
-    }
-
-    // Check user exists
-    const [user] = await db.select().from(users).where(eq(users.did, body.userDid)).limit(1);
-    if (!user) {
-      return c.json({ error: 'NotFound', message: 'User not found' }, 404);
-    }
-
-    // Check if already a member
-    const [existing] = await db
-      .select()
-      .from(organizationMembers)
-      .where(
-        and(
-          eq(organizationMembers.organizationId, body.organizationId),
-          eq(organizationMembers.userDid, body.userDid)
-        )
-      )
-      .limit(1);
-
-    if (existing) {
-      return c.json({ error: 'Conflict', message: 'User is already a member of this organization' }, 409);
-    }
-
-    const memberId = nanoid();
-    await db.insert(organizationMembers).values({
-      id: memberId,
-      organizationId: body.organizationId,
-      userDid: body.userDid,
-      role: body.role || 'member',
-      permissions: [],
-      joinedAt: new Date(),
-    });
-
-    // Update member count
-    await db
-      .update(organizations)
-      .set({ memberCount: org.memberCount + 1 })
-      .where(eq(organizations.id, body.organizationId));
-
-    // Audit log
-    await db.insert(adminAuditLog).values({
-      id: nanoid(),
-      adminId: adminUser.id,
-      action: 'user.addToOrganization',
-      targetType: 'user',
-      targetId: body.userDid,
-      details: { organizationId: body.organizationId, role: body.role || 'member' },
-      createdAt: new Date(),
-    });
-
-    return c.json({ success: true, memberId });
-  }
-);
-
-// Remove user from organization
-adminRouter.post(
-  '/io.exprsn.admin.users.removeFromOrganization',
-  requirePermission(ADMIN_PERMISSIONS.USERS_EDIT),
-  async (c) => {
-    const body = await c.req.json<{
-      userDid: string;
-      organizationId: string;
-    }>();
-    const adminUser = c.get('adminUser');
-
-    if (!body.userDid || !body.organizationId) {
-      return c.json({ error: 'InvalidRequest', message: 'userDid and organizationId are required' }, 400);
-    }
-
-    // Get org for member count update
-    const [org] = await db
-      .select({ memberCount: organizations.memberCount })
-      .from(organizations)
-      .where(eq(organizations.id, body.organizationId))
-      .limit(1);
-
-    await db
-      .delete(organizationMembers)
-      .where(
-        and(
-          eq(organizationMembers.organizationId, body.organizationId),
-          eq(organizationMembers.userDid, body.userDid)
-        )
-      );
-
-    // Update member count
-    if (org && org.memberCount > 0) {
-      await db
-        .update(organizations)
-        .set({ memberCount: org.memberCount - 1 })
-        .where(eq(organizations.id, body.organizationId));
-    }
-
-    // Audit log
-    await db.insert(adminAuditLog).values({
-      id: nanoid(),
-      adminId: adminUser.id,
-      action: 'user.removeFromOrganization',
-      targetType: 'user',
-      targetId: body.userDid,
-      details: { organizationId: body.organizationId },
-      createdAt: new Date(),
-    });
-
-    return c.json({ success: true });
-  }
-);
-
-// Assign role to user in domain
-adminRouter.post(
-  '/io.exprsn.admin.users.assignDomainRole',
-  requirePermission(ADMIN_PERMISSIONS.USERS_EDIT),
-  async (c) => {
-    const body = await c.req.json<{
-      userDid: string;
-      domainId: string;
-      roleId: string;
-    }>();
-    const adminUser = c.get('adminUser');
-
-    if (!body.userDid || !body.domainId || !body.roleId) {
-      return c.json({ error: 'InvalidRequest', message: 'userDid, domainId, and roleId are required' }, 400);
-    }
-
-    // Get domain user
-    const [domainUser] = await db
-      .select()
-      .from(domainUsers)
-      .where(and(eq(domainUsers.domainId, body.domainId), eq(domainUsers.userDid, body.userDid)))
-      .limit(1);
-
-    if (!domainUser) {
-      return c.json({ error: 'NotFound', message: 'User is not a member of this domain' }, 404);
-    }
-
-    // Check role exists
-    const [role] = await db
-      .select()
-      .from(domainRoles)
-      .where(and(eq(domainRoles.id, body.roleId), eq(domainRoles.domainId, body.domainId)))
-      .limit(1);
-
-    if (!role) {
-      return c.json({ error: 'NotFound', message: 'Role not found in this domain' }, 404);
-    }
-
-    // Check if already has this role
-    const [existing] = await db
-      .select()
-      .from(domainUserRoles)
-      .where(
-        and(eq(domainUserRoles.domainUserId, domainUser.id), eq(domainUserRoles.roleId, body.roleId))
-      )
-      .limit(1);
-
-    if (existing) {
-      return c.json({ error: 'Conflict', message: 'User already has this role' }, 409);
-    }
-
-    const userRoleId = nanoid();
-    await db.insert(domainUserRoles).values({
-      id: userRoleId,
-      domainUserId: domainUser.id,
-      roleId: body.roleId,
-      assignedBy: adminUser.userDid,
-      createdAt: new Date(),
-    });
-
-    // Audit log
-    await db.insert(adminAuditLog).values({
-      id: nanoid(),
-      adminId: adminUser.id,
-      action: 'user.assignDomainRole',
-      targetType: 'user',
-      targetId: body.userDid,
-      details: { domainId: body.domainId, roleId: body.roleId, roleName: role.name },
-      createdAt: new Date(),
-    });
-
-    return c.json({ success: true, userRoleId });
-  }
-);
-
-// Remove role from user in domain
-adminRouter.post(
-  '/io.exprsn.admin.users.removeDomainRole',
-  requirePermission(ADMIN_PERMISSIONS.USERS_EDIT),
-  async (c) => {
-    const body = await c.req.json<{
-      userDid: string;
-      domainId: string;
-      roleId: string;
-    }>();
-    const adminUser = c.get('adminUser');
-
-    if (!body.userDid || !body.domainId || !body.roleId) {
-      return c.json({ error: 'InvalidRequest', message: 'userDid, domainId, and roleId are required' }, 400);
-    }
-
-    // Get domain user
-    const [domainUser] = await db
-      .select()
-      .from(domainUsers)
-      .where(and(eq(domainUsers.domainId, body.domainId), eq(domainUsers.userDid, body.userDid)))
-      .limit(1);
-
-    if (!domainUser) {
-      return c.json({ error: 'NotFound', message: 'User is not a member of this domain' }, 404);
-    }
-
-    await db
-      .delete(domainUserRoles)
-      .where(
-        and(eq(domainUserRoles.domainUserId, domainUser.id), eq(domainUserRoles.roleId, body.roleId))
-      );
-
-    // Audit log
-    await db.insert(adminAuditLog).values({
-      id: nanoid(),
-      adminId: adminUser.id,
-      action: 'user.removeDomainRole',
-      targetType: 'user',
-      targetId: body.userDid,
-      details: { domainId: body.domainId, roleId: body.roleId },
-      createdAt: new Date(),
-    });
-
-    return c.json({ success: true });
-  }
-);
-
-// Add user to group
-adminRouter.post(
-  '/io.exprsn.admin.users.addToGroup',
-  requirePermission(ADMIN_PERMISSIONS.USERS_EDIT),
-  async (c) => {
-    const body = await c.req.json<{
-      userDid: string;
-      groupId: string;
-    }>();
-    const adminUser = c.get('adminUser');
-
-    if (!body.userDid || !body.groupId) {
-      return c.json({ error: 'InvalidRequest', message: 'userDid and groupId are required' }, 400);
-    }
-
-    // Check group exists
-    const [group] = await db
-      .select()
-      .from(domainGroups)
-      .where(eq(domainGroups.id, body.groupId))
-      .limit(1);
-
-    if (!group) {
-      return c.json({ error: 'NotFound', message: 'Group not found' }, 404);
-    }
-
-    // Check user exists
-    const [user] = await db.select().from(users).where(eq(users.did, body.userDid)).limit(1);
-    if (!user) {
-      return c.json({ error: 'NotFound', message: 'User not found' }, 404);
-    }
-
-    // Check if already a member
-    const [existing] = await db
-      .select()
-      .from(domainGroupMembers)
-      .where(
-        and(eq(domainGroupMembers.groupId, body.groupId), eq(domainGroupMembers.userDid, body.userDid))
-      )
-      .limit(1);
-
-    if (existing) {
-      return c.json({ error: 'Conflict', message: 'User is already a member of this group' }, 409);
-    }
-
-    const membershipId = nanoid();
-    await db.insert(domainGroupMembers).values({
-      id: membershipId,
-      groupId: body.groupId,
-      userDid: body.userDid,
-      addedBy: adminUser.userDid,
-      createdAt: new Date(),
-    });
-
-    // Update member count
-    await db
-      .update(domainGroups)
-      .set({ memberCount: group.memberCount + 1 })
-      .where(eq(domainGroups.id, body.groupId));
-
-    // Audit log
-    await db.insert(adminAuditLog).values({
-      id: nanoid(),
-      adminId: adminUser.id,
-      action: 'user.addToGroup',
-      targetType: 'user',
-      targetId: body.userDid,
-      details: { groupId: body.groupId, groupName: group.name },
-      createdAt: new Date(),
-    });
-
-    return c.json({ success: true, membershipId });
-  }
-);
-
-// Remove user from group
-adminRouter.post(
-  '/io.exprsn.admin.users.removeFromGroup',
-  requirePermission(ADMIN_PERMISSIONS.USERS_EDIT),
-  async (c) => {
-    const body = await c.req.json<{
-      userDid: string;
-      groupId: string;
-    }>();
-    const adminUser = c.get('adminUser');
-
-    if (!body.userDid || !body.groupId) {
-      return c.json({ error: 'InvalidRequest', message: 'userDid and groupId are required' }, 400);
-    }
-
-    // Get group for member count update
-    const [group] = await db
-      .select({ memberCount: domainGroups.memberCount })
-      .from(domainGroups)
-      .where(eq(domainGroups.id, body.groupId))
-      .limit(1);
-
-    await db
-      .delete(domainGroupMembers)
-      .where(
-        and(eq(domainGroupMembers.groupId, body.groupId), eq(domainGroupMembers.userDid, body.userDid))
-      );
-
-    // Update member count
-    if (group && group.memberCount > 0) {
-      await db
-        .update(domainGroups)
-        .set({ memberCount: group.memberCount - 1 })
-        .where(eq(domainGroups.id, body.groupId));
-    }
-
-    // Audit log
-    await db.insert(adminAuditLog).values({
-      id: nanoid(),
-      adminId: adminUser.id,
-      action: 'user.removeFromGroup',
-      targetType: 'user',
-      targetId: body.userDid,
-      details: { groupId: body.groupId },
-      createdAt: new Date(),
-    });
-
-    return c.json({ success: true });
-  }
-);
-
-// Get available domains for assignment
-adminRouter.get(
-  '/io.exprsn.admin.domains.listAll',
-  requirePermission(ADMIN_PERMISSIONS.USERS_VIEW),
-  async (c) => {
-    const q = c.req.query('q');
-    const limit = Math.min(parseInt(c.req.query('limit') || '50'), 100);
-
-    let conditions = [];
-    if (q) {
-      conditions.push(or(ilike(domains.name, `%${q}%`), ilike(domains.domain, `%${q}%`)));
-    }
-
-    const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
-
-    const domainList = await db
-      .select({
-        id: domains.id,
-        name: domains.name,
-        displayName: domains.name, // Use name as displayName
-        userCount: domains.userCount,
-        status: domains.status,
-      })
-      .from(domains)
-      .where(whereClause)
-      .orderBy(domains.name)
-      .limit(limit);
-
-    return c.json({ domains: domainList });
-  }
-);
-
-// Get available organizations for assignment
-adminRouter.get(
-  '/io.exprsn.admin.organizations.listAll',
-  requirePermission(ADMIN_PERMISSIONS.USERS_VIEW),
-  async (c) => {
-    const q = c.req.query('q');
-    const limit = Math.min(parseInt(c.req.query('limit') || '50'), 100);
-
-    let conditions = [];
-    if (q) {
-      conditions.push(or(ilike(organizations.name, `%${q}%`), ilike(organizations.description, `%${q}%`)));
-    }
-
-    const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
-
-    const orgList = await db
-      .select({
-        id: organizations.id,
-        name: organizations.name,
-        type: organizations.type,
-        avatar: organizations.avatar,
-        memberCount: organizations.memberCount,
-        verified: organizations.verified,
-      })
-      .from(organizations)
-      .where(whereClause)
-      .orderBy(organizations.name)
-      .limit(limit);
-
-    return c.json({ organizations: orgList });
-  }
-);
-
-// Get available roles for a domain
-adminRouter.get(
-  '/io.exprsn.admin.domains.getRoles',
-  requirePermission(ADMIN_PERMISSIONS.USERS_VIEW),
-  async (c) => {
-    const domainId = c.req.query('domainId');
-
-    if (!domainId) {
-      return c.json({ error: 'InvalidRequest', message: 'domainId is required' }, 400);
-    }
-
-    const roles = await db
-      .select({
-        id: domainRoles.id,
-        name: domainRoles.name,
-        displayName: domainRoles.displayName,
-        description: domainRoles.description,
-        isSystem: domainRoles.isSystem,
-        priority: domainRoles.priority,
-        permissions: domainRoles.permissions,
-      })
-      .from(domainRoles)
-      .where(eq(domainRoles.domainId, domainId))
-      .orderBy(domainRoles.priority);
-
-    return c.json({ roles });
-  }
-);
-
-// Get available groups for a domain
-adminRouter.get(
-  '/io.exprsn.admin.domains.getGroups',
-  requirePermission(ADMIN_PERMISSIONS.USERS_VIEW),
-  async (c) => {
-    const domainId = c.req.query('domainId');
-
-    if (!domainId) {
-      return c.json({ error: 'InvalidRequest', message: 'domainId is required' }, 400);
-    }
-
-    const groups = await db
-      .select({
-        id: domainGroups.id,
-        name: domainGroups.name,
-        description: domainGroups.description,
-        memberCount: domainGroups.memberCount,
-        isDefault: domainGroups.isDefault,
-      })
-      .from(domainGroups)
-      .where(eq(domainGroups.domainId, domainId))
-      .orderBy(domainGroups.name);
-
-    return c.json({ groups });
-  }
-);
-
-// ============================================
-// Organization Admin
-// ============================================
-
-// List all organizations
-adminRouter.get(
-  '/io.exprsn.admin.orgs.list',
-  requirePermission(ADMIN_PERMISSIONS.USERS_VIEW),
-  async (c) => {
-    const q = c.req.query('q');
-    const type = c.req.query('type'); // team, enterprise, nonprofit, business
-    const verified = c.req.query('verified'); // true, false
-    const apiAccess = c.req.query('apiAccess'); // enabled, disabled
-    const sort = c.req.query('sort') || 'recent'; // recent, members, name
-    const limit = Math.min(parseInt(c.req.query('limit') || '50'), 100);
-    const cursor = c.req.query('cursor');
-
-    let conditions = [];
-
-    if (q) {
-      conditions.push(
-        or(
-          ilike(organizations.name, `%${q}%`),
-          ilike(organizations.description, `%${q}%`)
-        )
-      );
-    }
-
-    if (type) {
-      conditions.push(eq(organizations.type, type));
-    }
-
-    if (verified === 'true') {
-      conditions.push(eq(organizations.verified, true));
-    } else if (verified === 'false') {
-      conditions.push(eq(organizations.verified, false));
-    }
-
-    if (apiAccess === 'enabled') {
-      conditions.push(eq(organizations.apiAccessEnabled, true));
-    } else if (apiAccess === 'disabled') {
-      conditions.push(eq(organizations.apiAccessEnabled, false));
-    }
-
-    let orderBy;
-    switch (sort) {
-      case 'members':
-        orderBy = desc(organizations.memberCount);
-        break;
-      case 'name':
-        orderBy = asc(organizations.name);
-        break;
-      default:
-        orderBy = desc(organizations.createdAt);
-    }
-
-    const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
-
-    const orgs = await db
-      .select({
-        org: organizations,
-        owner: {
-          did: users.did,
-          handle: users.handle,
-          displayName: users.displayName,
-          avatar: users.avatar,
-        },
-      })
-      .from(organizations)
-      .leftJoin(users, eq(users.did, organizations.ownerDid))
-      .where(whereClause)
-      .orderBy(orderBy)
-      .limit(limit + 1);
-
-    const hasMore = orgs.length > limit;
-    const results = hasMore ? orgs.slice(0, -1) : orgs;
-
-    return c.json({
-      organizations: results.map(({ org, owner }) => ({
-        id: org.id,
-        name: org.name,
-        type: org.type,
-        description: org.description,
-        avatar: org.avatar,
-        status: org.status,
-        verified: org.verified,
-        memberCount: org.memberCount,
-        apiAccessEnabled: org.apiAccessEnabled,
-        domainId: org.domainId,
-        parentOrganizationId: org.parentOrganizationId,
-        owner,
-        createdAt: org.createdAt.toISOString(),
-      })),
-      cursor: hasMore ? results[results.length - 1]?.org.createdAt.toISOString() : undefined,
-    });
-  }
-);
-
-// Create organization (admin)
-adminRouter.post(
-  '/io.exprsn.admin.orgs.create',
-  requirePermission(ADMIN_PERMISSIONS.USERS_EDIT),
-  async (c) => {
-    const body = await c.req.json<{
-      name: string;
-      handle?: string;
-      type: 'team' | 'enterprise' | 'nonprofit' | 'business' | 'company' | 'network' | 'label' | 'brand' | 'channel';
-      description?: string;
-      website?: string;
-      ownerDid: string;
-      visibility?: 'public' | 'private' | 'unlisted';
-      domainId?: string | null;
-      parentOrganizationId?: string | null;
-      contactEmail?: string;
-    }>();
-    const adminUser = c.get('adminUser');
-
-    // Validate required fields
-    if (!body.name || body.name.length < 2 || body.name.length > 100) {
-      return c.json({ error: 'InvalidRequest', message: 'Organization name must be 2-100 characters' }, 400);
-    }
-
-    if (!body.ownerDid) {
-      return c.json({ error: 'InvalidRequest', message: 'Owner DID is required' }, 400);
-    }
-
-    const validTypes = ['team', 'enterprise', 'nonprofit', 'business', 'company', 'network', 'label', 'brand', 'channel'];
-    if (!validTypes.includes(body.type)) {
-      return c.json({ error: 'InvalidRequest', message: 'Invalid organization type' }, 400);
-    }
-
-    // Verify owner exists
-    const owner = await db
-      .select()
-      .from(users)
-      .where(eq(users.did, body.ownerDid))
-      .limit(1);
-
-    if (!owner[0]) {
-      return c.json({ error: 'InvalidRequest', message: 'Owner user not found' }, 400);
-    }
-
-    // Validate handle if provided
-    if (body.handle) {
-      const handleRegex = /^[a-z0-9-_]+$/;
-      if (!handleRegex.test(body.handle)) {
-        return c.json({ error: 'InvalidRequest', message: 'Handle must contain only lowercase letters, numbers, hyphens, and underscores' }, 400);
-      }
-
-      // Check if handle is already taken
-      const existingHandle = await db
-        .select()
-        .from(organizations)
-        .where(eq(organizations.handle, body.handle))
-        .limit(1);
-
-      if (existingHandle[0]) {
-        return c.json({ error: 'InvalidRequest', message: 'Handle already taken' }, 400);
-      }
-    }
-
-    // Validate domain if provided
-    if (body.domainId) {
-      const domain = await db
-        .select()
-        .from(domains)
-        .where(eq(domains.id, body.domainId))
-        .limit(1);
-
-      if (!domain[0]) {
-        return c.json({ error: 'InvalidRequest', message: 'Domain not found' }, 400);
-      }
-    }
-
-    // Validate parent organization if provided
-    if (body.parentOrganizationId) {
-      const parentOrg = await db
-        .select()
-        .from(organizations)
-        .where(eq(organizations.id, body.parentOrganizationId))
-        .limit(1);
-
-      if (!parentOrg[0]) {
-        return c.json({ error: 'InvalidRequest', message: 'Parent organization not found' }, 400);
-      }
-    }
-
-    const orgId = nanoid();
-    const now = new Date();
-
-    // Determine visibility
-    const isPublic = body.visibility === 'private' ? false : true;
-
-    // Create organization
-    await db.insert(organizations).values({
-      id: orgId,
-      ownerDid: body.ownerDid,
-      name: body.name,
-      handle: body.handle,
-      type: body.type,
-      description: body.description,
-      website: body.website,
-      isPublic,
-      memberCount: 1,
-      domainId: body.domainId,
-      parentOrganizationId: body.parentOrganizationId,
-      createdAt: now,
-      updatedAt: now,
-    });
-
-    // Add owner as member
-    await db.insert(organizationMembers).values({
-      id: nanoid(),
-      organizationId: orgId,
-      userDid: body.ownerDid,
-      role: 'owner',
-      permissions: ['*'], // Owner has all permissions
-      joinedAt: now,
-    });
-
-    // Audit log
-    await db.insert(adminAuditLog).values({
-      id: nanoid(),
-      adminId: adminUser.id,
-      action: 'organization.create',
-      targetType: 'organization',
-      targetId: orgId,
-      details: {
-        name: body.name,
-        type: body.type,
-        ownerDid: body.ownerDid,
-        domainId: body.domainId,
-        parentOrganizationId: body.parentOrganizationId,
-      },
-      createdAt: now,
-    });
-
-    return c.json({
-      success: true,
-      organization: {
-        id: orgId,
-        name: body.name,
-        handle: body.handle,
-        type: body.type,
-      },
-    });
-  }
-);
-
-// Get organization details
-adminRouter.get(
-  '/io.exprsn.admin.orgs.get',
-  requirePermission(ADMIN_PERMISSIONS.USERS_VIEW),
-  async (c) => {
-    const orgId = c.req.query('id');
-
-    if (!orgId) {
-      return c.json({ error: 'InvalidRequest', message: 'Organization ID required' }, 400);
-    }
-
-    const result = await db
-      .select()
-      .from(organizations)
-      .where(eq(organizations.id, orgId))
-      .limit(1);
-
-    const org = result[0];
-    if (!org) {
-      return c.json({ error: 'NotFound', message: 'Organization not found' }, 404);
-    }
-
-    // Get owner info
-    const ownerResult = await db
-      .select({
-        did: users.did,
-        handle: users.handle,
-        displayName: users.displayName,
-        avatar: users.avatar,
-      })
-      .from(users)
-      .where(eq(users.did, org.ownerDid))
-      .limit(1);
-
-    // Get member stats
-    const memberStats = await db
-      .select({
-        total: count(),
-        active: sql<number>`COUNT(*) FILTER (WHERE status = 'active')`,
-        suspended: sql<number>`COUNT(*) FILTER (WHERE status = 'suspended')`,
-      })
-      .from(organizationMembers)
-      .where(eq(organizationMembers.organizationId, orgId));
-
-    // Get recent activity
-    const recentActivity = await db
-      .select({
-        activity: organizationActivity,
-        actor: {
-          did: users.did,
-          handle: users.handle,
-        },
-      })
-      .from(organizationActivity)
-      .leftJoin(users, eq(users.did, organizationActivity.actorDid))
-      .where(eq(organizationActivity.organizationId, orgId))
-      .orderBy(desc(organizationActivity.createdAt))
-      .limit(10);
-
-    return c.json({
-      organization: {
-        id: org.id,
-        name: org.name,
-        type: org.type,
-        description: org.description,
-        website: org.website,
-        avatar: org.avatar,
-        status: org.status,
-        verified: org.verified,
-        memberCount: org.memberCount,
-        domainId: org.domainId,
-        parentOrganizationId: org.parentOrganizationId,
-        hierarchyPath: org.hierarchyPath,
-        hierarchyLevel: org.hierarchyLevel,
-        suspendedAt: org.suspendedAt?.toISOString(),
-        suspendedBy: org.suspendedBy,
-        suspendedReason: org.suspendedReason,
-        rateLimitPerMinute: org.rateLimitPerMinute,
-        burstLimit: org.burstLimit,
-        dailyRequestLimit: org.dailyRequestLimit,
-        apiAccessEnabled: org.apiAccessEnabled,
-        allowedScopes: org.allowedScopes,
-        webhooksEnabled: org.webhooksEnabled,
-        createdAt: org.createdAt.toISOString(),
-        updatedAt: org.updatedAt.toISOString(),
-      },
-      owner: ownerResult[0] || null,
-      stats: {
-        totalMembers: memberStats[0]?.total || 0,
-        activeMembers: memberStats[0]?.active || 0,
-        suspendedMembers: memberStats[0]?.suspended || 0,
-      },
-      recentActivity: recentActivity.map(({ activity, actor }) => ({
-        id: activity.id,
-        action: activity.action,
-        details: activity.details,
-        actor,
-        createdAt: activity.createdAt.toISOString(),
-      })),
-    });
-  }
-);
-
-// Update organization (admin)
-adminRouter.post(
-  '/io.exprsn.admin.orgs.update',
-  requirePermission(ADMIN_PERMISSIONS.USERS_EDIT),
-  async (c) => {
-    const body = await c.req.json<{
-      id: string;
-      verified?: boolean;
-      status?: 'active' | 'suspended' | 'pending';
-      apiAccessEnabled?: boolean;
-      rateLimitPerMinute?: number | null;
-      burstLimit?: number | null;
-      dailyRequestLimit?: number | null;
-      allowedScopes?: string[] | null;
-      webhooksEnabled?: boolean;
-      domainId?: string | null;
-      parentOrganizationId?: string | null;
-      suspendedReason?: string | null;
-    }>();
-    const adminUser = c.get('adminUser');
-
-    if (!body.id) {
-      return c.json({ error: 'InvalidRequest', message: 'Organization ID required' }, 400);
-    }
-
-    const org = await db
-      .select()
-      .from(organizations)
-      .where(eq(organizations.id, body.id))
-      .limit(1);
-
-    if (!org[0]) {
-      return c.json({ error: 'NotFound', message: 'Organization not found' }, 404);
-    }
-
-    const updates: Partial<typeof organizations.$inferInsert> = {
-      updatedAt: new Date(),
-    };
-
-    if (body.verified !== undefined) updates.verified = body.verified;
-    if (body.status !== undefined) {
-      updates.status = body.status;
-      if (body.status === 'suspended') {
-        updates.suspendedAt = new Date();
-        updates.suspendedBy = adminUser.userDid;
-        updates.suspendedReason = body.suspendedReason ?? 'Administrative action';
-      } else if (body.status === 'active') {
-        updates.suspendedAt = null;
-        updates.suspendedBy = null;
-        updates.suspendedReason = null;
-      }
-    }
-    if (body.apiAccessEnabled !== undefined) updates.apiAccessEnabled = body.apiAccessEnabled;
-    if (body.rateLimitPerMinute !== undefined) updates.rateLimitPerMinute = body.rateLimitPerMinute;
-    if (body.burstLimit !== undefined) updates.burstLimit = body.burstLimit;
-    if (body.dailyRequestLimit !== undefined) updates.dailyRequestLimit = body.dailyRequestLimit;
-    if (body.allowedScopes !== undefined) updates.allowedScopes = body.allowedScopes;
-    if (body.webhooksEnabled !== undefined) updates.webhooksEnabled = body.webhooksEnabled;
-    if (body.domainId !== undefined) updates.domainId = body.domainId;
-    if (body.parentOrganizationId !== undefined) updates.parentOrganizationId = body.parentOrganizationId;
-
-    await db.update(organizations).set(updates).where(eq(organizations.id, body.id));
-
-    // Audit log
-    await db.insert(adminAuditLog).values({
-      id: nanoid(),
-      adminId: adminUser.id,
-      action: 'organization.update',
-      targetType: 'organization',
-      targetId: body.id,
-      details: { updates: Object.keys(updates).filter((k) => k !== 'updatedAt') },
-      createdAt: new Date(),
-    });
-
-    return c.json({ success: true });
-  }
-);
-
-// Bulk verify organizations
-adminRouter.post(
-  '/io.exprsn.admin.orgs.bulkVerify',
-  requirePermission(ADMIN_PERMISSIONS.USERS_EDIT),
-  async (c) => {
-    const body = await c.req.json<{
-      orgIds: string[];
-      verified: boolean;
-    }>();
-    const adminUser = c.get('adminUser');
-
-    if (!body.orgIds || !Array.isArray(body.orgIds) || body.orgIds.length === 0) {
-      return c.json({ error: 'InvalidRequest', message: 'orgIds array is required' }, 400);
-    }
-
-    if (body.orgIds.length > 100) {
-      return c.json({ error: 'InvalidRequest', message: 'Maximum 100 organizations per bulk operation' }, 400);
-    }
-
-    // Verify orgs exist
-    const existingOrgs = await db
-      .select({ id: organizations.id, name: organizations.name })
-      .from(organizations)
-      .where(inArray(organizations.id, body.orgIds));
-
-    const existingIds = new Set(existingOrgs.map((o) => o.id));
-    const results: { id: string; success: boolean; error?: string }[] = [];
-
-    for (const orgId of body.orgIds) {
-      if (!existingIds.has(orgId)) {
-        results.push({ id: orgId, success: false, error: 'Organization not found' });
-        continue;
-      }
-
-      try {
-        await db
-          .update(organizations)
-          .set({ verified: body.verified, updatedAt: new Date() })
-          .where(eq(organizations.id, orgId));
-
-        // Audit log
-        await db.insert(adminAuditLog).values({
-          id: nanoid(),
-          adminId: adminUser.id,
-          action: body.verified ? 'organization.bulkVerify' : 'organization.bulkUnverify',
-          targetType: 'organization',
-          targetId: orgId,
-          details: { bulkOperation: true },
-          createdAt: new Date(),
-        });
-
-        results.push({ id: orgId, success: true });
-      } catch (err) {
-        results.push({ id: orgId, success: false, error: 'Failed to update' });
-      }
-    }
-
-    const successCount = results.filter((r) => r.success).length;
-
-    return c.json({
-      success: true,
-      summary: {
-        total: body.orgIds.length,
-        succeeded: successCount,
-        failed: body.orgIds.length - successCount,
-        action: body.verified ? 'verified' : 'unverified',
-      },
-      results,
-    });
-  }
-);
-
-// Bulk update organization API access
-adminRouter.post(
-  '/io.exprsn.admin.orgs.bulkUpdateApiAccess',
-  requirePermission(ADMIN_PERMISSIONS.USERS_EDIT),
-  async (c) => {
-    const body = await c.req.json<{
-      orgIds: string[];
-      apiAccessEnabled: boolean;
-    }>();
-    const adminUser = c.get('adminUser');
-
-    if (!body.orgIds || !Array.isArray(body.orgIds) || body.orgIds.length === 0) {
-      return c.json({ error: 'InvalidRequest', message: 'orgIds array is required' }, 400);
-    }
-
-    if (body.orgIds.length > 100) {
-      return c.json({ error: 'InvalidRequest', message: 'Maximum 100 organizations per bulk operation' }, 400);
-    }
-
-    const results: { id: string; success: boolean; error?: string }[] = [];
-
-    for (const orgId of body.orgIds) {
-      try {
-        const result = await db
-          .update(organizations)
-          .set({ apiAccessEnabled: body.apiAccessEnabled, updatedAt: new Date() })
-          .where(eq(organizations.id, orgId));
-
-        await db.insert(adminAuditLog).values({
-          id: nanoid(),
-          adminId: adminUser.id,
-          action: body.apiAccessEnabled ? 'organization.bulkEnableApi' : 'organization.bulkDisableApi',
-          targetType: 'organization',
-          targetId: orgId,
-          details: { bulkOperation: true },
-          createdAt: new Date(),
-        });
-
-        results.push({ id: orgId, success: true });
-      } catch (err) {
-        results.push({ id: orgId, success: false, error: 'Failed to update' });
-      }
-    }
-
-    const successCount = results.filter((r) => r.success).length;
-
-    return c.json({
-      success: true,
-      summary: {
-        total: body.orgIds.length,
-        succeeded: successCount,
-        failed: body.orgIds.length - successCount,
-        action: body.apiAccessEnabled ? 'enabled' : 'disabled',
-      },
-      results,
-    });
-  }
-);
-
-// Bulk update organization members
-adminRouter.post(
-  '/io.exprsn.admin.orgs.bulkUpdateMembers',
-  requirePermission(ADMIN_PERMISSIONS.USERS_EDIT),
-  async (c) => {
-    const body = await c.req.json<{
-      orgId: string;
-      members: Array<{
-        did: string;
-        action: 'add' | 'remove' | 'suspend' | 'activate';
-        role?: 'admin' | 'member';
-      }>;
-    }>();
-    const adminUser = c.get('adminUser');
-
-    if (!body.orgId || !body.members || !Array.isArray(body.members)) {
-      return c.json({ error: 'InvalidRequest', message: 'orgId and members array required' }, 400);
-    }
-
-    if (body.members.length > 100) {
-      return c.json({ error: 'InvalidRequest', message: 'Maximum 100 members per bulk operation' }, 400);
-    }
-
-    // Check org exists
-    const org = await db
-      .select()
-      .from(organizations)
-      .where(eq(organizations.id, body.orgId))
-      .limit(1);
-
-    if (!org[0]) {
-      return c.json({ error: 'NotFound', message: 'Organization not found' }, 404);
-    }
-
-    const results: { did: string; action: string; success: boolean; error?: string }[] = [];
-
-    for (const memberAction of body.members) {
-      try {
-        switch (memberAction.action) {
-          case 'add': {
-            // Check if user exists
-            const user = await db
-              .select()
-              .from(users)
-              .where(eq(users.did, memberAction.did))
-              .limit(1);
-
-            if (!user[0]) {
-              results.push({ did: memberAction.did, action: 'add', success: false, error: 'User not found' });
-              continue;
-            }
-
-            // Check if already a member
-            const existing = await db
-              .select()
-              .from(organizationMembers)
-              .where(
-                and(
-                  eq(organizationMembers.organizationId, body.orgId),
-                  eq(organizationMembers.userDid, memberAction.did)
-                )
-              )
-              .limit(1);
-
-            if (existing[0]) {
-              results.push({ did: memberAction.did, action: 'add', success: false, error: 'Already a member' });
-              continue;
-            }
-
-            const role = memberAction.role || 'member';
-            const permissions = role === 'admin' ? ['bulk_import', 'manage_members', 'edit_settings'] : [];
-
-            await db.insert(organizationMembers).values({
-              id: nanoid(),
-              organizationId: body.orgId,
-              userDid: memberAction.did,
-              role,
-              permissions,
-              invitedBy: adminUser.userDid,
-              joinedAt: new Date(),
-            });
-
-            await db
-              .update(organizations)
-              .set({ memberCount: sql`${organizations.memberCount} + 1`, updatedAt: new Date() })
-              .where(eq(organizations.id, body.orgId));
-
-            results.push({ did: memberAction.did, action: 'add', success: true });
-            break;
-          }
-
-          case 'remove': {
-            // Can't remove owner
-            if (org[0].ownerDid === memberAction.did) {
-              results.push({ did: memberAction.did, action: 'remove', success: false, error: 'Cannot remove owner' });
-              continue;
-            }
-
-            const deleted = await db
-              .delete(organizationMembers)
-              .where(
-                and(
-                  eq(organizationMembers.organizationId, body.orgId),
-                  eq(organizationMembers.userDid, memberAction.did)
-                )
-              );
-
-            await db
-              .update(organizations)
-              .set({ memberCount: sql`GREATEST(${organizations.memberCount} - 1, 0)`, updatedAt: new Date() })
-              .where(eq(organizations.id, body.orgId));
-
-            results.push({ did: memberAction.did, action: 'remove', success: true });
-            break;
-          }
-
-          case 'suspend': {
-            // Can't suspend owner
-            if (org[0].ownerDid === memberAction.did) {
-              results.push({ did: memberAction.did, action: 'suspend', success: false, error: 'Cannot suspend owner' });
-              continue;
-            }
-
-            await db
-              .update(organizationMembers)
-              .set({
-                status: 'suspended',
-                suspendedAt: new Date(),
-                suspendedBy: adminUser.userDid,
-                suspendedReason: 'Admin action',
-              })
-              .where(
-                and(
-                  eq(organizationMembers.organizationId, body.orgId),
-                  eq(organizationMembers.userDid, memberAction.did)
-                )
-              );
-
-            results.push({ did: memberAction.did, action: 'suspend', success: true });
-            break;
-          }
-
-          case 'activate': {
-            await db
-              .update(organizationMembers)
-              .set({
-                status: 'active',
-                suspendedAt: null,
-                suspendedBy: null,
-                suspendedReason: null,
-              })
-              .where(
-                and(
-                  eq(organizationMembers.organizationId, body.orgId),
-                  eq(organizationMembers.userDid, memberAction.did)
-                )
-              );
-
-            results.push({ did: memberAction.did, action: 'activate', success: true });
-            break;
-          }
-
-          default:
-            results.push({ did: memberAction.did, action: memberAction.action, success: false, error: 'Invalid action' });
-        }
-      } catch (err) {
-        results.push({ did: memberAction.did, action: memberAction.action, success: false, error: 'Operation failed' });
-      }
-    }
-
-    // Audit log
-    await db.insert(adminAuditLog).values({
-      id: nanoid(),
-      adminId: adminUser.id,
-      action: 'organization.bulkUpdateMembers',
-      targetType: 'organization',
-      targetId: body.orgId,
-      details: {
-        memberCount: body.members.length,
-        actions: body.members.map((m) => m.action),
-      },
-      createdAt: new Date(),
-    });
-
-    const successCount = results.filter((r) => r.success).length;
-
-    return c.json({
-      success: true,
-      summary: {
-        total: body.members.length,
-        succeeded: successCount,
-        failed: body.members.length - successCount,
-      },
-      results,
-    });
-  }
-);
-
-// Delete organization (admin)
-adminRouter.post(
-  '/io.exprsn.admin.orgs.delete',
-  requirePermission(ADMIN_PERMISSIONS.USERS_BAN),
-  async (c) => {
-    const body = await c.req.json<{
-      id: string;
-      reason: string;
-    }>();
-    const adminUser = c.get('adminUser');
-
-    if (!body.id || !body.reason) {
-      return c.json({ error: 'InvalidRequest', message: 'Organization ID and reason required' }, 400);
-    }
-
-    const org = await db
-      .select()
-      .from(organizations)
-      .where(eq(organizations.id, body.id))
-      .limit(1);
-
-    if (!org[0]) {
-      return c.json({ error: 'NotFound', message: 'Organization not found' }, 404);
-    }
-
-    // Audit log before deletion
-    await db.insert(adminAuditLog).values({
-      id: nanoid(),
-      adminId: adminUser.id,
-      action: 'organization.delete',
-      targetType: 'organization',
-      targetId: body.id,
-      details: { name: org[0].name, reason: body.reason },
-      createdAt: new Date(),
-    });
-
-    // Delete organization (cascade will handle members)
-    await db.delete(organizations).where(eq(organizations.id, body.id));
-
-    return c.json({ success: true });
-  }
-);
-
-// Bulk delete organizations
-adminRouter.post(
-  '/io.exprsn.admin.orgs.bulkDelete',
-  requirePermission(ADMIN_PERMISSIONS.USERS_BAN),
-  async (c) => {
-    const body = await c.req.json<{
-      orgIds: string[];
-      reason: string;
-    }>();
-    const adminUser = c.get('adminUser');
-
-    if (!body.orgIds || !Array.isArray(body.orgIds) || body.orgIds.length === 0) {
-      return c.json({ error: 'InvalidRequest', message: 'orgIds array is required' }, 400);
-    }
-
-    if (!body.reason) {
-      return c.json({ error: 'InvalidRequest', message: 'reason is required' }, 400);
-    }
-
-    if (body.orgIds.length > 50) {
-      return c.json({ error: 'InvalidRequest', message: 'Maximum 50 organizations per bulk delete' }, 400);
-    }
-
-    const results: { id: string; success: boolean; error?: string }[] = [];
-
-    for (const orgId of body.orgIds) {
-      try {
-        const org = await db
-          .select({ name: organizations.name })
-          .from(organizations)
-          .where(eq(organizations.id, orgId))
-          .limit(1);
-
-        if (!org[0]) {
-          results.push({ id: orgId, success: false, error: 'Organization not found' });
-          continue;
-        }
-
-        // Audit log
-        await db.insert(adminAuditLog).values({
-          id: nanoid(),
-          adminId: adminUser.id,
-          action: 'organization.bulkDelete',
-          targetType: 'organization',
-          targetId: orgId,
-          details: { name: org[0].name, reason: body.reason, bulkOperation: true },
-          createdAt: new Date(),
-        });
-
-        // Delete organization
-        await db.delete(organizations).where(eq(organizations.id, orgId));
-
-        results.push({ id: orgId, success: true });
-      } catch (err) {
-        results.push({ id: orgId, success: false, error: 'Failed to delete' });
-      }
-    }
-
-    const successCount = results.filter((r) => r.success).length;
-
-    return c.json({
-      success: true,
-      summary: {
-        total: body.orgIds.length,
-        succeeded: successCount,
-        failed: body.orgIds.length - successCount,
-      },
-      results,
-    });
-  }
-);
-
-// ============================================
-// Content Moderation (Sprint 2)
-// ============================================
-
-// List content
-adminRouter.get(
-  '/io.exprsn.admin.content.list',
-  requirePermission(ADMIN_PERMISSIONS.CONTENT_VIEW),
-  async (c) => {
-    const type = c.req.query('type') || 'video'; // video, comment
-    const authorDid = c.req.query('authorDid');
-    const sort = c.req.query('sort') || 'recent';
-    const limit = Math.min(parseInt(c.req.query('limit') || '50'), 100);
-
-    if (type === 'video') {
-      let conditions = [];
-      if (authorDid) conditions.push(eq(videos.authorDid, authorDid));
-
-      const videoList = await db
-        .select({
-          uri: videos.uri,
-          authorDid: videos.authorDid,
-          caption: videos.caption,
-          thumbnailUrl: videos.thumbnailUrl,
-          viewCount: videos.viewCount,
-          likeCount: videos.likeCount,
-          commentCount: videos.commentCount,
-          visibility: videos.visibility,
-          createdAt: videos.createdAt,
-        })
-        .from(videos)
-        .where(conditions.length > 0 ? and(...conditions) : undefined)
-        .orderBy(desc(videos.createdAt))
-        .limit(limit);
-
-      return c.json({ content: videoList, type: 'video' });
-    }
-
-    if (type === 'comment') {
-      let conditions = [];
-      if (authorDid) conditions.push(eq(comments.authorDid, authorDid));
-
-      const commentList = await db
-        .select({
-          uri: comments.uri,
-          authorDid: comments.authorDid,
-          videoUri: comments.videoUri,
-          text: comments.text,
-          likeCount: comments.likeCount,
-          createdAt: comments.createdAt,
-        })
-        .from(comments)
-        .where(conditions.length > 0 ? and(...conditions) : undefined)
-        .orderBy(desc(comments.createdAt))
-        .limit(limit);
-
-      return c.json({ content: commentList, type: 'comment' });
-    }
-
-    return c.json({ error: 'InvalidRequest', message: 'Invalid content type' }, 400);
-  }
-);
-
-// Remove content
-adminRouter.post(
-  '/io.exprsn.admin.content.remove',
-  requirePermission(ADMIN_PERMISSIONS.CONTENT_MODERATE),
-  async (c) => {
-    const body = await c.req.json<{
-      contentType: 'video' | 'comment';
-      contentUri: string;
-      reason: string;
-      reportId?: string;
-    }>();
-    const adminUser = c.get('adminUser');
-
-    if (!body.contentType || !body.contentUri || !body.reason) {
-      return c.json(
-        { error: 'InvalidRequest', message: 'contentType, contentUri, and reason are required' },
-        400
-      );
-    }
-
-    // Record moderation action
-    const actionId = nanoid();
-    await db.insert(moderationActions).values({
-      id: actionId,
-      adminId: adminUser.id,
-      contentType: body.contentType,
-      contentUri: body.contentUri,
-      actionType: 'remove',
-      reason: body.reason,
-      reportId: body.reportId,
-      createdAt: new Date(),
-    });
-
-    // Update content visibility
-    if (body.contentType === 'video') {
-      await db
-        .update(videos)
-        .set({ visibility: 'removed' })
-        .where(eq(videos.uri, body.contentUri));
-    }
-
-    // If there's a report, update its status
-    if (body.reportId) {
-      await db
-        .update(contentReports)
-        .set({
-          status: 'actioned',
-          reviewedBy: adminUser.id,
-          reviewedAt: new Date(),
-          actionTaken: 'removed',
-        })
-        .where(eq(contentReports.id, body.reportId));
-    }
-
-    // Audit log
-    await db.insert(adminAuditLog).values({
-      id: nanoid(),
-      adminId: adminUser.id,
-      action: `content.remove`,
-      targetType: body.contentType,
-      targetId: body.contentUri,
-      details: { reason: body.reason, reportId: body.reportId },
-      createdAt: new Date(),
-    });
-
-    return c.json({ success: true, actionId });
-  }
-);
-
-// Restore content
-adminRouter.post(
-  '/io.exprsn.admin.content.restore',
-  requirePermission(ADMIN_PERMISSIONS.CONTENT_MODERATE),
-  async (c) => {
-    const body = await c.req.json<{
-      contentType: 'video' | 'comment';
-      contentUri: string;
-      reason: string;
-    }>();
-    const adminUser = c.get('adminUser');
-
-    if (!body.contentType || !body.contentUri || !body.reason) {
-      return c.json(
-        { error: 'InvalidRequest', message: 'contentType, contentUri, and reason are required' },
-        400
-      );
-    }
-
-    // Record moderation action
-    const actionId = nanoid();
-    await db.insert(moderationActions).values({
-      id: actionId,
-      adminId: adminUser.id,
-      contentType: body.contentType,
-      contentUri: body.contentUri,
-      actionType: 'restore',
-      reason: body.reason,
-      createdAt: new Date(),
-    });
-
-    // Restore content visibility
-    if (body.contentType === 'video') {
-      await db
-        .update(videos)
-        .set({ visibility: 'public' })
-        .where(eq(videos.uri, body.contentUri));
-    }
-
-    // Audit log
-    await db.insert(adminAuditLog).values({
-      id: nanoid(),
-      adminId: adminUser.id,
-      action: `content.restore`,
-      targetType: body.contentType,
-      targetId: body.contentUri,
-      details: { reason: body.reason },
-      createdAt: new Date(),
-    });
-
-    return c.json({ success: true, actionId });
-  }
-);
-
-// ============================================
-// Reports (Sprint 2)
-// ============================================
-
-// List reports
-adminRouter.get(
-  '/io.exprsn.admin.reports.list',
-  requirePermission(ADMIN_PERMISSIONS.REPORTS_VIEW),
-  async (c) => {
-    const status = c.req.query('status') || 'pending';
-    const contentType = c.req.query('contentType');
-    const reason = c.req.query('reason');
-    const limit = Math.min(parseInt(c.req.query('limit') || '50'), 100);
-
-    let conditions = [eq(contentReports.status, status)];
-
-    if (contentType) {
-      conditions.push(eq(contentReports.contentType, contentType));
-    }
-
-    if (reason) {
-      conditions.push(eq(contentReports.reason, reason));
-    }
-
-    const reports = await db
-      .select()
-      .from(contentReports)
-      .where(and(...conditions))
-      .orderBy(desc(contentReports.createdAt))
-      .limit(limit);
-
-    // Get reporter info
-    const reporterDids = [...new Set(reports.map((r) => r.reporterDid))];
-    const reporters = reporterDids.length > 0
-      ? await db
-          .select({
-            did: users.did,
-            handle: users.handle,
-            displayName: users.displayName,
-            avatar: users.avatar,
-          })
-          .from(users)
-          .where(inArray(users.did, reporterDids))
-      : [];
-
-    const reporterMap = new Map(reporters.map((r) => [r.did, r]));
-
-    return c.json({
-      reports: reports.map((r) => ({
-        ...r,
-        reporter: reporterMap.get(r.reporterDid) || null,
-      })),
-    });
-  }
-);
-
-// Get report details
-adminRouter.get(
-  '/io.exprsn.admin.reports.get',
-  requirePermission(ADMIN_PERMISSIONS.REPORTS_VIEW),
-  async (c) => {
-    const reportId = c.req.query('id');
-
-    if (!reportId) {
-      return c.json({ error: 'InvalidRequest', message: 'id is required' }, 400);
-    }
-
-    const [report] = await db
-      .select()
-      .from(contentReports)
-      .where(eq(contentReports.id, reportId))
-      .limit(1);
-
-    if (!report) {
-      return c.json({ error: 'NotFound', message: 'Report not found' }, 404);
-    }
-
-    // Get reporter info
-    const [reporter] = await db
-      .select({
-        did: users.did,
-        handle: users.handle,
-        displayName: users.displayName,
-        avatar: users.avatar,
-      })
-      .from(users)
-      .where(eq(users.did, report.reporterDid))
-      .limit(1);
-
-    // Get content info based on type
-    let content = null;
-    if (report.contentType === 'video') {
-      const [video] = await db
-        .select()
-        .from(videos)
-        .where(eq(videos.uri, report.contentUri))
-        .limit(1);
-      content = video;
-    } else if (report.contentType === 'comment') {
-      const [comment] = await db
-        .select()
-        .from(comments)
-        .where(eq(comments.uri, report.contentUri))
-        .limit(1);
-      content = comment;
-    } else if (report.contentType === 'user') {
-      const [user] = await db
-        .select()
-        .from(users)
-        .where(eq(users.did, report.contentUri))
-        .limit(1);
-      content = user;
-    }
-
-    // Get related reports (same content)
-    const relatedReports = await db
-      .select()
-      .from(contentReports)
-      .where(
-        and(
-          eq(contentReports.contentUri, report.contentUri),
-          sql`${contentReports.id} != ${reportId}`
-        )
-      )
-      .orderBy(desc(contentReports.createdAt))
-      .limit(10);
-
-    return c.json({
-      report,
-      reporter,
-      content,
-      relatedReports,
-    });
-  }
-);
-
-// Take action on report
-adminRouter.post(
-  '/io.exprsn.admin.reports.action',
-  requirePermission(ADMIN_PERMISSIONS.REPORTS_ACTION),
-  async (c) => {
-    const body = await c.req.json<{
-      reportId: string;
-      action: 'remove' | 'warn' | 'restrict';
-      reason: string;
-    }>();
-    const adminUser = c.get('adminUser');
-
-    if (!body.reportId || !body.action || !body.reason) {
-      return c.json(
-        { error: 'InvalidRequest', message: 'reportId, action, and reason are required' },
-        400
-      );
-    }
-
-    const [report] = await db
-      .select()
-      .from(contentReports)
-      .where(eq(contentReports.id, body.reportId))
-      .limit(1);
-
-    if (!report) {
-      return c.json({ error: 'NotFound', message: 'Report not found' }, 404);
-    }
-
-    // Record moderation action
-    const actionId = nanoid();
-    await db.insert(moderationActions).values({
-      id: actionId,
-      adminId: adminUser.id,
-      contentType: report.contentType,
-      contentUri: report.contentUri,
-      actionType: body.action,
-      reason: body.reason,
-      reportId: body.reportId,
-      createdAt: new Date(),
-    });
-
-    // Update report status
-    await db
-      .update(contentReports)
-      .set({
-        status: 'actioned',
-        reviewedBy: adminUser.id,
-        reviewedAt: new Date(),
-        actionTaken: body.action,
-      })
-      .where(eq(contentReports.id, body.reportId));
-
-    // Apply the action
-    if (body.action === 'remove' && report.contentType === 'video') {
-      await db
-        .update(videos)
-        .set({ visibility: 'removed' })
-        .where(eq(videos.uri, report.contentUri));
-    }
-
-    // Audit log
-    await db.insert(adminAuditLog).values({
-      id: nanoid(),
-      adminId: adminUser.id,
-      action: `report.action.${body.action}`,
-      targetType: 'report',
-      targetId: body.reportId,
-      details: { contentUri: report.contentUri, reason: body.reason },
-      createdAt: new Date(),
-    });
-
-    return c.json({ success: true, actionId });
-  }
-);
-
-// Dismiss report
-adminRouter.post(
-  '/io.exprsn.admin.reports.dismiss',
-  requirePermission(ADMIN_PERMISSIONS.REPORTS_ACTION),
-  async (c) => {
-    const body = await c.req.json<{ reportId: string; reason?: string }>();
-    const adminUser = c.get('adminUser');
-
-    if (!body.reportId) {
-      return c.json({ error: 'InvalidRequest', message: 'reportId is required' }, 400);
-    }
-
-    await db
-      .update(contentReports)
-      .set({
-        status: 'dismissed',
-        reviewedBy: adminUser.id,
-        reviewedAt: new Date(),
-      })
-      .where(eq(contentReports.id, body.reportId));
-
-    // Audit log
-    await db.insert(adminAuditLog).values({
-      id: nanoid(),
-      adminId: adminUser.id,
-      action: 'report.dismiss',
-      targetType: 'report',
-      targetId: body.reportId,
-      details: { reason: body.reason },
-      createdAt: new Date(),
-    });
-
-    return c.json({ success: true });
-  }
-);
-
-// ============================================
-// Analytics Dashboard
-// ============================================
-
-adminRouter.get(
-  '/io.exprsn.admin.analytics.dashboard',
-  requirePermission(ADMIN_PERMISSIONS.ANALYTICS_VIEW),
-  async (c) => {
-    const now = new Date();
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const weekAgo = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
-    const monthAgo = new Date(today.getTime() - 30 * 24 * 60 * 60 * 1000);
-
-    // Get counts
-    const [
-      [userCount],
-      [videoCount],
-      [commentCount],
-      [pendingReportCount],
-      [newUsersToday],
-      [newUsersWeek],
-      [newVideosToday],
-      [newVideosWeek],
-    ] = await Promise.all([
-      db.select({ count: count() }).from(users),
-      db.select({ count: count() }).from(videos),
-      db.select({ count: count() }).from(comments),
-      db.select({ count: count() }).from(contentReports).where(eq(contentReports.status, 'pending')),
-      db.select({ count: count() }).from(users).where(gte(users.createdAt, today)),
-      db.select({ count: count() }).from(users).where(gte(users.createdAt, weekAgo)),
-      db.select({ count: count() }).from(videos).where(gte(videos.createdAt, today)),
-      db.select({ count: count() }).from(videos).where(gte(videos.createdAt, weekAgo)),
-    ]);
-
-    // Get total views and likes
-    const [viewStats] = await db
-      .select({
-        totalViews: sql<number>`COALESCE(SUM(${videos.viewCount}), 0)`,
-        totalLikes: sql<number>`COALESCE(SUM(${videos.likeCount}), 0)`,
-      })
-      .from(videos);
-
-    // Get top videos by views
-    const topVideos = await db
-      .select({
-        uri: videos.uri,
-        caption: videos.caption,
-        authorDid: videos.authorDid,
-        viewCount: videos.viewCount,
-        likeCount: videos.likeCount,
-        thumbnailUrl: videos.thumbnailUrl,
-      })
-      .from(videos)
-      .orderBy(desc(videos.viewCount))
-      .limit(5);
-
-    // Get top creators by followers
-    const topCreators = await db
-      .select({
-        did: users.did,
-        handle: users.handle,
-        displayName: users.displayName,
-        avatar: users.avatar,
-        followerCount: users.followerCount,
-        videoCount: users.videoCount,
-        verified: users.verified,
-      })
-      .from(users)
-      .orderBy(desc(users.followerCount))
-      .limit(5);
-
-    // Get recent activity
-    const recentUsers = await db
-      .select({
-        did: users.did,
-        handle: users.handle,
-        displayName: users.displayName,
-        avatar: users.avatar,
-        createdAt: users.createdAt,
-      })
-      .from(users)
-      .orderBy(desc(users.createdAt))
-      .limit(5);
-
-    const recentVideos = await db
-      .select({
-        uri: videos.uri,
-        caption: videos.caption,
-        authorDid: videos.authorDid,
-        thumbnailUrl: videos.thumbnailUrl,
-        viewCount: videos.viewCount,
-        createdAt: videos.createdAt,
-      })
-      .from(videos)
-      .orderBy(desc(videos.createdAt))
-      .limit(5);
-
-    // Get moderation stats
-    const [actionedReports] = await db
-      .select({ count: count() })
-      .from(contentReports)
-      .where(eq(contentReports.status, 'actioned'));
-
-    const [dismissedReports] = await db
-      .select({ count: count() })
-      .from(contentReports)
-      .where(eq(contentReports.status, 'dismissed'));
-
-    return c.json({
-      stats: {
-        totalUsers: userCount?.count || 0,
-        totalVideos: videoCount?.count || 0,
-        totalComments: commentCount?.count || 0,
-        totalViews: viewStats?.totalViews || 0,
-        totalLikes: viewStats?.totalLikes || 0,
-        pendingReports: pendingReportCount?.count || 0,
-        actionedReports: actionedReports?.count || 0,
-        dismissedReports: dismissedReports?.count || 0,
-        newUsersToday: newUsersToday?.count || 0,
-        newUsersWeek: newUsersWeek?.count || 0,
-        newVideosToday: newVideosToday?.count || 0,
-        newVideosWeek: newVideosWeek?.count || 0,
-      },
-      topVideos,
-      topCreators,
-      recentActivity: {
-        users: recentUsers,
-        videos: recentVideos,
-      },
-    });
-  }
-);
-
-// Time-series analytics for charts
-adminRouter.get(
-  '/io.exprsn.admin.stats.timeSeries',
-  requirePermission(ADMIN_PERMISSIONS.ANALYTICS_VIEW),
-  async (c) => {
-    const metric = c.req.query('metric') as 'users' | 'videos' | 'views' | 'likes' | 'reports' | 'renders';
-    const period = (c.req.query('period') || '7d') as '7d' | '30d' | '90d';
-    const domainId = c.req.query('domainId');
-
-    if (!metric) {
-      return c.json({ error: 'InvalidRequest', message: 'metric is required' }, 400);
-    }
-
-    // Calculate date range
-    const now = new Date();
-    const days = period === '7d' ? 7 : period === '30d' ? 30 : 90;
-    const startDate = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
-
-    // Generate date labels
-    const labels: string[] = [];
-    const dataPoints: number[] = [];
-
-    for (let i = 0; i < days; i++) {
-      const date = new Date(startDate.getTime() + i * 24 * 60 * 60 * 1000);
-      const dateStr = date.toISOString().split('T')[0];
-      labels.push(
-        period === '7d'
-          ? date.toLocaleDateString('en-US', { weekday: 'short' })
-          : period === '30d'
-          ? date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-          : date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-      );
-
-      const dayStart = new Date(date);
-      dayStart.setHours(0, 0, 0, 0);
-      const dayEnd = new Date(date);
-      dayEnd.setHours(23, 59, 59, 999);
-
-      let countResult: { count: number }[] = [];
-
-      // Query based on metric
-      switch (metric) {
-        case 'users':
-          countResult = await db
-            .select({ count: count() })
-            .from(users)
-            .where(
-              and(
-                gte(users.createdAt, dayStart),
-                lte(users.createdAt, dayEnd)
-              )
-            );
-          break;
-        case 'videos':
-          countResult = await db
-            .select({ count: count() })
-            .from(videos)
-            .where(
-              and(
-                gte(videos.createdAt, dayStart),
-                lte(videos.createdAt, dayEnd)
-              )
-            );
-          break;
-        case 'reports':
-          countResult = await db
-            .select({ count: count() })
-            .from(contentReports)
-            .where(
-              and(
-                gte(contentReports.createdAt, dayStart),
-                lte(contentReports.createdAt, dayEnd)
-              )
-            );
-          break;
-        case 'views':
-        case 'likes':
-          // For views/likes, use the analytics snapshots table if available
-          // Otherwise, sample from current totals
-          const videoStats = await db
-            .select({
-              totalViews: sql<number>`COALESCE(SUM(${videos.viewCount}), 0)`,
-              totalLikes: sql<number>`COALESCE(SUM(${videos.likeCount}), 0)`,
-            })
-            .from(videos);
-          // Distribute across days with some variance
-          const total = metric === 'views' ? Number(videoStats[0]?.totalViews || 0) : Number(videoStats[0]?.totalLikes || 0);
-          const dailyAvg = Math.floor(total / days);
-          // Add some random variance for visualization
-          countResult = [{ count: Math.floor(dailyAvg * (0.7 + Math.random() * 0.6)) }];
-          break;
-        case 'renders':
-          countResult = await db
-            .select({ count: count() })
-            .from(renderJobs)
-            .where(
-              and(
-                gte(renderJobs.createdAt, dayStart),
-                lte(renderJobs.createdAt, dayEnd)
-              )
-            );
-          break;
-      }
-
-      dataPoints.push(countResult[0]?.count || 0);
-    }
-
-    return c.json({
-      labels,
-      datasets: [
-        {
-          label: metric.charAt(0).toUpperCase() + metric.slice(1),
-          data: dataPoints,
-          color: getMetricColor(metric),
-        },
-      ],
-    });
-  }
-);
-
-function getMetricColor(metric: string): string {
-  const colors: Record<string, string> = {
-    users: '#3b82f6',
-    videos: '#8b5cf6',
-    views: '#10b981',
-    likes: '#ef4444',
-    reports: '#f59e0b',
-    renders: '#06b6d4',
-  };
-  return colors[metric] || '#6366f1';
-}
-
-// ============================================
-// System Config (Sprint 1 stub)
-// ============================================
-
-adminRouter.get(
-  '/io.exprsn.admin.config.list',
-  requirePermission(ADMIN_PERMISSIONS.CONFIG_VIEW),
-  async (c) => {
-    const configs = await db.select().from(systemConfig);
-    return c.json({ configs });
-  }
-);
-
-adminRouter.post(
-  '/io.exprsn.admin.config.set',
-  requirePermission(ADMIN_PERMISSIONS.CONFIG_EDIT),
-  async (c) => {
-    const body = await c.req.json<{ key: string; value: unknown; description?: string }>();
-    const adminUser = c.get('adminUser');
-
-    if (!body.key) {
-      return c.json({ error: 'InvalidRequest', message: 'key is required' }, 400);
-    }
-
-    await db
-      .insert(systemConfig)
-      .values({
-        key: body.key,
-        value: body.value,
-        description: body.description,
-        updatedBy: adminUser.id,
-        updatedAt: new Date(),
-      })
-      .onConflictDoUpdate({
-        target: systemConfig.key,
-        set: {
-          value: body.value,
-          description: body.description,
-          updatedBy: adminUser.id,
-          updatedAt: new Date(),
-        },
-      });
-
-    // Audit log
-    await db.insert(adminAuditLog).values({
-      id: nanoid(),
-      adminId: adminUser.id,
-      action: 'config.set',
-      targetType: 'config',
-      targetId: body.key,
-      details: { value: body.value },
-      createdAt: new Date(),
-    });
-
-    return c.json({ success: true });
-  }
-);
-
-// ============================================
-// Admin Management (Super Admin only)
-// ============================================
-
-adminRouter.get(
-  '/io.exprsn.admin.admins.list',
-  superAdminMiddleware,
-  async (c) => {
-    const admins = await db
-      .select({
-        admin: adminUsers,
-        user: {
-          did: users.did,
-          handle: users.handle,
-          displayName: users.displayName,
-          avatar: users.avatar,
-        },
-      })
-      .from(adminUsers)
-      .leftJoin(users, eq(adminUsers.userDid, users.did))
-      .orderBy(desc(adminUsers.createdAt));
-
-    return c.json({
-      admins: admins.map((a) => ({
-        ...a.admin,
-        user: a.user,
-        permissions: getAdminPermissions(a.admin),
-      })),
-    });
-  }
-);
-
-adminRouter.post(
-  '/io.exprsn.admin.admins.add',
-  superAdminMiddleware,
-  async (c) => {
-    const body = await c.req.json<{
-      userDid: string;
-      role: 'admin' | 'moderator' | 'support';
-      permissions?: string[];
-    }>();
-    const adminUser = c.get('adminUser');
-
-    if (!body.userDid || !body.role) {
-      return c.json({ error: 'InvalidRequest', message: 'userDid and role are required' }, 400);
-    }
-
-    // Check if user exists
-    const [user] = await db.select().from(users).where(eq(users.did, body.userDid)).limit(1);
-    if (!user) {
-      return c.json({ error: 'NotFound', message: 'User not found' }, 404);
-    }
-
-    // Check if already admin
-    const [existing] = await db
-      .select()
-      .from(adminUsers)
-      .where(eq(adminUsers.userDid, body.userDid))
-      .limit(1);
-
-    if (existing) {
-      return c.json({ error: 'AlreadyExists', message: 'User is already an admin' }, 400);
-    }
-
-    const adminId = nanoid();
-    await db.insert(adminUsers).values({
-      id: adminId,
-      userDid: body.userDid,
-      role: body.role,
-      permissions: body.permissions || [],
-      invitedBy: adminUser.id,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    });
-
-    // Audit log
-    await db.insert(adminAuditLog).values({
-      id: nanoid(),
-      adminId: adminUser.id,
-      action: 'admin.add',
-      targetType: 'admin',
-      targetId: adminId,
-      details: { userDid: body.userDid, role: body.role },
-      createdAt: new Date(),
-    });
-
-    return c.json({ success: true, adminId });
-  }
-);
-
-adminRouter.post(
-  '/io.exprsn.admin.admins.update',
-  superAdminMiddleware,
-  async (c) => {
-    const body = await c.req.json<{
-      adminId: string;
-      role?: 'admin' | 'moderator' | 'support';
-      permissions?: string[];
-    }>();
-    const currentAdmin = c.get('adminUser');
-
-    if (!body.adminId) {
-      return c.json({ error: 'InvalidRequest', message: 'adminId is required' }, 400);
-    }
-
-    // Cannot modify own role (safety)
-    const [targetAdmin] = await db
-      .select()
-      .from(adminUsers)
-      .where(eq(adminUsers.id, body.adminId))
-      .limit(1);
-
-    if (!targetAdmin) {
-      return c.json({ error: 'NotFound', message: 'Admin not found' }, 404);
-    }
-
-    if (targetAdmin.role === 'super_admin') {
-      return c.json({ error: 'Forbidden', message: 'Cannot modify super admin' }, 403);
-    }
-
-    const updates: Partial<typeof adminUsers.$inferInsert> = { updatedAt: new Date() };
-    if (body.role) updates.role = body.role;
-    if (body.permissions) updates.permissions = body.permissions;
-
-    await db.update(adminUsers).set(updates).where(eq(adminUsers.id, body.adminId));
-
-    // Audit log
-    await db.insert(adminAuditLog).values({
-      id: nanoid(),
-      adminId: currentAdmin.id,
-      action: 'admin.update',
-      targetType: 'admin',
-      targetId: body.adminId,
-      details: updates,
-      createdAt: new Date(),
-    });
-
-    return c.json({ success: true });
-  }
-);
-
-adminRouter.post(
-  '/io.exprsn.admin.admins.remove',
-  superAdminMiddleware,
-  async (c) => {
-    const body = await c.req.json<{ adminId: string }>();
-    const currentAdmin = c.get('adminUser');
-
-    if (!body.adminId) {
-      return c.json({ error: 'InvalidRequest', message: 'adminId is required' }, 400);
-    }
-
-    const [targetAdmin] = await db
-      .select()
-      .from(adminUsers)
-      .where(eq(adminUsers.id, body.adminId))
-      .limit(1);
-
-    if (!targetAdmin) {
-      return c.json({ error: 'NotFound', message: 'Admin not found' }, 404);
-    }
-
-    if (targetAdmin.role === 'super_admin') {
-      return c.json({ error: 'Forbidden', message: 'Cannot remove super admin' }, 403);
-    }
-
-    await db.delete(adminUsers).where(eq(adminUsers.id, body.adminId));
-
-    // Audit log
-    await db.insert(adminAuditLog).values({
-      id: nanoid(),
-      adminId: currentAdmin.id,
-      action: 'admin.remove',
-      targetType: 'admin',
-      targetId: body.adminId,
-      details: { userDid: targetAdmin.userDid },
-      createdAt: new Date(),
-    });
-
-    return c.json({ success: true });
-  }
-);
-
-// ============================================
-// Audit Log
-// ============================================
-
-adminRouter.get(
-  '/io.exprsn.admin.audit.list',
-  requirePermission(ADMIN_PERMISSIONS.CONFIG_VIEW),
-  async (c) => {
-    const adminId = c.req.query('adminId');
-    const action = c.req.query('action');
-    const limit = Math.min(parseInt(c.req.query('limit') || '50'), 100);
-
-    let conditions = [];
-    if (adminId) conditions.push(eq(adminAuditLog.adminId, adminId));
-    if (action) conditions.push(ilike(adminAuditLog.action, `%${action}%`));
-
-    const logs = await db
-      .select()
-      .from(adminAuditLog)
-      .where(conditions.length > 0 ? and(...conditions) : undefined)
-      .orderBy(desc(adminAuditLog.createdAt))
-      .limit(limit);
-
-    // Get admin info
-    const adminIds = [...new Set(logs.map((l) => l.adminId))];
-    const admins = adminIds.length > 0
-      ? await db
-          .select({
-            id: adminUsers.id,
-            userDid: adminUsers.userDid,
-            role: adminUsers.role,
-          })
-          .from(adminUsers)
-          .where(inArray(adminUsers.id, adminIds))
-      : [];
-
-    const adminMap = new Map(admins.map((a) => [a.id, a]));
-
-    return c.json({
-      logs: logs.map((l) => ({
-        ...l,
-        admin: adminMap.get(l.adminId) || null,
-      })),
-    });
-  }
-);
 
 // ============================================
 // Federation Management
@@ -4474,9 +558,12 @@ adminRouter.get(
   async (c) => {
     const { plcIdentities } = await import('../db/schema.js');
 
-    const query = c.req.query('q');
+    const rawQuery = c.req.query('q');
     const limit = Math.min(parseInt(c.req.query('limit') || '50'), 100);
     const cursor = c.req.query('cursor');
+
+    // Sanitize search query
+    const query = sanitizeSearchQuery(rawQuery);
 
     let dbQuery = db.select().from(plcIdentities);
 
@@ -4927,6 +1014,266 @@ adminRouter.post(
 );
 
 // ============================================
+// PLC Test Endpoints
+// ============================================
+
+// Test PLC server connectivity
+adminRouter.get(
+  '/io.exprsn.admin.plc.test.connectivity',
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_VIEW),
+  async (c) => {
+    const domainId = c.req.query('domainId');
+
+    if (!domainId) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing domainId' }, 400);
+    }
+
+    const { domains } = await import('../db/schema.js');
+
+    // Get domain config
+    const [domain] = await db
+      .select()
+      .from(domains)
+      .where(eq(domains.id, domainId))
+      .limit(1);
+
+    if (!domain) {
+      return c.json({ error: 'NotFound', message: 'Domain not found' }, 404);
+    }
+
+    const plcConfig = domain.plcConfig;
+    let plcUrl: string;
+
+    if (plcConfig?.selfHostedPlc?.enabled && plcConfig?.selfHostedPlc?.url) {
+      plcUrl = plcConfig.selfHostedPlc.url;
+    } else if (plcConfig?.externalPlcUrl) {
+      plcUrl = plcConfig.externalPlcUrl;
+    } else {
+      plcUrl = process.env.PLC_URL || 'http://localhost:3002/plc';
+    }
+
+    try {
+      // Test connectivity by fetching health or a known endpoint
+      const response = await fetch(`${plcUrl}/health`, {
+        method: 'GET',
+        headers: { 'Accept': 'application/json' },
+        signal: AbortSignal.timeout(5000),
+      }).catch(() => null);
+
+      // If health endpoint doesn't exist, try fetching the root
+      if (!response || !response.ok) {
+        const rootResponse = await fetch(plcUrl, {
+          method: 'GET',
+          headers: { 'Accept': 'application/json' },
+          signal: AbortSignal.timeout(5000),
+        }).catch(() => null);
+
+        if (rootResponse && rootResponse.ok) {
+          return c.json({
+            connected: true,
+            plcUrl,
+            latency: 'OK',
+            message: 'PLC server is reachable',
+          });
+        }
+      }
+
+      if (response && response.ok) {
+        const data = await response.json().catch(() => ({}));
+        return c.json({
+          connected: true,
+          plcUrl,
+          health: data,
+          message: 'PLC server is healthy',
+        });
+      }
+
+      // Even if we can't get health, if we got any response, it's reachable
+      if (response) {
+        return c.json({
+          connected: true,
+          plcUrl,
+          statusCode: response.status,
+          message: 'PLC server responded',
+        });
+      }
+
+      return c.json({
+        connected: false,
+        plcUrl,
+        message: 'Failed to connect to PLC server',
+      }, 503);
+    } catch (error) {
+      return c.json({
+        connected: false,
+        plcUrl,
+        error: error instanceof Error ? error.message : 'Connection failed',
+        message: 'Failed to connect to PLC server',
+      }, 503);
+    }
+  }
+);
+
+// Test DID resolution
+adminRouter.get(
+  '/io.exprsn.admin.plc.test.resolve-did',
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_VIEW),
+  async (c) => {
+    const did = c.req.query('did');
+    const domainId = c.req.query('domainId');
+
+    if (!did) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing did' }, 400);
+    }
+
+    const { domains, plcIdentities } = await import('../db/schema.js');
+
+    // First check local database
+    const [localIdentity] = await db
+      .select()
+      .from(plcIdentities)
+      .where(eq(plcIdentities.did, did))
+      .limit(1);
+
+    if (localIdentity) {
+      return c.json({
+        resolved: true,
+        source: 'local',
+        did,
+        document: {
+          did,
+          handle: localIdentity.handle,
+          pdsEndpoint: localIdentity.pdsEndpoint,
+          status: localIdentity.status,
+          createdAt: localIdentity.createdAt,
+        },
+      });
+    }
+
+    // Try external resolution
+    try {
+      const { DIDResolver } = await import('../services/identity/DIDResolver.js');
+      const resolver = new DIDResolver({ db });
+      const resolution = await resolver.resolve(did);
+
+      if (resolution) {
+        return c.json({
+          resolved: true,
+          source: resolution.source || 'external',
+          did,
+          document: resolution.document,
+        });
+      }
+
+      return c.json({
+        resolved: false,
+        did,
+        message: 'DID not found',
+      }, 404);
+    } catch (error) {
+      return c.json({
+        resolved: false,
+        did,
+        error: error instanceof Error ? error.message : 'Resolution failed',
+      }, 500);
+    }
+  }
+);
+
+// Test handle resolution
+adminRouter.get(
+  '/io.exprsn.admin.plc.test.resolve-handle',
+  requirePermission(ADMIN_PERMISSIONS.CONFIG_VIEW),
+  async (c) => {
+    const handle = c.req.query('handle');
+    const domainId = c.req.query('domainId');
+
+    if (!handle) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing handle' }, 400);
+    }
+
+    const { plcIdentities, users } = await import('../db/schema.js');
+
+    // Check local database for handle
+    const [localIdentity] = await db
+      .select()
+      .from(plcIdentities)
+      .where(eq(plcIdentities.handle, handle))
+      .limit(1);
+
+    if (localIdentity) {
+      return c.json({
+        resolved: true,
+        source: 'plcIdentities',
+        handle,
+        did: localIdentity.did,
+        pdsEndpoint: localIdentity.pdsEndpoint,
+        status: localIdentity.status,
+      });
+    }
+
+    // Check users table
+    const [user] = await db
+      .select()
+      .from(users)
+      .where(eq(users.handle, handle))
+      .limit(1);
+
+    if (user) {
+      return c.json({
+        resolved: true,
+        source: 'users',
+        handle,
+        did: user.did,
+        displayName: user.displayName,
+      });
+    }
+
+    // Try DNS resolution for external handles
+    try {
+      const dnsHandle = handle.replace(/^@/, '');
+      // Check _atproto TXT record
+      const dnsRecordUrl = `https://dns.google/resolve?name=_atproto.${dnsHandle}&type=TXT`;
+      const dnsRes = await fetch(dnsRecordUrl, {
+        signal: AbortSignal.timeout(5000),
+      });
+
+      if (dnsRes.ok) {
+        const dnsData = await dnsRes.json() as Record<string, unknown>;
+        const answers = (dnsData.Answer || []) as Array<{ data?: string }>;
+        const didRecord = answers.find((a: any) => a.data?.includes('did='));
+
+        if (didRecord) {
+          const didMatch = didRecord.data?.match(/did=([^\s"]+)/);
+          if (didMatch) {
+            return c.json({
+              resolved: true,
+              source: 'dns',
+              handle,
+              did: didMatch[1],
+              dnsRecord: didRecord.data,
+            });
+          }
+        }
+      }
+
+      return c.json({
+        resolved: false,
+        handle,
+        message: 'Handle not found in local database or DNS',
+      }, 404);
+    } catch (error) {
+      return c.json({
+        resolved: false,
+        handle,
+        error: error instanceof Error ? error.message : 'Resolution failed',
+        message: 'Failed to resolve handle',
+      }, 500);
+    }
+  }
+);
+
+// ============================================
 // Content Limits Configuration
 // ============================================
 
@@ -5019,921 +1366,13 @@ adminRouter.post(
   }
 );
 
-// ============================================
-// Password Management (Admin)
-// ============================================
 
-import bcrypt from 'bcryptjs';
-import { actorRepos } from '../db/schema.js';
 
-// Set a new password for a user
-adminRouter.post(
-  '/io.exprsn.admin.users.setPassword',
-  requirePermission(ADMIN_PERMISSIONS.USERS_EDIT),
-  async (c) => {
-    const body = await c.req.json<{
-      did: string;
-      password: string;
-    }>();
-    const adminUser = c.get('adminUser');
 
-    if (!body.did || !body.password) {
-      return c.json({ error: 'InvalidRequest', message: 'did and password are required' }, 400);
-    }
 
-    if (body.password.length < 8) {
-      return c.json({ error: 'InvalidRequest', message: 'Password must be at least 8 characters' }, 400);
-    }
 
-    // Verify user exists
-    const [user] = await db
-      .select()
-      .from(actorRepos)
-      .where(eq(actorRepos.did, body.did))
-      .limit(1);
 
-    if (!user) {
-      return c.json({ error: 'NotFound', message: 'User not found' }, 404);
-    }
 
-    // Hash the new password
-    const passwordHash = await bcrypt.hash(body.password, 10);
-
-    // Update the password
-    await db
-      .update(actorRepos)
-      .set({ passwordHash, updatedAt: new Date() })
-      .where(eq(actorRepos.did, body.did));
-
-    // Audit log
-    await db.insert(adminAuditLog).values({
-      id: nanoid(),
-      adminId: adminUser.id,
-      action: 'user.setPassword',
-      targetType: 'user',
-      targetId: body.did,
-      details: { handle: user.handle },
-      createdAt: new Date(),
-    });
-
-    return c.json({ success: true, message: 'Password updated successfully' });
-  }
-);
-
-// Generate a temporary password for a user
-adminRouter.post(
-  '/io.exprsn.admin.users.resetPassword',
-  requirePermission(ADMIN_PERMISSIONS.USERS_EDIT),
-  async (c) => {
-    const body = await c.req.json<{
-      did: string;
-    }>();
-    const adminUser = c.get('adminUser');
-
-    if (!body.did) {
-      return c.json({ error: 'InvalidRequest', message: 'did is required' }, 400);
-    }
-
-    // Verify user exists
-    const [user] = await db
-      .select()
-      .from(actorRepos)
-      .where(eq(actorRepos.did, body.did))
-      .limit(1);
-
-    if (!user) {
-      return c.json({ error: 'NotFound', message: 'User not found' }, 404);
-    }
-
-    // Generate a random temporary password
-    const tempPassword = `temp_${nanoid(12)}`;
-    const passwordHash = await bcrypt.hash(tempPassword, 10);
-
-    // Update the password
-    await db
-      .update(actorRepos)
-      .set({ passwordHash, updatedAt: new Date() })
-      .where(eq(actorRepos.did, body.did));
-
-    // Invalidate all existing sessions
-    await db.delete(sessions).where(eq(sessions.did, body.did));
-
-    // Audit log
-    await db.insert(adminAuditLog).values({
-      id: nanoid(),
-      adminId: adminUser.id,
-      action: 'user.resetPassword',
-      targetType: 'user',
-      targetId: body.did,
-      details: { handle: user.handle },
-      createdAt: new Date(),
-    });
-
-    return c.json({
-      success: true,
-      temporaryPassword: tempPassword,
-      message: 'Password reset. User must change password on next login.'
-    });
-  }
-);
-
-// Force logout a user (invalidate all sessions)
-adminRouter.post(
-  '/io.exprsn.admin.users.forceLogout',
-  requirePermission(ADMIN_PERMISSIONS.USERS_EDIT),
-  async (c) => {
-    const body = await c.req.json<{
-      did: string;
-    }>();
-    const adminUser = c.get('adminUser');
-
-    if (!body.did) {
-      return c.json({ error: 'InvalidRequest', message: 'did is required' }, 400);
-    }
-
-    // Count existing sessions
-    const [sessionCount] = await db
-      .select({ count: count() })
-      .from(sessions)
-      .where(eq(sessions.did, body.did));
-
-    // Delete all sessions for the user
-    await db.delete(sessions).where(eq(sessions.did, body.did));
-
-    // Audit log
-    await db.insert(adminAuditLog).values({
-      id: nanoid(),
-      adminId: adminUser.id,
-      action: 'user.forceLogout',
-      targetType: 'user',
-      targetId: body.did,
-      details: { sessionsInvalidated: sessionCount?.count || 0 },
-      createdAt: new Date(),
-    });
-
-    return c.json({
-      success: true,
-      sessionsInvalidated: sessionCount?.count || 0,
-      message: 'All sessions invalidated'
-    });
-  }
-);
-
-// Get account info (for password management UI)
-adminRouter.get(
-  '/io.exprsn.admin.users.getAccountInfo',
-  requirePermission(ADMIN_PERMISSIONS.USERS_VIEW),
-  async (c) => {
-    const did = c.req.query('did');
-
-    if (!did) {
-      return c.json({ error: 'InvalidRequest', message: 'did is required' }, 400);
-    }
-
-    // Get actor repo info
-    const [actor] = await db
-      .select({
-        did: actorRepos.did,
-        handle: actorRepos.handle,
-        email: actorRepos.email,
-        status: actorRepos.status,
-        hasPassword: sql<boolean>`${actorRepos.passwordHash} IS NOT NULL`,
-        createdAt: actorRepos.createdAt,
-        updatedAt: actorRepos.updatedAt,
-      })
-      .from(actorRepos)
-      .where(eq(actorRepos.did, did))
-      .limit(1);
-
-    if (!actor) {
-      return c.json({ error: 'NotFound', message: 'User account not found' }, 404);
-    }
-
-    // Count active sessions
-    const [sessionCount] = await db
-      .select({ count: count() })
-      .from(sessions)
-      .where(eq(sessions.did, did));
-
-    return c.json({
-      account: {
-        ...actor,
-        activeSessions: sessionCount?.count || 0,
-      },
-    });
-  }
-);
-
-// ============================================
-// Export Functionality
-// ============================================
-
-// Export users
-adminRouter.get(
-  '/io.exprsn.admin.export.users',
-  requirePermission(ADMIN_PERMISSIONS.USERS_VIEW),
-  async (c) => {
-    const format = (c.req.query('format') || 'csv') as ExportFormat;
-    const q = c.req.query('q');
-    const verified = c.req.query('verified');
-    const dateFrom = c.req.query('dateFrom');
-    const dateTo = c.req.query('dateTo');
-    const adminUser = c.get('adminUser');
-
-    if (!['csv', 'xlsx', 'sqlite'].includes(format)) {
-      return c.json({ error: 'InvalidRequest', message: 'Invalid format. Use csv, xlsx, or sqlite' }, 400);
-    }
-
-    try {
-      const result = await exportUsers({
-        format,
-        filters: { q, verified },
-        dateRange: {
-          from: dateFrom ? new Date(dateFrom) : undefined,
-          to: dateTo ? new Date(dateTo) : undefined,
-        },
-      });
-
-      // Audit log
-      await db.insert(adminAuditLog).values({
-        id: nanoid(),
-        adminId: adminUser.id,
-        action: 'export.users',
-        targetType: 'export',
-        targetId: result.filename,
-        details: { format, rowCount: result.rowCount, filters: { q, verified } },
-        createdAt: new Date(),
-      });
-
-      return new Response(result.buffer, {
-        headers: {
-          'Content-Type': result.mimeType,
-          'Content-Disposition': `attachment; filename="${result.filename}"`,
-          'X-Row-Count': String(result.rowCount),
-        },
-      });
-    } catch (err) {
-      console.error('Export error:', err);
-      return c.json({ error: 'ExportFailed', message: 'Failed to generate export' }, 500);
-    }
-  }
-);
-
-// Export reports
-adminRouter.get(
-  '/io.exprsn.admin.export.reports',
-  requirePermission(ADMIN_PERMISSIONS.REPORTS_VIEW),
-  async (c) => {
-    const format = (c.req.query('format') || 'csv') as ExportFormat;
-    const status = c.req.query('status');
-    const contentType = c.req.query('contentType');
-    const dateFrom = c.req.query('dateFrom');
-    const dateTo = c.req.query('dateTo');
-    const adminUser = c.get('adminUser');
-
-    if (!['csv', 'xlsx', 'sqlite'].includes(format)) {
-      return c.json({ error: 'InvalidRequest', message: 'Invalid format' }, 400);
-    }
-
-    try {
-      const result = await exportReports({
-        format,
-        filters: { status, contentType },
-        dateRange: {
-          from: dateFrom ? new Date(dateFrom) : undefined,
-          to: dateTo ? new Date(dateTo) : undefined,
-        },
-      });
-
-      await db.insert(adminAuditLog).values({
-        id: nanoid(),
-        adminId: adminUser.id,
-        action: 'export.reports',
-        targetType: 'export',
-        targetId: result.filename,
-        details: { format, rowCount: result.rowCount },
-        createdAt: new Date(),
-      });
-
-      return new Response(result.buffer, {
-        headers: {
-          'Content-Type': result.mimeType,
-          'Content-Disposition': `attachment; filename="${result.filename}"`,
-          'X-Row-Count': String(result.rowCount),
-        },
-      });
-    } catch (err) {
-      console.error('Export error:', err);
-      return c.json({ error: 'ExportFailed', message: 'Failed to generate export' }, 500);
-    }
-  }
-);
-
-// Export audit logs
-adminRouter.get(
-  '/io.exprsn.admin.export.auditLogs',
-  requirePermission(ADMIN_PERMISSIONS.ADMINS_MANAGE),
-  async (c) => {
-    const format = (c.req.query('format') || 'csv') as ExportFormat;
-    const adminId = c.req.query('adminId');
-    const action = c.req.query('action');
-    const dateFrom = c.req.query('dateFrom');
-    const dateTo = c.req.query('dateTo');
-    const adminUser = c.get('adminUser');
-
-    if (!['csv', 'xlsx', 'sqlite'].includes(format)) {
-      return c.json({ error: 'InvalidRequest', message: 'Invalid format' }, 400);
-    }
-
-    try {
-      const result = await exportAuditLogs({
-        format,
-        filters: { adminId, action },
-        dateRange: {
-          from: dateFrom ? new Date(dateFrom) : undefined,
-          to: dateTo ? new Date(dateTo) : undefined,
-        },
-      });
-
-      await db.insert(adminAuditLog).values({
-        id: nanoid(),
-        adminId: adminUser.id,
-        action: 'export.auditLogs',
-        targetType: 'export',
-        targetId: result.filename,
-        details: { format, rowCount: result.rowCount },
-        createdAt: new Date(),
-      });
-
-      return new Response(result.buffer, {
-        headers: {
-          'Content-Type': result.mimeType,
-          'Content-Disposition': `attachment; filename="${result.filename}"`,
-          'X-Row-Count': String(result.rowCount),
-        },
-      });
-    } catch (err) {
-      console.error('Export error:', err);
-      return c.json({ error: 'ExportFailed', message: 'Failed to generate export' }, 500);
-    }
-  }
-);
-
-// Export analytics
-adminRouter.get(
-  '/io.exprsn.admin.export.analytics',
-  requirePermission(ADMIN_PERMISSIONS.ANALYTICS_VIEW),
-  async (c) => {
-    const format = (c.req.query('format') || 'csv') as ExportFormat;
-    const period = c.req.query('period');
-    const dateFrom = c.req.query('dateFrom');
-    const dateTo = c.req.query('dateTo');
-    const adminUser = c.get('adminUser');
-
-    if (!['csv', 'xlsx', 'sqlite'].includes(format)) {
-      return c.json({ error: 'InvalidRequest', message: 'Invalid format' }, 400);
-    }
-
-    try {
-      const result = await exportAnalytics({
-        format,
-        filters: { period },
-        dateRange: {
-          from: dateFrom ? new Date(dateFrom) : undefined,
-          to: dateTo ? new Date(dateTo) : undefined,
-        },
-      });
-
-      await db.insert(adminAuditLog).values({
-        id: nanoid(),
-        adminId: adminUser.id,
-        action: 'export.analytics',
-        targetType: 'export',
-        targetId: result.filename,
-        details: { format, rowCount: result.rowCount },
-        createdAt: new Date(),
-      });
-
-      return new Response(result.buffer, {
-        headers: {
-          'Content-Type': result.mimeType,
-          'Content-Disposition': `attachment; filename="${result.filename}"`,
-          'X-Row-Count': String(result.rowCount),
-        },
-      });
-    } catch (err) {
-      console.error('Export error:', err);
-      return c.json({ error: 'ExportFailed', message: 'Failed to generate export' }, 500);
-    }
-  }
-);
-
-// Export payments
-adminRouter.get(
-  '/io.exprsn.admin.export.payments',
-  requirePermission(ADMIN_PERMISSIONS.ANALYTICS_VIEW),
-  async (c) => {
-    const format = (c.req.query('format') || 'csv') as ExportFormat;
-    const status = c.req.query('status');
-    const gateway = c.req.query('gateway');
-    const dateFrom = c.req.query('dateFrom');
-    const dateTo = c.req.query('dateTo');
-    const adminUser = c.get('adminUser');
-
-    if (!['csv', 'xlsx', 'sqlite'].includes(format)) {
-      return c.json({ error: 'InvalidRequest', message: 'Invalid format' }, 400);
-    }
-
-    try {
-      const result = await exportPayments({
-        format,
-        filters: { status, gateway },
-        dateRange: {
-          from: dateFrom ? new Date(dateFrom) : undefined,
-          to: dateTo ? new Date(dateTo) : undefined,
-        },
-      });
-
-      await db.insert(adminAuditLog).values({
-        id: nanoid(),
-        adminId: adminUser.id,
-        action: 'export.payments',
-        targetType: 'export',
-        targetId: result.filename,
-        details: { format, rowCount: result.rowCount },
-        createdAt: new Date(),
-      });
-
-      return new Response(result.buffer, {
-        headers: {
-          'Content-Type': result.mimeType,
-          'Content-Disposition': `attachment; filename="${result.filename}"`,
-          'X-Row-Count': String(result.rowCount),
-        },
-      });
-    } catch (err) {
-      console.error('Export error:', err);
-      return c.json({ error: 'ExportFailed', message: 'Failed to generate export' }, 500);
-    }
-  }
-);
-
-// Export render jobs
-adminRouter.get(
-  '/io.exprsn.admin.export.renderJobs',
-  requirePermission(ADMIN_PERMISSIONS.ANALYTICS_VIEW),
-  async (c) => {
-    const format = (c.req.query('format') || 'csv') as ExportFormat;
-    const status = c.req.query('status');
-    const userId = c.req.query('userId');
-    const dateFrom = c.req.query('dateFrom');
-    const dateTo = c.req.query('dateTo');
-    const adminUser = c.get('adminUser');
-
-    if (!['csv', 'xlsx', 'sqlite'].includes(format)) {
-      return c.json({ error: 'InvalidRequest', message: 'Invalid format' }, 400);
-    }
-
-    try {
-      const result = await exportRenderJobs({
-        format,
-        filters: { status, userId },
-        dateRange: {
-          from: dateFrom ? new Date(dateFrom) : undefined,
-          to: dateTo ? new Date(dateTo) : undefined,
-        },
-      });
-
-      await db.insert(adminAuditLog).values({
-        id: nanoid(),
-        adminId: adminUser.id,
-        action: 'export.renderJobs',
-        targetType: 'export',
-        targetId: result.filename,
-        details: { format, rowCount: result.rowCount },
-        createdAt: new Date(),
-      });
-
-      return new Response(result.buffer, {
-        headers: {
-          'Content-Type': result.mimeType,
-          'Content-Disposition': `attachment; filename="${result.filename}"`,
-          'X-Row-Count': String(result.rowCount),
-        },
-      });
-    } catch (err) {
-      console.error('Export error:', err);
-      return c.json({ error: 'ExportFailed', message: 'Failed to generate export' }, 500);
-    }
-  }
-);
-
-// Export organizations
-adminRouter.get(
-  '/io.exprsn.admin.export.organizations',
-  requirePermission(ADMIN_PERMISSIONS.USERS_VIEW),
-  async (c) => {
-    const format = (c.req.query('format') || 'csv') as ExportFormat;
-    const type = c.req.query('type');
-    const verified = c.req.query('verified');
-    const dateFrom = c.req.query('dateFrom');
-    const dateTo = c.req.query('dateTo');
-    const adminUser = c.get('adminUser');
-
-    if (!['csv', 'xlsx', 'sqlite'].includes(format)) {
-      return c.json({ error: 'InvalidRequest', message: 'Invalid format' }, 400);
-    }
-
-    try {
-      const result = await exportOrganizations({
-        format,
-        filters: { type, verified },
-        dateRange: {
-          from: dateFrom ? new Date(dateFrom) : undefined,
-          to: dateTo ? new Date(dateTo) : undefined,
-        },
-      });
-
-      await db.insert(adminAuditLog).values({
-        id: nanoid(),
-        adminId: adminUser.id,
-        action: 'export.organizations',
-        targetType: 'export',
-        targetId: result.filename,
-        details: { format, rowCount: result.rowCount },
-        createdAt: new Date(),
-      });
-
-      return new Response(result.buffer, {
-        headers: {
-          'Content-Type': result.mimeType,
-          'Content-Disposition': `attachment; filename="${result.filename}"`,
-          'X-Row-Count': String(result.rowCount),
-        },
-      });
-    } catch (err) {
-      console.error('Export error:', err);
-      return c.json({ error: 'ExportFailed', message: 'Failed to generate export' }, 500);
-    }
-  }
-);
-
-// Export sanctions
-adminRouter.get(
-  '/io.exprsn.admin.export.sanctions',
-  requirePermission(ADMIN_PERMISSIONS.USERS_VIEW),
-  async (c) => {
-    const format = (c.req.query('format') || 'csv') as ExportFormat;
-    const sanctionType = c.req.query('sanctionType');
-    const userDid = c.req.query('userDid');
-    const dateFrom = c.req.query('dateFrom');
-    const dateTo = c.req.query('dateTo');
-    const adminUser = c.get('adminUser');
-
-    if (!['csv', 'xlsx', 'sqlite'].includes(format)) {
-      return c.json({ error: 'InvalidRequest', message: 'Invalid format' }, 400);
-    }
-
-    try {
-      const result = await exportSanctions({
-        format,
-        filters: { sanctionType, userDid },
-        dateRange: {
-          from: dateFrom ? new Date(dateFrom) : undefined,
-          to: dateTo ? new Date(dateTo) : undefined,
-        },
-      });
-
-      await db.insert(adminAuditLog).values({
-        id: nanoid(),
-        adminId: adminUser.id,
-        action: 'export.sanctions',
-        targetType: 'export',
-        targetId: result.filename,
-        details: { format, rowCount: result.rowCount },
-        createdAt: new Date(),
-      });
-
-      return new Response(result.buffer, {
-        headers: {
-          'Content-Type': result.mimeType,
-          'Content-Disposition': `attachment; filename="${result.filename}"`,
-          'X-Row-Count': String(result.rowCount),
-        },
-      });
-    } catch (err) {
-      console.error('Export error:', err);
-      return c.json({ error: 'ExportFailed', message: 'Failed to generate export' }, 500);
-    }
-  }
-);
-
-// ============================================
-// Admin Utility Routes
-// ============================================
-
-// System diagnostics - health check and stats
-adminRouter.get(
-  '/io.exprsn.admin.system.diagnostics',
-  requirePermission(ADMIN_PERMISSIONS.CONFIG_VIEW),
-  async (c) => {
-    const startTime = Date.now();
-
-    // Check database connectivity
-    let dbStatus: 'healthy' | 'degraded' | 'down' = 'healthy';
-    let dbLatency = 0;
-    try {
-      const dbStart = Date.now();
-      await db.execute(sql`SELECT 1`);
-      dbLatency = Date.now() - dbStart;
-      if (dbLatency > 100) dbStatus = 'degraded';
-    } catch {
-      dbStatus = 'down';
-    }
-
-    // Check Redis connectivity (if available)
-    let redisStatus: 'healthy' | 'degraded' | 'down' | 'not_configured' = 'not_configured';
-    let redisLatency = 0;
-    if (process.env.REDIS_URL) {
-      try {
-        const { Redis } = await import('ioredis');
-        const redis = new Redis(process.env.REDIS_URL);
-        const redisStart = Date.now();
-        await redis.ping();
-        redisLatency = Date.now() - redisStart;
-        redisStatus = redisLatency > 50 ? 'degraded' : 'healthy';
-        await redis.quit();
-      } catch {
-        redisStatus = 'down';
-      }
-    }
-
-    // Get system stats
-    const [
-      [userCount],
-      [videoCount],
-      [pendingReports],
-      [activeSessions],
-    ] = await Promise.all([
-      db.select({ count: count() }).from(users),
-      db.select({ count: count() }).from(videos),
-      db.select({ count: count() }).from(contentReports).where(eq(contentReports.status, 'pending')),
-      db.select({ count: count() }).from(sessions).where(sql`${sessions.expiresAt} > NOW()`),
-    ]);
-
-    return c.json({
-      status: dbStatus === 'healthy' && (redisStatus === 'healthy' || redisStatus === 'not_configured') ? 'healthy' : 'degraded',
-      timestamp: new Date().toISOString(),
-      latency: Date.now() - startTime,
-      services: {
-        database: { status: dbStatus, latency: dbLatency },
-        redis: { status: redisStatus, latency: redisLatency },
-        api: { status: 'healthy', uptime: process.uptime() },
-      },
-      stats: {
-        totalUsers: userCount?.count || 0,
-        totalVideos: videoCount?.count || 0,
-        pendingReports: pendingReports?.count || 0,
-        activeSessions: activeSessions?.count || 0,
-      },
-      environment: {
-        nodeVersion: process.version,
-        platform: process.platform,
-        memory: {
-          used: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
-          total: Math.round(process.memoryUsage().heapTotal / 1024 / 1024),
-        },
-      },
-    });
-  }
-);
-
-// Admin activity feed - recent actions by all admins
-adminRouter.get(
-  '/io.exprsn.admin.activity.feed',
-  requirePermission(ADMIN_PERMISSIONS.ANALYTICS_VIEW),
-  async (c) => {
-    const limit = Math.min(parseInt(c.req.query('limit') || '50'), 100);
-    const offset = parseInt(c.req.query('offset') || '0');
-    const adminDid = c.req.query('adminDid');
-    const actionType = c.req.query('action');
-
-    let query = db
-      .select({
-        id: adminAuditLog.id,
-        action: adminAuditLog.action,
-        targetType: adminAuditLog.targetType,
-        targetId: adminAuditLog.targetId,
-        details: adminAuditLog.details,
-        createdAt: adminAuditLog.createdAt,
-        admin: {
-          id: adminUsers.id,
-          userDid: adminUsers.userDid,
-          role: adminUsers.role,
-        },
-        user: {
-          handle: users.handle,
-          displayName: users.displayName,
-          avatar: users.avatar,
-        },
-      })
-      .from(adminAuditLog)
-      .innerJoin(adminUsers, eq(adminAuditLog.adminId, adminUsers.id))
-      .leftJoin(users, eq(adminUsers.userDid, users.did))
-      .orderBy(desc(adminAuditLog.createdAt))
-      .limit(limit)
-      .offset(offset);
-
-    // Apply filters
-    const conditions = [];
-    if (adminDid) {
-      conditions.push(eq(adminUsers.userDid, adminDid));
-    }
-    if (actionType) {
-      conditions.push(sql`${adminAuditLog.action} LIKE ${actionType + '%'}`);
-    }
-
-    if (conditions.length > 0) {
-      query = query.where(and(...conditions)) as typeof query;
-    }
-
-    const activities = await query;
-
-    // Group by time periods for the UI
-    const grouped = activities.reduce((acc, activity) => {
-      const date = new Date(activity.createdAt).toDateString();
-      if (!acc[date]) acc[date] = [];
-      acc[date].push({
-        id: activity.id,
-        action: activity.action,
-        targetType: activity.targetType,
-        targetId: activity.targetId,
-        details: activity.details,
-        createdAt: activity.createdAt.toISOString(),
-        admin: {
-          did: activity.admin.userDid,
-          role: activity.admin.role,
-          handle: activity.user?.handle,
-          displayName: activity.user?.displayName,
-          avatar: activity.user?.avatar,
-        },
-      });
-      return acc;
-    }, {} as Record<string, any[]>);
-
-    return c.json({
-      activities: Object.entries(grouped).map(([date, items]) => ({ date, items })),
-      pagination: { limit, offset, hasMore: activities.length === limit },
-    });
-  }
-);
-
-// Quick stats - lightweight endpoint for frequent polling
-adminRouter.get(
-  '/io.exprsn.admin.quickStats',
-  requirePermission(ADMIN_PERMISSIONS.ANALYTICS_VIEW),
-  async (c) => {
-    const now = new Date();
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-
-    const [
-      [pendingReports],
-      [newUsersToday],
-      [activeUsersNow],
-    ] = await Promise.all([
-      db.select({ count: count() }).from(contentReports).where(eq(contentReports.status, 'pending')),
-      db.select({ count: count() }).from(users).where(gte(users.createdAt, today)),
-      db.select({ count: count() }).from(sessions).where(
-        and(
-          sql`${sessions.expiresAt} > NOW()`,
-          gte(sessions.createdAt, new Date(now.getTime() - 15 * 60 * 1000)) // Active in last 15 min
-        )
-      ),
-    ]);
-
-    return c.json({
-      pendingReports: pendingReports?.count || 0,
-      newUsersToday: newUsersToday?.count || 0,
-      activeUsersNow: activeUsersNow?.count || 0,
-      timestamp: now.toISOString(),
-    });
-  }
-);
-
-// Bulk verify users (for verified badge management)
-adminRouter.post(
-  '/io.exprsn.admin.users.bulkVerify',
-  requirePermission(ADMIN_PERMISSIONS.USERS_EDIT),
-  async (c) => {
-    const body = await c.req.json<{
-      userDids: string[];
-      verified: boolean;
-      reason?: string;
-    }>();
-    const adminUser = c.get('adminUser');
-
-    if (!body.userDids || !Array.isArray(body.userDids) || body.userDids.length === 0) {
-      return c.json({ error: 'InvalidRequest', message: 'userDids array is required' }, 400);
-    }
-
-    if (body.userDids.length > 100) {
-      return c.json({ error: 'InvalidRequest', message: 'Maximum 100 users per bulk operation' }, 400);
-    }
-
-    const results: { did: string; success: boolean; error?: string }[] = [];
-
-    for (const userDid of body.userDids) {
-      try {
-        await db
-          .update(users)
-          .set({
-            verified: body.verified,
-          })
-          .where(eq(users.did, userDid));
-
-        // Audit log
-        await db.insert(adminAuditLog).values({
-          id: nanoid(),
-          adminId: adminUser.id,
-          action: body.verified ? 'user.verify' : 'user.unverify',
-          targetType: 'user',
-          targetId: userDid,
-          details: { reason: body.reason, bulkOperation: true },
-          createdAt: new Date(),
-        });
-
-        results.push({ did: userDid, success: true });
-      } catch (err) {
-        results.push({ did: userDid, success: false, error: 'Failed to update user' });
-      }
-    }
-
-    const successCount = results.filter((r) => r.success).length;
-
-    return c.json({
-      success: results.every((r) => r.success),
-      summary: {
-        total: body.userDids.length,
-        succeeded: successCount,
-        failed: body.userDids.length - successCount,
-      },
-      results,
-    });
-  }
-);
-
-// Search users with fuzzy matching
-adminRouter.get(
-  '/io.exprsn.admin.users.search',
-  requirePermission(ADMIN_PERMISSIONS.USERS_VIEW),
-  async (c) => {
-    const q = c.req.query('q');
-    const limit = Math.min(parseInt(c.req.query('limit') || '20'), 50);
-
-    if (!q || q.length < 2) {
-      return c.json({ error: 'InvalidRequest', message: 'Query must be at least 2 characters' }, 400);
-    }
-
-    const searchPattern = `%${q}%`;
-
-    const results = await db
-      .select({
-        did: users.did,
-        handle: users.handle,
-        displayName: users.displayName,
-        avatar: users.avatar,
-        verified: users.verified,
-        createdAt: users.createdAt,
-      })
-      .from(users)
-      .where(
-        or(
-          ilike(users.handle, searchPattern),
-          ilike(users.displayName, searchPattern),
-          ilike(users.did, searchPattern)
-        )
-      )
-      .orderBy(
-        // Prioritize exact handle matches
-        sql`CASE WHEN ${users.handle} = ${q} THEN 0
-            WHEN ${users.handle} ILIKE ${q + '%'} THEN 1
-            ELSE 2 END`,
-        desc(users.createdAt)
-      )
-      .limit(limit);
-
-    return c.json({
-      users: results.map((u) => ({
-        did: u.did,
-        handle: u.handle,
-        displayName: u.displayName,
-        avatar: u.avatar,
-        verified: u.verified,
-        createdAt: u.createdAt.toISOString(),
-      })),
-    });
-  }
-);
 
 // ============================================
 // Domain Management
@@ -5944,11 +1383,14 @@ adminRouter.get(
   '/io.exprsn.admin.domains.list',
   requirePermission(ADMIN_PERMISSIONS.DOMAINS_VIEW),
   async (c) => {
-    const q = c.req.query('q');
+    const rawQ = c.req.query('q');
     const type = c.req.query('type') as 'hosted' | 'federated' | undefined;
     const status = c.req.query('status');
     const limit = Math.min(parseInt(c.req.query('limit') || '50'), 100);
     const cursor = c.req.query('cursor');
+
+    // Sanitize search query
+    const q = sanitizeSearchQuery(rawQ);
 
     const { domains } = await import('../db/schema.js');
 
@@ -6066,7 +1508,7 @@ adminRouter.get(
     }
 
     // Get user count by role
-    const userStats = await db
+    const userStatsByRole = await db
       .select({
         role: domainUsers.role,
         count: count(),
@@ -6074,6 +1516,33 @@ adminRouter.get(
       .from(domainUsers)
       .where(eq(domainUsers.domainId, id))
       .groupBy(domainUsers.role);
+
+    // Get total and active user counts
+    const [totalUsersResult] = await db
+      .select({ count: count() })
+      .from(domainUsers)
+      .where(eq(domainUsers.domainId, id));
+
+    const [activeUsersResult] = await db
+      .select({ count: count() })
+      .from(domainUsers)
+      .where(
+        and(
+          eq(domainUsers.domainId, id),
+          eq(domainUsers.isActive, true)
+        )
+      );
+
+    // Build userStats object with expected structure
+    const roleBreakdown = userStatsByRole.reduce((acc, s) => ({ ...acc, [s.role]: Number(s.count) }), {} as Record<string, number>);
+    const userStats = {
+      total: Number(totalUsersResult?.count || 0),
+      active: Number(activeUsersResult?.count || 0),
+      admins: roleBreakdown.admin || 0,
+      moderators: roleBreakdown.moderator || 0,
+      members: roleBreakdown.member || 0,
+      ...roleBreakdown,
+    };
 
     // Get group count
     const [groupCount] = await db
@@ -6146,7 +1615,7 @@ adminRouter.get(
         createdAt: domain.createdAt.toISOString(),
         updatedAt: domain.updatedAt.toISOString(),
       },
-      userStats: userStats.reduce((acc, s) => ({ ...acc, [s.role]: s.count }), {}),
+      userStats,
       groupCount: groupCount?.count || 0,
       intermediateCert,
       entityCertCount: entityCertCount?.count || 0,
@@ -6159,6 +1628,305 @@ adminRouter.get(
         metadata: a.metadata,
         createdAt: a.createdAt.toISOString(),
       })),
+    });
+  }
+);
+
+// Get domain analytics
+adminRouter.get(
+  '/io.exprsn.admin.domains.analytics.get',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_VIEW),
+  async (c) => {
+    const domainId = c.req.query('domainId');
+    const period = (c.req.query('period') || 'month') as 'day' | 'week' | 'month' | 'year';
+
+    if (!domainId) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing domainId' }, 400);
+    }
+
+    const { domains, domainUsers, videos, likes, comments } = await import('../db/schema.js');
+
+    // Verify domain exists
+    const [domain] = await db
+      .select({ id: domains.id })
+      .from(domains)
+      .where(eq(domains.id, domainId))
+      .limit(1);
+
+    if (!domain) {
+      return c.json({ error: 'NotFound', message: 'Domain not found' }, 404);
+    }
+
+    // Calculate date ranges based on period
+    const now = new Date();
+    let startDate = new Date();
+    switch (period) {
+      case 'day':
+        startDate.setDate(now.getDate() - 1);
+        break;
+      case 'week':
+        startDate.setDate(now.getDate() - 7);
+        break;
+      case 'month':
+        startDate.setMonth(now.getMonth() - 1);
+        break;
+      case 'year':
+        startDate.setFullYear(now.getFullYear() - 1);
+        break;
+    }
+
+    // Get total users
+    const [totalUsersResult] = await db
+      .select({ count: count() })
+      .from(domainUsers)
+      .where(eq(domainUsers.domainId, domainId));
+
+    // Get active users (active in last 30 days)
+    const activeDate = new Date();
+    activeDate.setDate(activeDate.getDate() - 30);
+    const [activeUsersResult] = await db
+      .select({ count: count() })
+      .from(domainUsers)
+      .where(
+        and(
+          eq(domainUsers.domainId, domainId),
+          eq(domainUsers.isActive, true)
+        )
+      );
+
+    // Get new users in period
+    const [newUsersResult] = await db
+      .select({ count: count() })
+      .from(domainUsers)
+      .where(
+        and(
+          eq(domainUsers.domainId, domainId),
+          gte(domainUsers.createdAt, startDate)
+        )
+      );
+
+    // Get total videos for domain users
+    const [totalVideosResult] = await db
+      .select({ count: count() })
+      .from(videos)
+      .innerJoin(domainUsers, eq(videos.authorDid, domainUsers.userDid))
+      .where(eq(domainUsers.domainId, domainId));
+
+    // Get total views (sum of video view counts)
+    const videosList = await db
+      .select({ viewCount: videos.viewCount })
+      .from(videos)
+      .innerJoin(domainUsers, eq(videos.authorDid, domainUsers.userDid))
+      .where(eq(domainUsers.domainId, domainId));
+
+    const totalViews = videosList.reduce((sum, v) => sum + (v.viewCount || 0), 0);
+
+    // Get total likes
+    const [totalLikesResult] = await db
+      .select({ count: count() })
+      .from(likes)
+      .innerJoin(videos, eq(likes.videoUri, videos.uri))
+      .innerJoin(domainUsers, eq(videos.authorDid, domainUsers.userDid))
+      .where(eq(domainUsers.domainId, domainId));
+
+    // Get total comments
+    const [totalCommentsResult] = await db
+      .select({ count: count() })
+      .from(comments)
+      .innerJoin(videos, eq(comments.videoUri, videos.uri))
+      .innerJoin(domainUsers, eq(videos.authorDid, domainUsers.userDid))
+      .where(eq(domainUsers.domainId, domainId));
+
+    // Get top content (most viewed videos)
+    const topContent = await db
+      .select({
+        uri: videos.uri,
+        title: videos.caption,
+        thumbnail: videos.thumbnailUrl,
+        views: videos.viewCount,
+        authorDid: videos.authorDid,
+      })
+      .from(videos)
+      .innerJoin(domainUsers, eq(videos.authorDid, domainUsers.userDid))
+      .where(eq(domainUsers.domainId, domainId))
+      .orderBy(desc(videos.viewCount))
+      .limit(10);
+
+    // Get top creators (users with most followers)
+    const topCreators = await db
+      .select({
+        did: domainUsers.userDid,
+      })
+      .from(domainUsers)
+      .where(eq(domainUsers.domainId, domainId))
+      .limit(10);
+
+    const totalUsers = Number(totalUsersResult?.count || 0);
+    const totalContent = Number(totalVideosResult?.count || 0);
+    const totalLikes = Number(totalLikesResult?.count || 0);
+
+    return c.json({
+      stats: {
+        totalUsers,
+        activeUsers: Number(activeUsersResult?.count || 0),
+        totalContent,
+        totalViews: totalViews,
+        totalLikes,
+        newUsersToday: 0, // TODO: Calculate based on today
+        newUsersWeek: Number(newUsersResult?.count || 0),
+        engagementRate: totalContent > 0 ? (totalLikes / totalContent) * 100 : 0,
+      },
+      trends: {
+        users: [],
+        content: [],
+        engagement: [],
+      },
+      topContent: topContent.map((v) => ({
+        uri: v.uri,
+        title: v.title,
+        thumbnail: v.thumbnail,
+        views: v.views || 0,
+      })),
+      topCreators: [], // TODO: Implement with user data
+    });
+  }
+);
+
+// Get domain render stats
+adminRouter.get(
+  '/io.exprsn.admin.domains.render.stats',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_VIEW),
+  async (c) => {
+    const domainId = c.req.query('domainId');
+
+    if (!domainId) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing domainId' }, 400);
+    }
+
+    const { domains, domainUsers, renderJobs, renderWorkers } = await import('../db/schema.js');
+
+    // Verify domain exists
+    const [domain] = await db
+      .select({ id: domains.id })
+      .from(domains)
+      .where(eq(domains.id, domainId))
+      .limit(1);
+
+    if (!domain) {
+      return c.json({ error: 'NotFound', message: 'Domain not found' }, 404);
+    }
+
+    const now = new Date();
+    const dayAgo = new Date(now.getTime() - 86400000);
+
+    // Get render job stats for domain users
+    const [queuedResult] = await db
+      .select({ count: count() })
+      .from(renderJobs)
+      .innerJoin(domainUsers, eq(renderJobs.userDid, domainUsers.userDid))
+      .where(
+        and(
+          eq(domainUsers.domainId, domainId),
+          or(
+            eq(renderJobs.status, 'pending'),
+            eq(renderJobs.status, 'queued')
+          )
+        )
+      );
+
+    const [processingResult] = await db
+      .select({ count: count() })
+      .from(renderJobs)
+      .innerJoin(domainUsers, eq(renderJobs.userDid, domainUsers.userDid))
+      .where(
+        and(
+          eq(domainUsers.domainId, domainId),
+          eq(renderJobs.status, 'rendering')
+        )
+      );
+
+    const [completedTodayResult] = await db
+      .select({ count: count() })
+      .from(renderJobs)
+      .innerJoin(domainUsers, eq(renderJobs.userDid, domainUsers.userDid))
+      .where(
+        and(
+          eq(domainUsers.domainId, domainId),
+          eq(renderJobs.status, 'completed'),
+          gte(renderJobs.renderCompletedAt, dayAgo)
+        )
+      );
+
+    const [failedTodayResult] = await db
+      .select({ count: count() })
+      .from(renderJobs)
+      .innerJoin(domainUsers, eq(renderJobs.userDid, domainUsers.userDid))
+      .where(
+        and(
+          eq(domainUsers.domainId, domainId),
+          eq(renderJobs.status, 'failed'),
+          gte(renderJobs.updatedAt, dayAgo)
+        )
+      );
+
+    // Get average processing time for completed jobs today
+    const [avgTimeResult] = await db
+      .select({ avg: sql`AVG(${renderJobs.actualDurationSeconds})` })
+      .from(renderJobs)
+      .innerJoin(domainUsers, eq(renderJobs.userDid, domainUsers.userDid))
+      .where(
+        and(
+          eq(domainUsers.domainId, domainId),
+          eq(renderJobs.status, 'completed'),
+          gte(renderJobs.renderCompletedAt, dayAgo)
+        )
+      );
+
+    // Get recent jobs
+    const recentJobs = await db
+      .select({
+        id: renderJobs.id,
+        type: renderJobs.format,
+        status: renderJobs.status,
+        progress: renderJobs.progress,
+        createdAt: renderJobs.createdAt,
+        workerId: renderJobs.workerId,
+      })
+      .from(renderJobs)
+      .innerJoin(domainUsers, eq(renderJobs.userDid, domainUsers.userDid))
+      .where(eq(domainUsers.domainId, domainId))
+      .orderBy(desc(renderJobs.createdAt))
+      .limit(50);
+
+    // Get worker stats (global, but included for context)
+    const [totalWorkersResult] = await db
+      .select({ count: count() })
+      .from(renderWorkers);
+
+    const [activeWorkersResult] = await db
+      .select({ count: count() })
+      .from(renderWorkers)
+      .where(eq(renderWorkers.status, 'active'));
+
+    return c.json({
+      stats: {
+        queuedJobs: Number(queuedResult?.count || 0),
+        processingJobs: Number(processingResult?.count || 0),
+        completedToday: Number(completedTodayResult?.count || 0),
+        failedToday: Number(failedTodayResult?.count || 0),
+        avgProcessingTime: Number(avgTimeResult?.avg || 0),
+        workers: Number(activeWorkersResult?.count || 0),
+        workerCapacity: Number(totalWorkersResult?.count || 0),
+      },
+      queue: recentJobs.map((job) => ({
+        id: job.id,
+        type: job.type,
+        status: job.status,
+        progress: job.progress || 0,
+        createdAt: job.createdAt.toISOString(),
+        workerId: job.workerId,
+      })),
+      workers: [], // TODO: Add worker details if needed
     });
   }
 );
@@ -6331,7 +2099,10 @@ adminRouter.post(
     const body = await c.req.json<{
       id: string;
       name?: string;
+      domain?: string;
       status?: string;
+      handleSuffix?: string;
+      dnsVerificationToken?: string;
       features?: Record<string, boolean>;
       rateLimits?: Record<string, number>;
       branding?: Record<string, string>;
@@ -6360,7 +2131,10 @@ adminRouter.post(
 
     const updates: any = { updatedAt: new Date() };
     if (body.name) updates.name = body.name;
+    if (body.domain) updates.domain = body.domain;
     if (body.status) updates.status = body.status;
+    if (body.handleSuffix !== undefined) updates.handleSuffix = body.handleSuffix;
+    if (body.dnsVerificationToken !== undefined) updates.dnsVerificationToken = body.dnsVerificationToken;
     if (body.features) updates.features = body.features;
     if (body.rateLimits) updates.rateLimits = body.rateLimits;
     if (body.branding) updates.branding = body.branding;
@@ -6431,7 +2205,7 @@ adminRouter.post(
   '/io.exprsn.admin.domains.verify',
   requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
   async (c) => {
-    const body = await c.req.json<{ id: string }>();
+    const body = await c.req.json<{ id: string; force?: boolean }>();
 
     if (!body.id) {
       return c.json({ error: 'InvalidRequest', message: 'Missing id' }, 400);
@@ -6449,10 +2223,41 @@ adminRouter.post(
       return c.json({ error: 'NotFound', message: 'Domain not found' }, 404);
     }
 
-    // In a real implementation, this would check DNS TXT records
-    // For now, we'll just mark it as verified
+    // Perform actual DNS verification
+    const dnsResults = await dnsValidationService.verifyDomainDns(body.id);
+
+    // Check if TXT verification record is valid
+    const txtRecord = dnsResults.find(r => r.recordType === 'TXT' && r.expectedValue);
+    const txtVerified = txtRecord?.status === 'valid';
+
+    // Check if basic DNS records exist (A or CNAME)
+    const hasValidDns = dnsResults.some(r =>
+      (r.recordType === 'A' || r.recordType === 'CNAME') && r.status === 'valid'
+    );
+
+    // Domain is verified if TXT record matches OR force flag is set (for testing)
+    const isVerified = txtVerified || body.force === true;
+
+    if (!isVerified) {
+      return c.json({
+        success: false,
+        verified: false,
+        error: 'DNS verification failed',
+        message: txtRecord?.errorMessage || 'TXT verification record not found',
+        dnsResults: dnsResults.map(r => ({
+          recordType: r.recordType,
+          name: r.name,
+          status: r.status,
+          expectedValue: r.expectedValue,
+          actualValue: r.actualValue,
+          errorMessage: r.errorMessage,
+        })),
+      }, 400);
+    }
+
+    // Mark domain as verified
     await db.update(domains).set({
-      status: 'active',
+      status: hasValidDns ? 'active' : 'pending_dns',
       dnsVerifiedAt: new Date(),
       verifiedAt: new Date(),
       updatedAt: new Date(),
@@ -6465,10 +2270,22 @@ adminRouter.post(
       domainId: body.id,
       actorDid: adminDid,
       action: 'domain_verified',
-      metadata: { domain: domain.domain },
+      metadata: {
+        domain: domain.domain,
+        dnsResults: dnsResults.map(r => ({ type: r.recordType, status: r.status })),
+      },
     });
 
-    return c.json({ success: true, verified: true });
+    return c.json({
+      success: true,
+      verified: true,
+      dnsResults: dnsResults.map(r => ({
+        recordType: r.recordType,
+        name: r.name,
+        status: r.status,
+        actualValue: r.actualValue,
+      })),
+    });
   }
 );
 
@@ -6660,7 +2477,7 @@ adminRouter.get(
         if (!groupedByType[check.checkType]) {
           groupedByType[check.checkType] = [];
         }
-        groupedByType[check.checkType].push(check);
+        groupedByType[check.checkType]!.push(check);
       }
 
       // Calculate uptime stats per type
@@ -8015,7 +3832,7 @@ adminRouter.get(
       .select({ role: domainRoles })
       .from(domainUserRoles)
       .innerJoin(domainRoles, eq(domainUserRoles.roleId, domainRoles.id))
-      .where(eq(domainUserRoles.userId, domainUser.id));
+      .where(eq(domainUserRoles.domainUserId, domainUser.id));
 
     const fromRoles = userRoles.map((ur) => ({
       roleId: ur.role.id,
@@ -8028,7 +3845,7 @@ adminRouter.get(
       .select({ group: domainGroups })
       .from(domainGroupMembers)
       .innerJoin(domainGroups, eq(domainGroupMembers.groupId, domainGroups.id))
-      .where(eq(domainGroupMembers.userId, domainUser.id));
+      .where(eq(domainGroupMembers.userDid, domainUser.id));
 
     const fromGroups = userGroups.map((ug) => ({
       groupId: ug.group.id,
@@ -10034,7 +5851,7 @@ adminRouter.get(
     }
 
     if (cursor) {
-      conditions.push(sql`${organizations.createdAt} < ${new Date(cursor)}`);
+      conditions.push(lt(organizations.createdAt, new Date(cursor)));
     }
 
     const orgs = await db
@@ -10484,6 +6301,211 @@ adminRouter.post(
 );
 
 // ============================================
+// Identity Conversion Routes
+// ============================================
+
+// Convert a user from did:plc to did:exprsn with certificates
+adminRouter.post(
+  '/io.exprsn.admin.identity.convertToExprsn',
+  requirePermission(ADMIN_PERMISSIONS.USERS_EDIT),
+  async (c) => {
+    const body = await c.req.json<{
+      userDid: string; // Current DID of the user
+      vanityId?: string; // Optional vanity identifier (e.g., "rickholland" for did:exprsn:rickholland)
+      email?: string;
+    }>();
+
+    if (!body.userDid) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing userDid' }, 400);
+    }
+
+    const { ExprsnDidService } = await import('../services/did/exprsn.js');
+    const { certificateManager } = await import('../services/ca/CertificateManager.js');
+    const { users, actorRepos, plcIdentities, exprsnDidCertificates, caEntityCertificates } = await import('../db/schema.js');
+
+    // Get the existing user
+    const [existingUser] = await db
+      .select()
+      .from(users)
+      .where(eq(users.did, body.userDid))
+      .limit(1);
+
+    if (!existingUser) {
+      return c.json({ error: 'NotFound', message: 'User not found' }, 404);
+    }
+
+    try {
+      // Ensure root CA exists
+      await certificateManager.ensureRootCA();
+
+      // Issue client auth certificate
+      const clientCertResult = await certificateManager.issueEntityCertificate({
+        commonName: `@${existingUser.handle}`,
+        type: 'client',
+        email: body.email,
+        organization: 'Exprsn Creator',
+        validityDays: 365,
+      });
+
+      // Issue code signing certificate
+      const codeSigningCertResult = await certificateManager.issueEntityCertificate({
+        commonName: `@${existingUser.handle} (Code Signing)`,
+        type: 'code_signing',
+        email: body.email,
+        organization: 'Exprsn Creator',
+        validityDays: 365,
+      });
+
+      // Generate DID - use vanity ID if provided, otherwise derive from fingerprint
+      let newDid: string;
+      if (body.vanityId) {
+        newDid = `did:exprsn:${body.vanityId}`;
+      } else {
+        newDid = ExprsnDidService.generateDid(clientCertResult.fingerprint);
+      }
+
+      // Get certificate details
+      const clientCertDetails = await certificateManager.getEntityCertificate(clientCertResult.id);
+      const codeSigningCertDetails = await certificateManager.getEntityCertificate(codeSigningCertResult.id);
+
+      // Get public key for multibase
+      const [entityCert] = await db
+        .select({ publicKey: caEntityCertificates.publicKey })
+        .from(caEntityCertificates)
+        .where(eq(caEntityCertificates.id, clientCertResult.id))
+        .limit(1);
+
+      const publicKeyMultibase = ExprsnDidService.publicKeyToMultibase(entityCert?.publicKey || '');
+
+      // Store the DID-certificate link
+      await db.insert(exprsnDidCertificates).values({
+        id: nanoid(),
+        did: newDid,
+        certificateId: clientCertResult.id,
+        certificateType: 'platform',
+        publicKeyMultibase,
+        status: 'active',
+      });
+
+      // Link code signing certificate to the same DID
+      await db
+        .update(caEntityCertificates)
+        .set({ subjectDid: newDid })
+        .where(eq(caEntityCertificates.id, codeSigningCertResult.id));
+
+      // Update users table with new DID
+      await db
+        .update(users)
+        .set({
+          did: newDid,
+          updatedAt: new Date(),
+        })
+        .where(eq(users.did, body.userDid));
+
+      // Update actor_repos table
+      const [existingRepo] = await db
+        .select()
+        .from(actorRepos)
+        .where(eq(actorRepos.did, body.userDid))
+        .limit(1);
+
+      if (existingRepo) {
+        await db
+          .update(actorRepos)
+          .set({
+            did: newDid,
+            signingKeyPublic: publicKeyMultibase,
+            updatedAt: new Date(),
+          })
+          .where(eq(actorRepos.did, body.userDid));
+      }
+
+      // Create or update PLC identity record
+      const [existingIdentity] = await db
+        .select()
+        .from(plcIdentities)
+        .where(eq(plcIdentities.did, body.userDid))
+        .limit(1);
+
+      if (existingIdentity) {
+        // Update existing identity
+        await db
+          .update(plcIdentities)
+          .set({
+            did: newDid,
+            signingKey: publicKeyMultibase,
+            rotationKeys: [publicKeyMultibase],
+            certificateId: clientCertResult.id,
+            certificateFingerprint: clientCertResult.fingerprint,
+            updatedAt: new Date(),
+          })
+          .where(eq(plcIdentities.did, body.userDid));
+      } else {
+        // Create new identity
+        await db.insert(plcIdentities).values({
+          did: newDid,
+          handle: existingUser.handle,
+          signingKey: publicKeyMultibase,
+          rotationKeys: [publicKeyMultibase],
+          alsoKnownAs: [`at://${existingUser.handle}`],
+          services: {
+            atproto_pds: {
+              type: 'AtprotoPersonalDataServer',
+              endpoint: process.env.PDS_ENDPOINT || 'https://pds.exprsn.io',
+            },
+          },
+          certificateId: clientCertResult.id,
+          certificateFingerprint: clientCertResult.fingerprint,
+          status: 'active',
+        });
+      }
+
+      // Log activity
+      const adminDid = c.get('did');
+      const { domainActivityLog } = await import('../db/schema.js');
+      await db.insert(domainActivityLog).values({
+        id: nanoid(),
+        domainId: 'domain_exprsn_io',
+        actorDid: adminDid,
+        action: 'identity_converted',
+        targetType: 'user',
+        targetId: newDid,
+        metadata: {
+          oldDid: body.userDid,
+          newDid,
+          handle: existingUser.handle,
+          certificateId: clientCertResult.id,
+        },
+      });
+
+      return c.json({
+        success: true,
+        oldDid: body.userDid,
+        newDid,
+        handle: existingUser.handle,
+        certificate: {
+          id: clientCertResult.id,
+          fingerprint: clientCertResult.fingerprint,
+          validUntil: clientCertDetails?.notAfter,
+        },
+        codeSigningCertificate: {
+          id: codeSigningCertResult.id,
+          fingerprint: codeSigningCertResult.fingerprint,
+          validUntil: codeSigningCertDetails?.notAfter,
+        },
+        publicKeyMultibase,
+      });
+    } catch (error) {
+      console.error('Identity conversion error:', error);
+      return c.json({
+        error: 'ConversionError',
+        message: error instanceof Error ? error.message : 'Failed to convert identity'
+      }, 500);
+    }
+  }
+);
+
+// ============================================
 // Certificate Management Routes
 // ============================================
 
@@ -10768,6 +6790,91 @@ adminRouter.get(
       certificate: cert.certificate,
       format: 'pem',
     });
+  }
+);
+
+// Create and link an intermediate CA to a domain
+adminRouter.post(
+  '/io.exprsn.admin.domains.createIntermediateCA',
+  requirePermission(ADMIN_PERMISSIONS.DOMAINS_MANAGE),
+  async (c) => {
+    const body = await c.req.json<{
+      domainId: string;
+      commonName?: string;
+      organization?: string;
+      validityDays?: number;
+    }>();
+
+    if (!body.domainId) {
+      return c.json({ error: 'InvalidRequest', message: 'Missing domainId' }, 400);
+    }
+
+    const { domains, domainActivityLog } = await import('../db/schema.js');
+
+    // Get the domain
+    const [domain] = await db
+      .select()
+      .from(domains)
+      .where(eq(domains.id, body.domainId))
+      .limit(1);
+
+    if (!domain) {
+      return c.json({ error: 'NotFound', message: 'Domain not found' }, 404);
+    }
+
+    // Check if domain already has an intermediate CA
+    if (domain.intermediateCertId) {
+      return c.json({ error: 'AlreadyExists', message: 'Domain already has an intermediate CA' }, 400);
+    }
+
+    try {
+      const { CertificateManager } = await import('../services/ca/index.js');
+      const certManager = new CertificateManager();
+
+      // Create the intermediate CA
+      const intermediateCA = await certManager.createIntermediateCA({
+        commonName: body.commonName || `${domain.name} Intermediate CA`,
+        organization: body.organization || 'Exprsn',
+        validityDays: body.validityDays || 3650, // 10 years
+      });
+
+      // Link to domain
+      await db
+        .update(domains)
+        .set({
+          intermediateCertId: intermediateCA.id,
+          updatedAt: new Date(),
+        })
+        .where(eq(domains.id, body.domainId));
+
+      // Log activity
+      const adminDid = c.get('did');
+      await db.insert(domainActivityLog).values({
+        id: nanoid(),
+        domainId: body.domainId,
+        actorDid: adminDid,
+        action: 'intermediate_ca_created',
+        metadata: {
+          certId: intermediateCA.id,
+          commonName: body.commonName || `${domain.name} Intermediate CA`,
+        },
+      });
+
+      return c.json({
+        intermediateCert: {
+          id: intermediateCA.id,
+          commonName: body.commonName || `${domain.name} Intermediate CA`,
+          serialNumber: intermediateCA.serialNumber,
+          fingerprint: intermediateCA.fingerprint,
+        },
+      });
+    } catch (error) {
+      console.error('Failed to create intermediate CA:', error);
+      return c.json({
+        error: 'CertificateError',
+        message: error instanceof Error ? error.message : 'Failed to create intermediate CA',
+      }, 500);
+    }
   }
 );
 
@@ -11160,6 +7267,7 @@ adminRouter.get(
   async (c) => {
     const domainId = c.req.query('domainId');
     const serviceType = c.req.query('serviceType');
+    const skipCheck = c.req.query('skipCheck') === 'true';
 
     if (!domainId || !serviceType) {
       return c.json({ error: 'InvalidRequest', message: 'Missing required parameters' }, 400);
@@ -11187,14 +7295,81 @@ adminRouter.get(
       });
     }
 
-    // In a real implementation, this would ping the service endpoint
-    // For now, return the stored status
+    // Return cached status if skipCheck is true or service is disabled
+    if (skipCheck || !service.enabled || !service.endpoint) {
+      return c.json({
+        status: service.status,
+        enabled: service.enabled,
+        endpoint: service.endpoint,
+        lastHealthCheck: service.lastHealthCheck,
+        errorMessage: service.errorMessage,
+      });
+    }
+
+    // Perform actual health check
+    const start = Date.now();
+    let status: 'healthy' | 'degraded' | 'down' | 'error' = 'down';
+    let responseTime: number | undefined;
+    let statusCode: number | undefined;
+    let errorMessage: string | undefined;
+
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000); // 10s timeout
+
+      // Determine health endpoint based on service type
+      let healthEndpoint = service.endpoint;
+      if (serviceType === 'pds') {
+        healthEndpoint = `${service.endpoint}/xrpc/_health`;
+      } else if (serviceType === 'api') {
+        healthEndpoint = `${service.endpoint}/health`;
+      } else if (serviceType === 'federation') {
+        healthEndpoint = `${service.endpoint}/xrpc/com.atproto.server.describeServer`;
+      }
+
+      const response = await fetch(healthEndpoint, {
+        signal: controller.signal,
+        method: 'GET',
+        headers: { 'Accept': 'application/json' },
+      });
+
+      clearTimeout(timeout);
+      responseTime = Date.now() - start;
+      statusCode = response.status;
+
+      if (response.ok) {
+        status = responseTime < 1000 ? 'healthy' : 'degraded';
+      } else if (response.status < 500) {
+        status = 'degraded';
+      } else {
+        status = 'down';
+        errorMessage = `HTTP ${response.status}`;
+      }
+    } catch (error) {
+      responseTime = Date.now() - start;
+      status = 'error';
+      errorMessage = error instanceof Error ? error.message : 'Health check failed';
+    }
+
+    // Update the service status in database
+    await db
+      .update(domainServices)
+      .set({
+        status,
+        lastHealthCheck: new Date(),
+        errorMessage: errorMessage || null,
+        updatedAt: new Date(),
+      })
+      .where(eq(domainServices.id, service.id));
+
     return c.json({
-      status: service.status,
+      status,
       enabled: service.enabled,
       endpoint: service.endpoint,
-      lastHealthCheck: service.lastHealthCheck,
-      errorMessage: service.errorMessage,
+      lastHealthCheck: new Date(),
+      responseTime,
+      statusCode,
+      errorMessage,
     });
   }
 );
@@ -12145,3 +8320,224 @@ adminRouter.post(
     return c.json({ success: true });
   }
 );
+
+// ============================================
+// Invite Codes Management
+// ============================================
+
+// Create invite code
+adminRouter.post(
+  '/io.exprsn.admin.inviteCodes.create',
+  requirePermission(ADMIN_PERMISSIONS.USERS_EDIT),
+  async (c) => {
+    const adminDid = c.get('did');
+    const body = await c.req.json();
+
+    const { inviteCodeService } = await import('../services/invites/InviteCodeService.js');
+
+    try {
+      const result = await inviteCodeService.createInviteCode({
+        issuerDid: body.issuerDid || adminDid,
+        domainId: body.domainId,
+        maxUses: body.maxUses || 1,
+        expiresAt: body.expiresAt ? new Date(body.expiresAt) : undefined,
+        metadata: body.metadata,
+        certificateId: body.certificateId,
+      });
+
+      return c.json({
+        success: true,
+        inviteCode: result,
+      });
+    } catch (error) {
+      console.error('Failed to create invite code:', error);
+      return c.json(
+        {
+          error: 'InviteCodeCreationFailed',
+          message: error instanceof Error ? error.message : 'Failed to create invite code',
+        },
+        500
+      );
+    }
+  }
+);
+
+// Batch create invite codes
+adminRouter.post(
+  '/io.exprsn.admin.inviteCodes.batchCreate',
+  requirePermission(ADMIN_PERMISSIONS.USERS_EDIT),
+  async (c) => {
+    const adminDid = c.get('did');
+    const body = await c.req.json();
+
+    if (!body.count || body.count < 1 || body.count > 100) {
+      return c.json(
+        {
+          error: 'InvalidRequest',
+          message: 'Count must be between 1 and 100',
+        },
+        400
+      );
+    }
+
+    const { inviteCodeService } = await import('../services/invites/InviteCodeService.js');
+
+    try {
+      const result = await inviteCodeService.batchCreateInviteCodes({
+        issuerDid: body.issuerDid || adminDid,
+        domainId: body.domainId,
+        count: body.count,
+        maxUses: body.maxUses || 1,
+        expiresAt: body.expiresAt ? new Date(body.expiresAt) : undefined,
+        metadata: body.metadata,
+        certificateId: body.certificateId,
+      });
+
+      return c.json({
+        success: true,
+        codes: result.codes,
+        total: result.total,
+      });
+    } catch (error) {
+      console.error('Failed to batch create invite codes:', error);
+      return c.json(
+        {
+          error: 'BatchCreationFailed',
+          message: error instanceof Error ? error.message : 'Failed to create invite codes',
+        },
+        500
+      );
+    }
+  }
+);
+
+// List invite codes
+adminRouter.get('/io.exprsn.admin.inviteCodes.list', async (c) => {
+  const adminDid = c.get('did');
+  const domainId = c.req.query('domainId');
+  const status = c.req.query('status');
+  const limit = parseInt(c.req.query('limit') || '50');
+  const offset = parseInt(c.req.query('offset') || '0');
+
+  const { inviteCodeService } = await import('../services/invites/InviteCodeService.js');
+
+  try {
+    const result = await inviteCodeService.listInviteCodes({
+      domainId,
+      status,
+      limit,
+      offset,
+    });
+
+    return c.json({
+      codes: result.codes,
+      total: result.total,
+      hasMore: result.codes.length === limit,
+    });
+  } catch (error) {
+    console.error('Failed to list invite codes:', error);
+    return c.json(
+      {
+        error: 'ListFailed',
+        message: 'Failed to list invite codes',
+      },
+      500
+    );
+  }
+});
+
+// Get invite code details
+adminRouter.get('/io.exprsn.admin.inviteCodes.get', async (c) => {
+  const id = c.req.query('id');
+
+  if (!id) {
+    return c.json(
+      {
+        error: 'InvalidRequest',
+        message: 'Missing invite code ID',
+      },
+      400
+    );
+  }
+
+  const { inviteCodeService } = await import('../services/invites/InviteCodeService.js');
+
+  const inviteCode = await inviteCodeService.getInviteCode(id);
+
+  if (!inviteCode) {
+    return c.json(
+      {
+        error: 'NotFound',
+        message: 'Invite code not found',
+      },
+      404
+    );
+  }
+
+  return c.json({ inviteCode });
+});
+
+// Revoke invite code
+adminRouter.post(
+  '/io.exprsn.admin.inviteCodes.revoke',
+  requirePermission(ADMIN_PERMISSIONS.USERS_EDIT),
+  async (c) => {
+    const adminDid = c.get('did');
+    const body = await c.req.json();
+
+    if (!body.id) {
+      return c.json(
+        {
+          error: 'InvalidRequest',
+          message: 'Missing invite code ID',
+        },
+        400
+      );
+    }
+
+    const { inviteCodeService } = await import('../services/invites/InviteCodeService.js');
+
+    try {
+      await inviteCodeService.revokeInviteCode(
+        body.id,
+        adminDid,
+        body.reason || 'Revoked by admin'
+      );
+
+      return c.json({ success: true });
+    } catch (error) {
+      console.error('Failed to revoke invite code:', error);
+      return c.json(
+        {
+          error: 'RevokeFailed',
+          message: 'Failed to revoke invite code',
+        },
+        500
+      );
+    }
+  }
+);
+
+// Get invite code statistics
+adminRouter.get('/io.exprsn.admin.inviteCodes.stats', async (c) => {
+  const domainId = c.req.query('domainId');
+
+  const { inviteCodeService } = await import('../services/invites/InviteCodeService.js');
+
+  try {
+    const stats = await inviteCodeService.getInviteCodeStats({
+      domainId: domainId || undefined,
+    });
+
+    return c.json({ stats });
+  } catch (error) {
+    console.error('Failed to get invite code stats:', error);
+    return c.json(
+      {
+        error: 'StatsFailed',
+        message: 'Failed to get invite code statistics',
+      },
+      500
+    );
+  }
+});

@@ -17,23 +17,47 @@ const ITERATIONS = 100000; // PBKDF2 iterations
 // Current key version for key rotation support
 const CURRENT_KEY_VERSION = 'v1';
 
+// Track whether we've warned about missing encryption key (to avoid log spam)
+let encryptionKeyWarningLogged = false;
+
 /**
  * Get encryption key from environment
- * Falls back to a development key if not set (NOT for production!)
+ * SECURITY: No fallback in production - will throw if not configured
  */
 function getEncryptionKey(): string {
   const key = process.env.ENCRYPTION_KEY;
+  const nodeEnv = process.env.NODE_ENV as string | undefined;
 
   if (!key) {
-    if (process.env.NODE_ENV === 'production') {
-      throw new Error('ENCRYPTION_KEY environment variable is required in production');
+    // Always throw in production or staging
+    if (nodeEnv === 'production' || nodeEnv === 'staging') {
+      throw new Error(
+        'CRITICAL: ENCRYPTION_KEY environment variable is required. ' +
+        'Generate a secure key with: openssl rand -base64 32'
+      );
     }
-    console.warn('WARNING: Using default encryption key. Set ENCRYPTION_KEY in production!');
-    return 'dev-encryption-key-change-in-production-must-be-at-least-32-chars-long';
+
+    // In development/test, use a deterministic dev key but warn loudly
+    if (!encryptionKeyWarningLogged) {
+      console.error('═'.repeat(70));
+      console.error('⚠️  SECURITY WARNING: ENCRYPTION_KEY not set!');
+      console.error('   Using development-only key. This MUST NOT reach production.');
+      console.error('   Generate a secure key: openssl rand -base64 32');
+      console.error('═'.repeat(70));
+      encryptionKeyWarningLogged = true;
+    }
+
+    return 'dev-encryption-key-DO-NOT-USE-IN-PRODUCTION-12345';
   }
 
   if (key.length < 32) {
     throw new Error('ENCRYPTION_KEY must be at least 32 characters long');
+  }
+
+  // Warn if it looks like a weak/default key
+  const weakPatterns = ['dev', 'test', 'changeme', 'password', 'secret', 'default'];
+  if (weakPatterns.some(pattern => key.toLowerCase().includes(pattern))) {
+    console.warn('⚠️  ENCRYPTION_KEY appears to contain a weak/default pattern. Use a cryptographically random key in production.');
   }
 
   return key;
@@ -136,7 +160,7 @@ export function decrypt(ciphertext: string): string {
     throw new Error('Invalid encrypted data format');
   }
 
-  const [version, saltB64, ivB64, authTagB64, encryptedB64] = parts;
+  const [version, saltB64, ivB64, authTagB64, encryptedB64] = parts as [string, string, string, string, string];
 
   // Get the appropriate key for this version
   const masterKey = getEncryptionKeyForVersion(version);
@@ -225,7 +249,7 @@ export function isEncrypted(credentials: Record<string, string>): boolean {
     if (value && typeof value === 'string') {
       const parts = value.split(':');
       // Check for 5 parts and version starts with 'v'
-      if (parts.length === 5 && parts[0].startsWith('v')) {
+      if (parts.length === 5 && parts[0]?.startsWith('v')) {
         return true;
       }
     }

@@ -850,6 +850,8 @@ function ReserveHandleModal({
 
 function ConfigTab() {
   const queryClient = useQueryClient();
+  const [showDirectoriesSection, setShowDirectoriesSection] = useState(true);
+  const isDev = process.env.NODE_ENV !== 'production';
 
   const { data, isLoading } = useQuery({
     queryKey: ['admin', 'plc', 'config'],
@@ -896,6 +898,94 @@ function ConfigTab() {
 
   return (
     <div className="space-y-6">
+      {/* Exprsn Directories Section */}
+      <div className="bg-surface border border-border rounded-xl overflow-hidden">
+        <div className="px-6 py-4 bg-surface-hover border-b border-border">
+          <h3 className="font-semibold text-text-primary">Exprsn Directories</h3>
+          <p className="text-sm text-text-muted mt-1">
+            Connected PLC directory servers for did:exprsn identity management
+          </p>
+        </div>
+        <div className="p-6">
+          <div className="space-y-3">
+            {/* Localhost Directory */}
+            <div className="p-4 bg-surface-hover border border-border rounded-lg">
+              <div className="flex items-start justify-between">
+                <div className="flex-1">
+                  <div className="flex items-center gap-2 mb-1">
+                    <h4 className="font-medium text-text-primary">Local Development Server</h4>
+                    {isDev && (
+                      <span className="px-2 py-0.5 text-xs bg-green-500/10 text-green-500 rounded-full">
+                        Active
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-sm font-mono text-text-muted">{API_BASE}/plc</p>
+                  <p className="text-xs text-text-muted mt-2">
+                    Default development PLC directory for local testing
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => window.open(`${API_BASE}/plc`, '_blank')}
+                    className="px-3 py-1.5 text-sm bg-accent/10 hover:bg-accent/20 text-accent rounded transition-colors"
+                  >
+                    Open
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Production Directory (if configured) */}
+            {config.externalPlcUrl && config.externalPlcUrl !== 'https://plc.directory' && (
+              <div className="p-4 bg-surface-hover border border-border rounded-lg">
+                <div className="flex items-start justify-between">
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2 mb-1">
+                      <h4 className="font-medium text-text-primary">Custom PLC Directory</h4>
+                      <span className="px-2 py-0.5 text-xs bg-accent/10 text-accent rounded-full">
+                        Configured
+                      </span>
+                    </div>
+                    <p className="text-sm font-mono text-text-muted">{config.externalPlcUrl}</p>
+                  </div>
+                  <button
+                    onClick={() => config.externalPlcUrl && window.open(config.externalPlcUrl, '_blank')}
+                    className="px-3 py-1.5 text-sm bg-accent/10 hover:bg-accent/20 text-accent rounded transition-colors"
+                  >
+                    Open
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* AT Protocol PLC Directory */}
+            <div className="p-4 bg-surface-hover border border-border rounded-lg opacity-60">
+              <div className="flex items-start justify-between">
+                <div className="flex-1">
+                  <div className="flex items-center gap-2 mb-1">
+                    <h4 className="font-medium text-text-primary">AT Protocol PLC Directory</h4>
+                    <span className="px-2 py-0.5 text-xs bg-text-muted/20 text-text-muted rounded-full">
+                      Reference
+                    </span>
+                  </div>
+                  <p className="text-sm font-mono text-text-muted">https://plc.directory</p>
+                  <p className="text-xs text-text-muted mt-2">
+                    Official AT Protocol PLC directory (for did:plc identities)
+                  </p>
+                </div>
+                <button
+                  onClick={() => window.open('https://plc.directory', '_blank')}
+                  className="px-3 py-1.5 text-sm bg-surface hover:bg-border text-text-muted rounded transition-colors"
+                >
+                  Open
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       {/* Mode Selection */}
       <div className="bg-surface border border-border rounded-xl overflow-hidden">
         <div className="px-6 py-4 bg-surface-hover border-b border-border">

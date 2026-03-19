@@ -56,7 +56,7 @@ export function SearchInput({ value, onChange, onSearch, placeholder }: SearchIn
           title: user.displayName || user.handle,
           subtitle: `@${user.handle}`,
           thumbnail: user.avatar,
-          count: user.followersCount,
+          count: user.followerCount,
         });
       });
 

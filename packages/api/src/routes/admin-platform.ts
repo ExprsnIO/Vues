@@ -10,6 +10,7 @@ import {
   domainOAuthProviders,
 } from '../db/schema.js';
 import { adminAuthMiddleware, requirePermission, ADMIN_PERMISSIONS } from '../auth/middleware.js';
+import { getDirectorySyncService } from '../services/platform/DirectorySyncService.js';
 
 export const adminPlatformRouter = new Hono();
 
@@ -24,7 +25,7 @@ adminPlatformRouter.use('*', adminAuthMiddleware);
  * List all global SSO providers
  */
 adminPlatformRouter.get(
-  '/io.exprsn.admin.auth.listProviders',
+  '/xrpc/io.exprsn.admin.auth.listProviders',
   requirePermission(ADMIN_PERMISSIONS.SETTINGS_VIEW),
   async (c) => {
     const search = c.req.query('search');
@@ -91,7 +92,7 @@ adminPlatformRouter.get(
  * Get a specific SSO provider
  */
 adminPlatformRouter.get(
-  '/io.exprsn.admin.auth.getProvider',
+  '/xrpc/io.exprsn.admin.auth.getProvider',
   requirePermission(ADMIN_PERMISSIONS.SETTINGS_VIEW),
   async (c) => {
     const providerId = c.req.query('providerId');
@@ -134,7 +135,7 @@ adminPlatformRouter.get(
  * Create a new SSO provider
  */
 adminPlatformRouter.post(
-  '/io.exprsn.admin.auth.createProvider',
+  '/xrpc/io.exprsn.admin.auth.createProvider',
   requirePermission(ADMIN_PERMISSIONS.SETTINGS_MANAGE),
   async (c) => {
     const body = await c.req.json();
@@ -185,7 +186,7 @@ adminPlatformRouter.post(
  * Update an SSO provider
  */
 adminPlatformRouter.post(
-  '/io.exprsn.admin.auth.updateProvider',
+  '/xrpc/io.exprsn.admin.auth.updateProvider',
   requirePermission(ADMIN_PERMISSIONS.SETTINGS_MANAGE),
   async (c) => {
     const body = await c.req.json();
@@ -213,7 +214,7 @@ adminPlatformRouter.post(
  * Delete an SSO provider
  */
 adminPlatformRouter.post(
-  '/io.exprsn.admin.auth.deleteProvider',
+  '/xrpc/io.exprsn.admin.auth.deleteProvider',
   requirePermission(ADMIN_PERMISSIONS.SETTINGS_MANAGE),
   async (c) => {
     const { providerId } = await c.req.json();
@@ -236,7 +237,7 @@ adminPlatformRouter.post(
  * List platform directories
  */
 adminPlatformRouter.get(
-  '/io.exprsn.admin.directories.list',
+  '/xrpc/io.exprsn.admin.directories.list',
   requirePermission(ADMIN_PERMISSIONS.SETTINGS_VIEW),
   async (c) => {
     const search = c.req.query('search');
@@ -270,7 +271,7 @@ adminPlatformRouter.get(
  * Get directory details
  */
 adminPlatformRouter.get(
-  '/io.exprsn.admin.directories.get',
+  '/xrpc/io.exprsn.admin.directories.get',
   requirePermission(ADMIN_PERMISSIONS.SETTINGS_VIEW),
   async (c) => {
     const directoryId = c.req.query('directoryId');
@@ -295,7 +296,7 @@ adminPlatformRouter.get(
  * Create a new directory
  */
 adminPlatformRouter.post(
-  '/io.exprsn.admin.directories.create',
+  '/xrpc/io.exprsn.admin.directories.create',
   requirePermission(ADMIN_PERMISSIONS.SETTINGS_MANAGE),
   async (c) => {
     const body = await c.req.json();
@@ -339,7 +340,7 @@ adminPlatformRouter.post(
  * Update a directory
  */
 adminPlatformRouter.post(
-  '/io.exprsn.admin.directories.update',
+  '/xrpc/io.exprsn.admin.directories.update',
   requirePermission(ADMIN_PERMISSIONS.SETTINGS_MANAGE),
   async (c) => {
     const body = await c.req.json();
@@ -375,40 +376,140 @@ adminPlatformRouter.post(
  * Trigger directory sync
  */
 adminPlatformRouter.post(
-  '/io.exprsn.admin.directories.sync',
+  '/xrpc/io.exprsn.admin.directories.sync',
   requirePermission(ADMIN_PERMISSIONS.SETTINGS_MANAGE),
   async (c) => {
-    const { directoryId } = await c.req.json();
+    const { directoryId, fullSync } = await c.req.json();
 
     if (!directoryId) {
       return c.json({ error: 'InvalidRequest', message: 'directoryId is required' }, 400);
     }
 
-    // Update status to syncing
-    await db
-      .update(platformDirectories)
-      .set({ status: 'syncing', updatedAt: new Date() })
-      .where(eq(platformDirectories.id, directoryId));
-
-    // In a real implementation, this would trigger an async sync job
-    // For now, simulate completion after updating status
-    setTimeout(async () => {
-      await db
-        .update(platformDirectories)
-        .set({
-          status: 'online',
-          lastSyncAt: new Date(),
-          updatedAt: new Date(),
-        })
-        .where(eq(platformDirectories.id, directoryId));
-    }, 5000);
-
+    // Check if directory exists
     const [directory] = await db
       .select()
       .from(platformDirectories)
       .where(eq(platformDirectories.id, directoryId));
 
-    return c.json({ directory, message: 'Sync started' });
+    if (!directory) {
+      return c.json({ error: 'NotFound', message: 'Directory not found' }, 404);
+    }
+
+    // Check if already syncing
+    if (directory.status === 'syncing') {
+      return c.json({ error: 'AlreadySyncing', message: 'Directory is already syncing' }, 400);
+    }
+
+    try {
+      // Queue the sync job using DirectorySyncService
+      const directorySyncService = getDirectorySyncService();
+      const jobId = await directorySyncService.queueSync({
+        directoryId,
+        fullSync: fullSync || false,
+      });
+
+      // Get updated directory status
+      const [updatedDirectory] = await db
+        .select()
+        .from(platformDirectories)
+        .where(eq(platformDirectories.id, directoryId));
+
+      return c.json({
+        directory: updatedDirectory,
+        jobId,
+        message: 'Sync job queued',
+      });
+    } catch (error) {
+      console.error('Failed to queue directory sync:', error);
+      return c.json(
+        {
+          error: 'SyncFailed',
+          message: error instanceof Error ? error.message : 'Failed to queue sync job',
+        },
+        500
+      );
+    }
+  }
+);
+
+/**
+ * Get directory sync job status
+ */
+adminPlatformRouter.get(
+  '/xrpc/io.exprsn.admin.directories.syncStatus',
+  requirePermission(ADMIN_PERMISSIONS.SETTINGS_VIEW),
+  async (c) => {
+    const jobId = c.req.query('jobId');
+
+    if (!jobId) {
+      return c.json({ error: 'InvalidRequest', message: 'jobId is required' }, 400);
+    }
+
+    try {
+      const directorySyncService = getDirectorySyncService();
+      const status = await directorySyncService.getSyncJobStatus(jobId);
+
+      if (!status) {
+        return c.json({ error: 'NotFound', message: 'Sync job not found' }, 404);
+      }
+
+      return c.json({ jobId, ...status });
+    } catch (error) {
+      console.error('Failed to get sync job status:', error);
+      return c.json(
+        {
+          error: 'StatusCheckFailed',
+          message: error instanceof Error ? error.message : 'Failed to get sync status',
+        },
+        500
+      );
+    }
+  }
+);
+
+/**
+ * Cancel a pending directory sync job
+ */
+adminPlatformRouter.post(
+  '/xrpc/io.exprsn.admin.directories.cancelSync',
+  requirePermission(ADMIN_PERMISSIONS.SETTINGS_MANAGE),
+  async (c) => {
+    const { jobId, directoryId } = await c.req.json();
+
+    if (!jobId) {
+      return c.json({ error: 'InvalidRequest', message: 'jobId is required' }, 400);
+    }
+
+    try {
+      const directorySyncService = getDirectorySyncService();
+      const cancelled = await directorySyncService.cancelSync(jobId);
+
+      if (!cancelled) {
+        return c.json(
+          { error: 'CannotCancel', message: 'Job cannot be cancelled (may already be running)' },
+          400
+        );
+      }
+
+      // Reset directory status if provided
+      if (directoryId) {
+        await db
+          .update(platformDirectories)
+          .set({ status: 'offline', updatedAt: new Date() })
+          .where(eq(platformDirectories.id, directoryId));
+      }
+
+      return c.json({ success: true, message: 'Sync job cancelled' });
+    } catch (error) {
+      console.error('Failed to cancel sync job:', error);
+      return c.json(
+        {
+          error: 'CancelFailed',
+          message: error instanceof Error ? error.message : 'Failed to cancel sync job',
+        },
+        500
+      );
+    }
   }
 );
 
@@ -416,7 +517,7 @@ adminPlatformRouter.post(
  * Delete a directory
  */
 adminPlatformRouter.post(
-  '/io.exprsn.admin.directories.delete',
+  '/xrpc/io.exprsn.admin.directories.delete',
   requirePermission(ADMIN_PERMISSIONS.SETTINGS_MANAGE),
   async (c) => {
     const { directoryId } = await c.req.json();
@@ -452,7 +553,7 @@ adminPlatformRouter.post(
  * Get live stream statistics for admin dashboard
  */
 adminPlatformRouter.get(
-  '/io.exprsn.admin.live.stats',
+  '/xrpc/io.exprsn.admin.live.stats',
   requirePermission(ADMIN_PERMISSIONS.CONTENT_VIEW),
   async (c) => {
     // Get currently live count
@@ -516,7 +617,7 @@ adminPlatformRouter.get(
  * List live streams with user info
  */
 adminPlatformRouter.get(
-  '/io.exprsn.admin.live.list',
+  '/xrpc/io.exprsn.admin.live.list',
   requirePermission(ADMIN_PERMISSIONS.CONTENT_VIEW),
   async (c) => {
     const status = c.req.query('status');
@@ -583,7 +684,7 @@ adminPlatformRouter.get(
  * End a live stream
  */
 adminPlatformRouter.post(
-  '/io.exprsn.admin.live.endStream',
+  '/xrpc/io.exprsn.admin.live.endStream',
   requirePermission(ADMIN_PERMISSIONS.CONTENT_MODERATE),
   async (c) => {
     const { streamId, reason } = await c.req.json();

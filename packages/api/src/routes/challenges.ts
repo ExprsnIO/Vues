@@ -39,7 +39,7 @@ challengesRouter.get('/io.exprsn.challenge.getChallenge', optionalAuthMiddleware
   const challenge = await db.query.challenges.findFirst({
     where: id
       ? eq(challenges.id, id)
-      : eq(sql`LOWER(${challenges.hashtag})`, hashtag!.toLowerCase().replace(/^#/, '')),
+      : eq(sql`LOWER(${challenges.tag})`, hashtag!.toLowerCase().replace(/^#/, '')),
   });
 
   if (!challenge) {
@@ -100,7 +100,7 @@ challengesRouter.get('/io.exprsn.challenge.getChallenge', optionalAuthMiddleware
       id: challenge.id,
       name: challenge.name,
       description: challenge.description,
-      hashtag: challenge.hashtag,
+      hashtag: challenge.tag,
       rules: challenge.rules,
       coverImageUrl: challenge.coverImageUrl,
       bannerImageUrl: challenge.bannerImageUrl,
@@ -245,7 +245,7 @@ challengesRouter.get('/io.exprsn.challenge.getActive', optionalAuthMiddleware, a
       id: ch.id,
       name: ch.name,
       description: ch.description,
-      hashtag: ch.hashtag,
+      hashtag: ch.tag,
       coverImageUrl: ch.coverImageUrl,
       status: ch.status,
       entryCount: ch.entryCount,
@@ -281,7 +281,7 @@ challengesRouter.get('/io.exprsn.challenge.getUpcoming', optionalAuthMiddleware,
       id: ch.id,
       name: ch.name,
       description: ch.description,
-      hashtag: ch.hashtag,
+      hashtag: ch.tag,
       coverImageUrl: ch.coverImageUrl,
       status: ch.status,
       startAt: ch.startAt,
@@ -320,7 +320,7 @@ challengesRouter.get('/io.exprsn.challenge.getEnded', optionalAuthMiddleware, as
       id: ch.id,
       name: ch.name,
       description: ch.description,
-      hashtag: ch.hashtag,
+      hashtag: ch.tag,
       coverImageUrl: ch.coverImageUrl,
       status: ch.status,
       entryCount: ch.entryCount,
@@ -586,7 +586,7 @@ challengesRouter.get('/io.exprsn.challenge.getUserParticipation', optionalAuthMi
       challenge: {
         id: challenges.id,
         name: challenges.name,
-        hashtag: challenges.hashtag,
+        hashtag: challenges.tag,
         coverImageUrl: challenges.coverImageUrl,
         status: challenges.status,
         entryCount: challenges.entryCount,
@@ -631,7 +631,7 @@ challengesRouter.get('/io.exprsn.challenge.search', optionalAuthMiddleware, asyn
         eq(challenges.visibility, 'public'),
         or(
           ilike(challenges.name, searchPattern),
-          ilike(challenges.hashtag, searchPattern),
+          ilike(challenges.tag, searchPattern),
           ilike(challenges.description, searchPattern)
         )
       )
@@ -644,7 +644,7 @@ challengesRouter.get('/io.exprsn.challenge.search', optionalAuthMiddleware, asyn
       id: ch.id,
       name: ch.name,
       description: ch.description,
-      hashtag: ch.hashtag,
+      hashtag: ch.tag,
       coverImageUrl: ch.coverImageUrl,
       status: ch.status,
       entryCount: ch.entryCount,
@@ -686,7 +686,7 @@ challengesRouter.post('/io.exprsn.admin.challenge.create', adminAuthMiddleware, 
 
   // Check hashtag uniqueness
   const existingChallenge = await db.query.challenges.findFirst({
-    where: eq(sql`LOWER(${challenges.hashtag})`, hashtag.toLowerCase().replace(/^#/, '')),
+    where: eq(sql`LOWER(${challenges.tag})`, hashtag.toLowerCase().replace(/^#/, '')),
   });
 
   if (existingChallenge) {
@@ -707,7 +707,7 @@ challengesRouter.post('/io.exprsn.admin.challenge.create', adminAuthMiddleware, 
     id: challengeId,
     name,
     description,
-    hashtag: hashtag.replace(/^#/, ''),
+    tag: hashtag.replace(/^#/, ''),
     rules,
     coverImageUrl,
     bannerImageUrl,

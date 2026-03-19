@@ -7,7 +7,7 @@ import { api } from '@/lib/api';
 import { ExportButton } from '@/components/admin/ExportModal';
 import { AdminChart } from '@/components/admin/charts/AdminChart';
 
-type TabType = 'jobs' | 'workers' | 'quotas' | 'batches';
+type TabType = 'jobs' | 'workers' | 'quotas' | 'batches' | 'config';
 type JobStatus = 'all' | 'pending' | 'rendering' | 'completed' | 'failed' | 'paused';
 type Priority = 'all' | 'urgent' | 'high' | 'normal' | 'low';
 
@@ -366,7 +366,7 @@ export default function RenderPipelineAdmin() {
       {/* Tabs */}
       <div className="border-b border-border">
         <nav className="flex gap-4">
-          {(['jobs', 'workers', 'batches', 'quotas'] as TabType[]).map((tab) => (
+          {(['jobs', 'workers', 'batches', 'quotas', 'config'] as TabType[]).map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
@@ -376,7 +376,7 @@ export default function RenderPipelineAdmin() {
                   : 'border-transparent text-text-muted hover:text-text-primary'
               }`}
             >
-              {tab.charAt(0).toUpperCase() + tab.slice(1)}
+              {tab === 'config' ? 'Configuration' : tab.charAt(0).toUpperCase() + tab.slice(1)}
             </button>
           ))}
         </nav>
@@ -678,6 +678,9 @@ export default function RenderPipelineAdmin() {
         </div>
       )}
 
+      {/* Configuration Tab */}
+      {activeTab === 'config' && <RenderConfigurationTab />}
+
       {/* Job Detail Modal */}
       {selectedJob && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
@@ -890,5 +893,917 @@ function CloseIcon({ className }: { className?: string }) {
     <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
       <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
     </svg>
+  );
+}
+
+// =============================================================================
+// Render Configuration Tab
+// =============================================================================
+
+interface RenderConfig {
+  // Video Input Sources
+  inputSources: {
+    localUpload: boolean;
+    s3Import: boolean;
+    dockerVolume: boolean;
+    kubernetesVolume: boolean;
+  };
+  // Video Output Destinations
+  outputDestinations: {
+    s3Export: boolean;
+    dockerVolume: boolean;
+    kubernetesVolume: boolean;
+    cdnPush: boolean;
+  };
+  // Docker Configuration
+  docker: {
+    enabled: boolean;
+    socketPath: string;
+    networkMode: string;
+    inputVolumePath: string;
+    outputVolumePath: string;
+    gpuEnabled: boolean;
+    memoryLimit: string;
+    cpuLimit: string;
+  };
+  // Kubernetes Configuration
+  kubernetes: {
+    enabled: boolean;
+    namespace: string;
+    inputPvcName: string;
+    outputPvcName: string;
+    storageClass: string;
+    gpuNodeSelector: string;
+    resourceRequests: {
+      cpu: string;
+      memory: string;
+      gpu: string;
+    };
+    resourceLimits: {
+      cpu: string;
+      memory: string;
+      gpu: string;
+    };
+  };
+  // Studio Export Settings
+  studioExport: {
+    defaultFormat: string;
+    defaultQuality: string;
+    presets: string[];
+    hlsEnabled: boolean;
+    hlsSegmentDuration: number;
+    dashEnabled: boolean;
+    thumbnailGeneration: boolean;
+    animatedPreview: boolean;
+  };
+}
+
+function RenderConfigurationTab() {
+  const queryClient = useQueryClient();
+  const [activeSection, setActiveSection] = useState<'sources' | 'docker' | 'kubernetes' | 'export'>('sources');
+
+  // Fetch current configuration
+  const { data: config, isLoading } = useQuery({
+    queryKey: ['admin', 'render', 'config'],
+    queryFn: async () => {
+      try {
+        const response = await fetch(
+          `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3002'}/xrpc/io.exprsn.admin.render.getConfig`,
+          {
+            headers: { 'X-Dev-Admin': 'true' },
+            credentials: 'include',
+          }
+        );
+        if (!response.ok) throw new Error('Failed to fetch config');
+        return response.json() as Promise<RenderConfig>;
+      } catch {
+        // Return default config if endpoint doesn't exist
+        return {
+          inputSources: {
+            localUpload: true,
+            s3Import: true,
+            dockerVolume: false,
+            kubernetesVolume: false,
+          },
+          outputDestinations: {
+            s3Export: true,
+            dockerVolume: false,
+            kubernetesVolume: false,
+            cdnPush: true,
+          },
+          docker: {
+            enabled: false,
+            socketPath: '/var/run/docker.sock',
+            networkMode: 'bridge',
+            inputVolumePath: '/data/input',
+            outputVolumePath: '/data/output',
+            gpuEnabled: false,
+            memoryLimit: '4g',
+            cpuLimit: '2',
+          },
+          kubernetes: {
+            enabled: false,
+            namespace: 'exprsn-render',
+            inputPvcName: 'render-input-pvc',
+            outputPvcName: 'render-output-pvc',
+            storageClass: 'standard',
+            gpuNodeSelector: 'nvidia.com/gpu=true',
+            resourceRequests: {
+              cpu: '1',
+              memory: '2Gi',
+              gpu: '0',
+            },
+            resourceLimits: {
+              cpu: '4',
+              memory: '8Gi',
+              gpu: '1',
+            },
+          },
+          studioExport: {
+            defaultFormat: 'mp4',
+            defaultQuality: '1080p',
+            presets: ['360p', '480p', '720p', '1080p', '4k'],
+            hlsEnabled: true,
+            hlsSegmentDuration: 6,
+            dashEnabled: false,
+            thumbnailGeneration: true,
+            animatedPreview: true,
+          },
+        } as RenderConfig;
+      }
+    },
+  });
+
+  const updateConfigMutation = useMutation({
+    mutationFn: async (updates: Partial<RenderConfig>) => {
+      const response = await fetch(
+        `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3002'}/xrpc/io.exprsn.admin.render.updateConfig`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Dev-Admin': 'true',
+          },
+          credentials: 'include',
+          body: JSON.stringify(updates),
+        }
+      );
+      if (!response.ok) throw new Error('Failed to update config');
+      return response.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'render', 'config'] });
+    },
+  });
+
+  if (isLoading || !config) {
+    return (
+      <div className="animate-pulse space-y-4">
+        <div className="h-48 bg-surface rounded-xl" />
+        <div className="h-48 bg-surface rounded-xl" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Section Navigation */}
+      <div className="flex gap-2 flex-wrap">
+        {[
+          { id: 'sources' as const, label: 'Input/Output', icon: (
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
+            </svg>
+          )},
+          { id: 'docker' as const, label: 'Docker', icon: (
+            <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M13.983 11.078h2.119a.186.186 0 00.186-.185V9.006a.186.186 0 00-.186-.186h-2.119a.185.185 0 00-.185.185v1.888c0 .102.083.185.185.185m-2.954-5.43h2.118a.186.186 0 00.186-.186V3.574a.186.186 0 00-.186-.185h-2.118a.185.185 0 00-.185.185v1.888c0 .102.082.185.185.185m0 2.716h2.118a.187.187 0 00.186-.186V6.29a.186.186 0 00-.186-.185h-2.118a.185.185 0 00-.185.185v1.887c0 .102.082.186.185.186m-2.93 0h2.12a.186.186 0 00.184-.186V6.29a.185.185 0 00-.185-.185H8.1a.185.185 0 00-.185.185v1.887c0 .102.083.186.185.186m-2.964 0h2.119a.186.186 0 00.185-.186V6.29a.185.185 0 00-.185-.185H5.136a.186.186 0 00-.186.185v1.887c0 .102.084.186.186.186m5.893 2.715h2.118a.186.186 0 00.186-.185V9.006a.186.186 0 00-.186-.186h-2.118a.185.185 0 00-.185.185v1.888c0 .102.082.185.185.185m-2.93 0h2.12a.185.185 0 00.184-.185V9.006a.185.185 0 00-.184-.186h-2.12a.185.185 0 00-.184.185v1.888c0 .102.083.185.185.185m-2.964 0h2.119a.185.185 0 00.185-.185V9.006a.185.185 0 00-.185-.186h-2.12a.186.186 0 00-.185.186v1.887c0 .102.084.185.186.185m-2.92 0h2.12a.185.185 0 00.184-.185V9.006a.185.185 0 00-.184-.186h-2.12a.185.185 0 00-.184.186v1.887c0 .102.082.185.185.185M23.763 9.89c-.065-.051-.672-.51-1.954-.51-.338.001-.676.03-1.01.087-.248-1.7-1.653-2.53-1.716-2.566l-.344-.199-.226.327c-.284.438-.49.922-.612 1.43-.23.97-.09 1.882.403 2.661-.595.332-1.55.413-1.744.42H.751a.751.751 0 00-.75.748 11.376 11.376 0 00.692 4.062c.545 1.428 1.355 2.48 2.41 3.124 1.18.723 3.1 1.137 5.275 1.137.983.003 1.963-.086 2.93-.266a12.248 12.248 0 003.823-1.389c.98-.567 1.86-1.288 2.61-2.136 1.252-1.418 1.998-2.997 2.553-4.4h.221c1.372 0 2.215-.549 2.68-1.009.309-.293.55-.65.707-1.046l.098-.288Z"/>
+            </svg>
+          )},
+          { id: 'kubernetes' as const, label: 'Kubernetes', icon: (
+            <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M10.204 14.35l.007.01-.999 2.413a5.171 5.171 0 01-2.075-2.597l2.578-.437.004.005a.44.44 0 01.485.606zm-.833-2.129a.44.44 0 00.173-.756l.002-.011L7.585 9.7a5.143 5.143 0 00-.73 3.255l2.514-.725.002-.009zm1.145-1.98a.44.44 0 00.699-.337l-.01-.02.15-2.62a5.144 5.144 0 00-3.01 1.442l2.165 1.548.006-.013zm2.373-.313a.44.44 0 00.672.393l.013.013 2.18-1.527a5.143 5.143 0 00-3.017-1.463l.153 2.584zm1.947 1.946a.44.44 0 00.177.757l.01.003 2.508.735a5.143 5.143 0 00-.718-3.257l-1.97 1.77-.007-.008zm-1.306 2.063a.44.44 0 00.478-.612l.01-.005-1.02-2.397a.45.45 0 00-.093-.093L10.38 11.09a.44.44 0 00-.208.09l-2.613.738-.007-.013a5.171 5.171 0 002.563 2.55l-.007-.013.993-2.385a.447.447 0 00.095.099l2.544-.746zm.143 2.413l-.01-.007a.44.44 0 00-.67.393l-.01.02-.16 2.623a5.143 5.143 0 003.02-1.452l-2.17-1.577zm3.063-7.652a6.19 6.19 0 00-11.786 0A6.181 6.181 0 002.36 13.02a6.19 6.19 0 003.625 5.631 6.181 6.181 0 006.515.043 6.19 6.19 0 003.616-5.674 6.181 6.181 0 00-2.364-4.352l-.001-.001-.002-.003zm-.855.908a5.19 5.19 0 01-.003 6.887 5.176 5.176 0 01-7.32.003 5.19 5.19 0 01-.001-6.89 5.176 5.176 0 017.324 0z"/>
+            </svg>
+          )},
+          { id: 'export' as const, label: 'Studio Export', icon: (
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 4v16M17 4v16M3 8h4m10 0h4M3 12h18M3 16h4m10 0h4M4 20h16a1 1 0 001-1V5a1 1 0 00-1-1H4a1 1 0 00-1 1v14a1 1 0 001 1z" />
+            </svg>
+          )},
+        ].map((section) => (
+          <button
+            key={section.id}
+            onClick={() => setActiveSection(section.id)}
+            className={`flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium transition-all ${
+              activeSection === section.id
+                ? 'bg-accent text-text-inverse shadow-md'
+                : 'bg-surface border border-border text-text-muted hover:text-text-primary hover:bg-surface-hover'
+            }`}
+          >
+            {section.icon}
+            {section.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Input/Output Sources Section */}
+      {activeSection === 'sources' && (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div className="bg-surface border border-border rounded-xl p-6">
+            <h3 className="text-lg font-semibold text-text-primary mb-4">Video Input Sources</h3>
+            <p className="text-sm text-text-muted mb-4">Configure where videos can be imported from</p>
+            <div className="space-y-4">
+              <ConfigToggle
+                label="Local Upload"
+                description="Upload videos directly from browser"
+                checked={config.inputSources.localUpload}
+                onChange={(checked) =>
+                  updateConfigMutation.mutate({
+                    inputSources: { ...config.inputSources, localUpload: checked },
+                  })
+                }
+              />
+              <ConfigToggle
+                label="S3/MinIO Import"
+                description="Import from S3-compatible storage"
+                checked={config.inputSources.s3Import}
+                onChange={(checked) =>
+                  updateConfigMutation.mutate({
+                    inputSources: { ...config.inputSources, s3Import: checked },
+                  })
+                }
+              />
+              <ConfigToggle
+                label="Docker Volume"
+                description="Mount Docker volumes for input"
+                checked={config.inputSources.dockerVolume}
+                onChange={(checked) =>
+                  updateConfigMutation.mutate({
+                    inputSources: { ...config.inputSources, dockerVolume: checked },
+                  })
+                }
+              />
+              <ConfigToggle
+                label="Kubernetes PVC"
+                description="Use Kubernetes persistent volume claims"
+                checked={config.inputSources.kubernetesVolume}
+                onChange={(checked) =>
+                  updateConfigMutation.mutate({
+                    inputSources: { ...config.inputSources, kubernetesVolume: checked },
+                  })
+                }
+              />
+            </div>
+          </div>
+
+          <div className="bg-surface border border-border rounded-xl p-6">
+            <h3 className="text-lg font-semibold text-text-primary mb-4">Video Output Destinations</h3>
+            <p className="text-sm text-text-muted mb-4">Configure where processed videos are exported</p>
+            <div className="space-y-4">
+              <ConfigToggle
+                label="S3/MinIO Export"
+                description="Export to S3-compatible storage"
+                checked={config.outputDestinations.s3Export}
+                onChange={(checked) =>
+                  updateConfigMutation.mutate({
+                    outputDestinations: { ...config.outputDestinations, s3Export: checked },
+                  })
+                }
+              />
+              <ConfigToggle
+                label="Docker Volume"
+                description="Write output to Docker volumes"
+                checked={config.outputDestinations.dockerVolume}
+                onChange={(checked) =>
+                  updateConfigMutation.mutate({
+                    outputDestinations: { ...config.outputDestinations, dockerVolume: checked },
+                  })
+                }
+              />
+              <ConfigToggle
+                label="Kubernetes PVC"
+                description="Write to Kubernetes persistent volume claims"
+                checked={config.outputDestinations.kubernetesVolume}
+                onChange={(checked) =>
+                  updateConfigMutation.mutate({
+                    outputDestinations: { ...config.outputDestinations, kubernetesVolume: checked },
+                  })
+                }
+              />
+              <ConfigToggle
+                label="CDN Push"
+                description="Push directly to CDN edge nodes"
+                checked={config.outputDestinations.cdnPush}
+                onChange={(checked) =>
+                  updateConfigMutation.mutate({
+                    outputDestinations: { ...config.outputDestinations, cdnPush: checked },
+                  })
+                }
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Docker Configuration Section */}
+      {activeSection === 'docker' && (
+        <div className="bg-surface border border-border rounded-xl overflow-hidden">
+          <div className="flex items-center justify-between p-6 bg-gradient-to-r from-blue-500/10 to-transparent border-b border-border">
+            <div className="flex items-center gap-4">
+              <div className={`p-3 rounded-xl ${config.docker.enabled ? 'bg-blue-500/20 text-blue-500' : 'bg-border text-text-muted'} transition-colors`}>
+                <svg className="w-6 h-6" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M13.983 11.078h2.119a.186.186 0 00.186-.185V9.006a.186.186 0 00-.186-.186h-2.119a.185.185 0 00-.185.185v1.888c0 .102.083.185.185.185m-2.954-5.43h2.118a.186.186 0 00.186-.186V3.574a.186.186 0 00-.186-.185h-2.118a.185.185 0 00-.185.185v1.888c0 .102.082.185.185.185m0 2.716h2.118a.187.187 0 00.186-.186V6.29a.186.186 0 00-.186-.185h-2.118a.185.185 0 00-.185.185v1.887c0 .102.082.186.185.186m-2.93 0h2.12a.186.186 0 00.184-.186V6.29a.185.185 0 00-.185-.185H8.1a.185.185 0 00-.185.185v1.887c0 .102.083.186.185.186m-2.964 0h2.119a.186.186 0 00.185-.186V6.29a.185.185 0 00-.185-.185H5.136a.186.186 0 00-.186.185v1.887c0 .102.084.186.186.186m5.893 2.715h2.118a.186.186 0 00.186-.185V9.006a.186.186 0 00-.186-.186h-2.118a.185.185 0 00-.185.185v1.888c0 .102.082.185.185.185m-2.93 0h2.12a.185.185 0 00.184-.185V9.006a.185.185 0 00-.184-.186h-2.12a.185.185 0 00-.184.185v1.888c0 .102.083.185.185.185m-2.964 0h2.119a.185.185 0 00.185-.185V9.006a.185.185 0 00-.185-.186h-2.12a.186.186 0 00-.185.186v1.887c0 .102.084.185.186.185m-2.92 0h2.12a.185.185 0 00.184-.185V9.006a.185.185 0 00-.184-.186h-2.12a.185.185 0 00-.184.186v1.887c0 .102.082.185.185.185M23.763 9.89c-.065-.051-.672-.51-1.954-.51-.338.001-.676.03-1.01.087-.248-1.7-1.653-2.53-1.716-2.566l-.344-.199-.226.327c-.284.438-.49.922-.612 1.43-.23.97-.09 1.882.403 2.661-.595.332-1.55.413-1.744.42H.751a.751.751 0 00-.75.748 11.376 11.376 0 00.692 4.062c.545 1.428 1.355 2.48 2.41 3.124 1.18.723 3.1 1.137 5.275 1.137.983.003 1.963-.086 2.93-.266a12.248 12.248 0 003.823-1.389c.98-.567 1.86-1.288 2.61-2.136 1.252-1.418 1.998-2.997 2.553-4.4h.221c1.372 0 2.215-.549 2.68-1.009.309-.293.55-.65.707-1.046l.098-.288Z"/>
+                </svg>
+              </div>
+              <div>
+                <h3 className="text-lg font-semibold text-text-primary flex items-center gap-2">
+                  Docker Configuration
+                  {config.docker.enabled && (
+                    <span className="px-2 py-0.5 text-xs font-medium bg-green-500/20 text-green-500 rounded-full">Active</span>
+                  )}
+                </h3>
+                <p className="text-sm text-text-muted">Configure Docker-based render workers</p>
+              </div>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={config.docker.enabled}
+              onClick={() => updateConfigMutation.mutate({ docker: { ...config.docker, enabled: !config.docker.enabled } })}
+              className={`relative inline-flex h-7 w-12 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-surface ${
+                config.docker.enabled ? 'bg-accent' : 'bg-border'
+              }`}
+            >
+              <span
+                className={`pointer-events-none inline-block h-6 w-6 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+                  config.docker.enabled ? 'translate-x-5' : 'translate-x-0'
+                }`}
+              />
+            </button>
+          </div>
+          <div className="p-6">
+
+          {config.docker.enabled && (
+            <div className="space-y-6">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <ConfigInput
+                  label="Docker Socket Path"
+                  value={config.docker.socketPath}
+                  placeholder="/var/run/docker.sock"
+                  onChange={(value) =>
+                    updateConfigMutation.mutate({
+                      docker: { ...config.docker, socketPath: value },
+                    })
+                  }
+                />
+                <ConfigSelect
+                  label="Network Mode"
+                  value={config.docker.networkMode}
+                  options={[
+                    { value: 'bridge', label: 'Bridge' },
+                    { value: 'host', label: 'Host' },
+                    { value: 'none', label: 'None' },
+                  ]}
+                  onChange={(value) =>
+                    updateConfigMutation.mutate({
+                      docker: { ...config.docker, networkMode: value },
+                    })
+                  }
+                />
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <ConfigInput
+                  label="Input Volume Path"
+                  value={config.docker.inputVolumePath}
+                  placeholder="/data/input"
+                  description="Path inside container for input videos"
+                  onChange={(value) =>
+                    updateConfigMutation.mutate({
+                      docker: { ...config.docker, inputVolumePath: value },
+                    })
+                  }
+                />
+                <ConfigInput
+                  label="Output Volume Path"
+                  value={config.docker.outputVolumePath}
+                  placeholder="/data/output"
+                  description="Path inside container for output videos"
+                  onChange={(value) =>
+                    updateConfigMutation.mutate({
+                      docker: { ...config.docker, outputVolumePath: value },
+                    })
+                  }
+                />
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <ConfigInput
+                  label="Memory Limit"
+                  value={config.docker.memoryLimit}
+                  placeholder="4g"
+                  onChange={(value) =>
+                    updateConfigMutation.mutate({
+                      docker: { ...config.docker, memoryLimit: value },
+                    })
+                  }
+                />
+                <ConfigInput
+                  label="CPU Limit"
+                  value={config.docker.cpuLimit}
+                  placeholder="2"
+                  onChange={(value) =>
+                    updateConfigMutation.mutate({
+                      docker: { ...config.docker, cpuLimit: value },
+                    })
+                  }
+                />
+                <ConfigToggle
+                  label="GPU Enabled"
+                  description="Enable NVIDIA GPU support"
+                  checked={config.docker.gpuEnabled}
+                  onChange={(checked) =>
+                    updateConfigMutation.mutate({
+                      docker: { ...config.docker, gpuEnabled: checked },
+                    })
+                  }
+                  icon={
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z" />
+                    </svg>
+                  }
+                />
+              </div>
+            </div>
+          )}
+          {!config.docker.enabled && (
+            <div className="p-8 text-center">
+              <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-surface-hover mb-4">
+                <svg className="w-8 h-8 text-text-muted" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M13.983 11.078h2.119a.186.186 0 00.186-.185V9.006a.186.186 0 00-.186-.186h-2.119a.185.185 0 00-.185.185v1.888c0 .102.083.185.185.185m-2.954-5.43h2.118a.186.186 0 00.186-.186V3.574a.186.186 0 00-.186-.185h-2.118a.185.185 0 00-.185.185v1.888c0 .102.082.185.185.185m0 2.716h2.118a.187.187 0 00.186-.186V6.29a.186.186 0 00-.186-.185h-2.118a.185.185 0 00-.185.185v1.887c0 .102.082.186.185.186m-2.93 0h2.12a.186.186 0 00.184-.186V6.29a.185.185 0 00-.185-.185H8.1a.185.185 0 00-.185.185v1.887c0 .102.083.186.185.186m-2.964 0h2.119a.186.186 0 00.185-.186V6.29a.185.185 0 00-.185-.185H5.136a.186.186 0 00-.186.185v1.887c0 .102.084.186.186.186m5.893 2.715h2.118a.186.186 0 00.186-.185V9.006a.186.186 0 00-.186-.186h-2.118a.185.185 0 00-.185.185v1.888c0 .102.082.185.185.185"/>
+                </svg>
+              </div>
+              <h4 className="text-lg font-medium text-text-primary mb-2">Docker Integration Disabled</h4>
+              <p className="text-sm text-text-muted max-w-md mx-auto">Enable Docker to use containerized render workers with custom volume mounts and GPU acceleration.</p>
+            </div>
+          )}
+          </div>
+        </div>
+      )}
+
+      {/* Kubernetes Configuration Section */}
+      {activeSection === 'kubernetes' && (
+        <div className="bg-surface border border-border rounded-xl overflow-hidden">
+          <div className="flex items-center justify-between p-6 bg-gradient-to-r from-blue-600/10 to-transparent border-b border-border">
+            <div className="flex items-center gap-4">
+              <div className={`p-3 rounded-xl ${config.kubernetes.enabled ? 'bg-blue-600/20 text-blue-500' : 'bg-border text-text-muted'} transition-colors`}>
+                <svg className="w-6 h-6" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M10.204 14.35l.007.01-.999 2.413a5.171 5.171 0 01-2.075-2.597l2.578-.437.004.005a.44.44 0 01.485.606zm-.833-2.129a.44.44 0 00.173-.756l.002-.011L7.585 9.7a5.143 5.143 0 00-.73 3.255l2.514-.725.002-.009zm1.145-1.98a.44.44 0 00.699-.337l-.01-.02.15-2.62a5.144 5.144 0 00-3.01 1.442l2.165 1.548.006-.013zm2.373-.313a.44.44 0 00.672.393l.013.013 2.18-1.527a5.143 5.143 0 00-3.017-1.463l.153 2.584zm1.947 1.946a.44.44 0 00.177.757l.01.003 2.508.735a5.143 5.143 0 00-.718-3.257l-1.97 1.77-.007-.008z"/>
+                </svg>
+              </div>
+              <div>
+                <h3 className="text-lg font-semibold text-text-primary flex items-center gap-2">
+                  Kubernetes Configuration
+                  {config.kubernetes.enabled && (
+                    <span className="px-2 py-0.5 text-xs font-medium bg-green-500/20 text-green-500 rounded-full">Active</span>
+                  )}
+                </h3>
+                <p className="text-sm text-text-muted">Configure Kubernetes-based render workers</p>
+              </div>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={config.kubernetes.enabled}
+              onClick={() => updateConfigMutation.mutate({ kubernetes: { ...config.kubernetes, enabled: !config.kubernetes.enabled } })}
+              className={`relative inline-flex h-7 w-12 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-surface ${
+                config.kubernetes.enabled ? 'bg-accent' : 'bg-border'
+              }`}
+            >
+              <span
+                className={`pointer-events-none inline-block h-6 w-6 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+                  config.kubernetes.enabled ? 'translate-x-5' : 'translate-x-0'
+                }`}
+              />
+            </button>
+          </div>
+          <div className="p-6">
+          {config.kubernetes.enabled && (
+            <div className="space-y-6">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <ConfigInput
+                  label="Namespace"
+                  value={config.kubernetes.namespace}
+                  placeholder="exprsn-render"
+                  onChange={(value) =>
+                    updateConfigMutation.mutate({
+                      kubernetes: { ...config.kubernetes, namespace: value },
+                    })
+                  }
+                />
+                <ConfigInput
+                  label="Storage Class"
+                  value={config.kubernetes.storageClass}
+                  placeholder="standard"
+                  onChange={(value) =>
+                    updateConfigMutation.mutate({
+                      kubernetes: { ...config.kubernetes, storageClass: value },
+                    })
+                  }
+                />
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <ConfigInput
+                  label="Input PVC Name"
+                  value={config.kubernetes.inputPvcName}
+                  placeholder="render-input-pvc"
+                  description="PersistentVolumeClaim for input videos"
+                  onChange={(value) =>
+                    updateConfigMutation.mutate({
+                      kubernetes: { ...config.kubernetes, inputPvcName: value },
+                    })
+                  }
+                />
+                <ConfigInput
+                  label="Output PVC Name"
+                  value={config.kubernetes.outputPvcName}
+                  placeholder="render-output-pvc"
+                  description="PersistentVolumeClaim for output videos"
+                  onChange={(value) =>
+                    updateConfigMutation.mutate({
+                      kubernetes: { ...config.kubernetes, outputPvcName: value },
+                    })
+                  }
+                />
+              </div>
+
+              <ConfigInput
+                label="GPU Node Selector"
+                value={config.kubernetes.gpuNodeSelector}
+                placeholder="nvidia.com/gpu=true"
+                description="Label selector for GPU nodes"
+                onChange={(value) =>
+                  updateConfigMutation.mutate({
+                    kubernetes: { ...config.kubernetes, gpuNodeSelector: value },
+                  })
+                }
+              />
+
+              <div className="border-t border-border pt-6">
+                <h4 className="text-sm font-medium text-text-primary mb-4">Resource Requests</h4>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <ConfigInput
+                    label="CPU"
+                    value={config.kubernetes.resourceRequests.cpu}
+                    placeholder="1"
+                    onChange={(value) =>
+                      updateConfigMutation.mutate({
+                        kubernetes: {
+                          ...config.kubernetes,
+                          resourceRequests: { ...config.kubernetes.resourceRequests, cpu: value },
+                        },
+                      })
+                    }
+                  />
+                  <ConfigInput
+                    label="Memory"
+                    value={config.kubernetes.resourceRequests.memory}
+                    placeholder="2Gi"
+                    onChange={(value) =>
+                      updateConfigMutation.mutate({
+                        kubernetes: {
+                          ...config.kubernetes,
+                          resourceRequests: { ...config.kubernetes.resourceRequests, memory: value },
+                        },
+                      })
+                    }
+                  />
+                  <ConfigInput
+                    label="GPU"
+                    value={config.kubernetes.resourceRequests.gpu}
+                    placeholder="0"
+                    onChange={(value) =>
+                      updateConfigMutation.mutate({
+                        kubernetes: {
+                          ...config.kubernetes,
+                          resourceRequests: { ...config.kubernetes.resourceRequests, gpu: value },
+                        },
+                      })
+                    }
+                  />
+                </div>
+              </div>
+
+              <div className="border-t border-border pt-6">
+                <h4 className="text-sm font-medium text-text-primary mb-4">Resource Limits</h4>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <ConfigInput
+                    label="CPU"
+                    value={config.kubernetes.resourceLimits.cpu}
+                    placeholder="4"
+                    onChange={(value) =>
+                      updateConfigMutation.mutate({
+                        kubernetes: {
+                          ...config.kubernetes,
+                          resourceLimits: { ...config.kubernetes.resourceLimits, cpu: value },
+                        },
+                      })
+                    }
+                  />
+                  <ConfigInput
+                    label="Memory"
+                    value={config.kubernetes.resourceLimits.memory}
+                    placeholder="8Gi"
+                    onChange={(value) =>
+                      updateConfigMutation.mutate({
+                        kubernetes: {
+                          ...config.kubernetes,
+                          resourceLimits: { ...config.kubernetes.resourceLimits, memory: value },
+                        },
+                      })
+                    }
+                  />
+                  <ConfigInput
+                    label="GPU"
+                    value={config.kubernetes.resourceLimits.gpu}
+                    placeholder="1"
+                    onChange={(value) =>
+                      updateConfigMutation.mutate({
+                        kubernetes: {
+                          ...config.kubernetes,
+                          resourceLimits: { ...config.kubernetes.resourceLimits, gpu: value },
+                        },
+                      })
+                    }
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+          {!config.kubernetes.enabled && (
+            <div className="p-8 text-center">
+              <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-surface-hover mb-4">
+                <svg className="w-8 h-8 text-text-muted" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M10.204 14.35l.007.01-.999 2.413a5.171 5.171 0 01-2.075-2.597l2.578-.437.004.005a.44.44 0 01.485.606zm-.833-2.129a.44.44 0 00.173-.756l.002-.011L7.585 9.7a5.143 5.143 0 00-.73 3.255l2.514-.725.002-.009z"/>
+                </svg>
+              </div>
+              <h4 className="text-lg font-medium text-text-primary mb-2">Kubernetes Integration Disabled</h4>
+              <p className="text-sm text-text-muted max-w-md mx-auto">Enable Kubernetes to use distributed render workers with persistent volume claims and GPU scheduling.</p>
+            </div>
+          )}
+          </div>
+        </div>
+      )}
+
+      {/* Studio Export Settings Section */}
+      {activeSection === 'export' && (
+        <div className="bg-surface border border-border rounded-xl p-6">
+          <h3 className="text-lg font-semibold text-text-primary mb-6">Studio Export Settings</h3>
+
+          <div className="space-y-6">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <ConfigSelect
+                label="Default Format"
+                value={config.studioExport.defaultFormat}
+                options={[
+                  { value: 'mp4', label: 'MP4 (H.264)' },
+                  { value: 'webm', label: 'WebM (VP9)' },
+                  { value: 'mov', label: 'MOV (ProRes)' },
+                  { value: 'mkv', label: 'MKV' },
+                ]}
+                onChange={(value) =>
+                  updateConfigMutation.mutate({
+                    studioExport: { ...config.studioExport, defaultFormat: value },
+                  })
+                }
+              />
+              <ConfigSelect
+                label="Default Quality"
+                value={config.studioExport.defaultQuality}
+                options={[
+                  { value: '360p', label: '360p' },
+                  { value: '480p', label: '480p' },
+                  { value: '720p', label: '720p (HD)' },
+                  { value: '1080p', label: '1080p (Full HD)' },
+                  { value: '1440p', label: '1440p (2K)' },
+                  { value: '4k', label: '4K (UHD)' },
+                ]}
+                onChange={(value) =>
+                  updateConfigMutation.mutate({
+                    studioExport: { ...config.studioExport, defaultQuality: value },
+                  })
+                }
+              />
+            </div>
+
+            <div className="border-t border-border pt-6">
+              <h4 className="text-sm font-medium text-text-primary mb-4">Streaming Formats</h4>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="space-y-4">
+                  <ConfigToggle
+                    label="HLS (HTTP Live Streaming)"
+                    description="Generate HLS playlists for adaptive streaming"
+                    checked={config.studioExport.hlsEnabled}
+                    onChange={(checked) =>
+                      updateConfigMutation.mutate({
+                        studioExport: { ...config.studioExport, hlsEnabled: checked },
+                      })
+                    }
+                  />
+                  {config.studioExport.hlsEnabled && (
+                    <ConfigInput
+                      label="HLS Segment Duration (seconds)"
+                      value={config.studioExport.hlsSegmentDuration.toString()}
+                      placeholder="6"
+                      onChange={(value) =>
+                        updateConfigMutation.mutate({
+                          studioExport: {
+                            ...config.studioExport,
+                            hlsSegmentDuration: parseInt(value) || 6,
+                          },
+                        })
+                      }
+                    />
+                  )}
+                </div>
+                <div>
+                  <ConfigToggle
+                    label="DASH (Dynamic Adaptive Streaming)"
+                    description="Generate DASH manifests for streaming"
+                    checked={config.studioExport.dashEnabled}
+                    onChange={(checked) =>
+                      updateConfigMutation.mutate({
+                        studioExport: { ...config.studioExport, dashEnabled: checked },
+                      })
+                    }
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="border-t border-border pt-6">
+              <h4 className="text-sm font-medium text-text-primary mb-4">Thumbnail & Preview</h4>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <ConfigToggle
+                  label="Thumbnail Generation"
+                  description="Auto-generate video thumbnails"
+                  checked={config.studioExport.thumbnailGeneration}
+                  onChange={(checked) =>
+                    updateConfigMutation.mutate({
+                      studioExport: { ...config.studioExport, thumbnailGeneration: checked },
+                    })
+                  }
+                />
+                <ConfigToggle
+                  label="Animated Preview"
+                  description="Generate animated GIF/WebP previews"
+                  checked={config.studioExport.animatedPreview}
+                  onChange={(checked) =>
+                    updateConfigMutation.mutate({
+                      studioExport: { ...config.studioExport, animatedPreview: checked },
+                    })
+                  }
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ConfigToggle({
+  label,
+  description,
+  checked,
+  onChange,
+  icon,
+}: {
+  label: string;
+  description: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  icon?: React.ReactNode;
+}) {
+  return (
+    <div className="flex items-start justify-between gap-4 p-3 rounded-lg bg-surface-hover/50 hover:bg-surface-hover transition-colors">
+      <div className="flex items-start gap-3">
+        {icon && (
+          <div className={`mt-0.5 p-2 rounded-lg ${checked ? 'bg-accent/10 text-accent' : 'bg-border text-text-muted'} transition-colors`}>
+            {icon}
+          </div>
+        )}
+        <div>
+          <label className="text-text-primary font-medium cursor-pointer" onClick={() => onChange(!checked)}>
+            {label}
+          </label>
+          {description && <p className="text-sm text-text-muted mt-0.5">{description}</p>}
+        </div>
+      </div>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        onClick={() => onChange(!checked)}
+        className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-surface ${
+          checked ? 'bg-accent' : 'bg-border'
+        }`}
+      >
+        <span
+          className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+            checked ? 'translate-x-5' : 'translate-x-0'
+          }`}
+        />
+      </button>
+    </div>
+  );
+}
+
+function ConfigInput({
+  label,
+  value,
+  placeholder,
+  description,
+  onChange,
+  icon,
+  suffix,
+}: {
+  label: string;
+  value: string;
+  placeholder?: string;
+  description?: string;
+  onChange: (value: string) => void;
+  icon?: React.ReactNode;
+  suffix?: string;
+}) {
+  return (
+    <div className="p-3 rounded-lg bg-surface-hover/50 hover:bg-surface-hover transition-colors">
+      <div className="flex items-center gap-2 mb-2">
+        {icon && (
+          <div className="p-1.5 rounded-lg bg-border text-text-muted">
+            {icon}
+          </div>
+        )}
+        <label className="text-sm font-medium text-text-primary">{label}</label>
+      </div>
+      <div className="relative">
+        <input
+          type="text"
+          value={value}
+          placeholder={placeholder}
+          onChange={(e) => onChange(e.target.value)}
+          className="w-full px-4 py-2.5 bg-surface border border-border rounded-lg text-text-primary placeholder:text-text-muted focus:ring-2 focus:ring-accent focus:border-accent transition-all"
+        />
+        {suffix && (
+          <span className="absolute right-4 top-1/2 -translate-y-1/2 text-sm text-text-muted">
+            {suffix}
+          </span>
+        )}
+      </div>
+      {description && <p className="text-xs text-text-muted mt-2">{description}</p>}
+    </div>
+  );
+}
+
+function ConfigSelect({
+  label,
+  value,
+  options,
+  onChange,
+  icon,
+  description,
+}: {
+  label: string;
+  value: string;
+  options: { value: string; label: string }[];
+  onChange: (value: string) => void;
+  icon?: React.ReactNode;
+  description?: string;
+}) {
+  return (
+    <div className="p-3 rounded-lg bg-surface-hover/50 hover:bg-surface-hover transition-colors">
+      <div className="flex items-center gap-2 mb-2">
+        {icon && (
+          <div className="p-1.5 rounded-lg bg-border text-text-muted">
+            {icon}
+          </div>
+        )}
+        <label className="text-sm font-medium text-text-primary">{label}</label>
+      </div>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="w-full px-4 py-2.5 bg-surface border border-border rounded-lg text-text-primary focus:ring-2 focus:ring-accent focus:border-accent transition-all"
+      >
+        {options.map((option) => (
+          <option key={option.value} value={option.value}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+      {description && <p className="text-xs text-text-muted mt-2">{description}</p>}
+    </div>
   );
 }

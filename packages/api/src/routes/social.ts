@@ -10,8 +10,12 @@ import {
   mutes,
   contentReports,
   notificationSubscriptions,
+  hashtagFollows,
+  hashtags,
+  trendingHashtags,
+  videoHashtags,
 } from '../db/index.js';
-import { eq, desc, and, sql } from 'drizzle-orm';
+import { eq, desc, and, sql, lt, inArray } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import { notifyNewReport } from '../websocket/admin.js';
 import {
@@ -21,6 +25,7 @@ import {
   videoNotFound,
   validationError,
 } from '../utils/api-errors.js';
+import { getModerationService } from '../services/moderation/service.js';
 
 export const socialRouter = new Hono();
 
@@ -126,7 +131,7 @@ socialRouter.get('/io.exprsn.video.getReposts', optionalAuthMiddleware, async (c
   const conditions = [eq(reposts.authorDid, did)];
   if (cursor) {
     const cursorDate = new Date(cursor);
-    conditions.push(sql`${reposts.createdAt} < ${cursorDate}`);
+    conditions.push(lt(reposts.createdAt, cursorDate));
   }
 
   const results = await db
@@ -260,7 +265,7 @@ socialRouter.get('/io.exprsn.video.getBookmarks', authMiddleware, async (c) => {
   }
   if (cursor) {
     const cursorDate = new Date(cursor);
-    conditions.push(sql`${bookmarks.createdAt} < ${cursorDate}`);
+    conditions.push(lt(bookmarks.createdAt, cursorDate));
   }
 
   const results = await db
@@ -372,7 +377,7 @@ socialRouter.get('/io.exprsn.graph.getBlocks', authMiddleware, async (c) => {
   const conditions = [eq(blocks.blockerDid, userDid)];
   if (cursor) {
     const cursorDate = new Date(cursor);
-    conditions.push(sql`${blocks.createdAt} < ${cursorDate}`);
+    conditions.push(lt(blocks.createdAt, cursorDate));
   }
 
   const results = await db
@@ -485,7 +490,7 @@ socialRouter.get('/io.exprsn.graph.getMutes', authMiddleware, async (c) => {
   const conditions = [eq(mutes.muterDid, userDid)];
   if (cursor) {
     const cursorDate = new Date(cursor);
-    conditions.push(sql`${mutes.createdAt} < ${cursorDate}`);
+    conditions.push(lt(mutes.createdAt, cursorDate));
   }
 
   const results = await db
@@ -579,6 +584,15 @@ socialRouter.post('/io.exprsn.video.report', authMiddleware, async (c) => {
     reporterHandle: reporter?.handle,
   });
 
+  // Trigger moderation workflow for report (non-blocking)
+  getModerationService().onReportSubmitted({
+    reportId,
+    contentUri: uri,
+    contentType: contentType || 'video',
+    reporterDid: userDid,
+    reason,
+  }).catch(err => console.error('[Report] Workflow trigger failed:', err));
+
   return c.json({ reportId, success: true });
 });
 
@@ -665,6 +679,193 @@ socialRouter.post('/io.exprsn.notification.updateSubscription', authMiddleware, 
   }
 
   return c.json({ success: true });
+});
+
+// =============================================================================
+// Hashtag Follow Endpoints
+// =============================================================================
+
+/**
+ * Follow a hashtag
+ * POST /xrpc/io.exprsn.social.followHashtag
+ */
+socialRouter.post('/io.exprsn.social.followHashtag', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  const { tag } = await c.req.json<{ tag: string }>();
+
+  if (!tag || typeof tag !== 'string') {
+    throw badRequest('tag is required');
+  }
+
+  const normalizedTag = tag.toLowerCase().replace(/^#/, '').trim();
+
+  if (!normalizedTag || !/^[a-z][a-z0-9_]*$/.test(normalizedTag)) {
+    throw badRequest('Invalid hashtag format');
+  }
+
+  // Idempotent: check for existing follow
+  const existing = await db.query.hashtagFollows.findFirst({
+    where: and(eq(hashtagFollows.userDid, userDid), eq(hashtagFollows.tag, normalizedTag)),
+  });
+
+  if (existing) {
+    return c.json({ success: true, tag: normalizedTag, following: true });
+  }
+
+  await db.insert(hashtagFollows).values({
+    id: nanoid(),
+    userDid,
+    tag: normalizedTag,
+    createdAt: new Date(),
+  });
+
+  // Increment followerCount on the hashtags record (upsert in case it doesn't exist yet)
+  await db
+    .insert(hashtags)
+    .values({
+      tag: normalizedTag,
+      videoCount: 0,
+      viewCount: 0,
+      followerCount: 1,
+      createdAt: new Date(),
+    })
+    .onConflictDoUpdate({
+      target: hashtags.tag,
+      set: { followerCount: sql`${hashtags.followerCount} + 1` },
+    });
+
+  return c.json({ success: true, tag: normalizedTag, following: true });
+});
+
+/**
+ * Unfollow a hashtag
+ * POST /xrpc/io.exprsn.social.unfollowHashtag
+ */
+socialRouter.post('/io.exprsn.social.unfollowHashtag', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  const { tag } = await c.req.json<{ tag: string }>();
+
+  if (!tag || typeof tag !== 'string') {
+    throw badRequest('tag is required');
+  }
+
+  const normalizedTag = tag.toLowerCase().replace(/^#/, '').trim();
+
+  const existing = await db.query.hashtagFollows.findFirst({
+    where: and(eq(hashtagFollows.userDid, userDid), eq(hashtagFollows.tag, normalizedTag)),
+  });
+
+  if (!existing) {
+    return c.json({ success: true, tag: normalizedTag, following: false });
+  }
+
+  await db
+    .delete(hashtagFollows)
+    .where(and(eq(hashtagFollows.userDid, userDid), eq(hashtagFollows.tag, normalizedTag)));
+
+  // Decrement followerCount (floor at 0)
+  await db
+    .update(hashtags)
+    .set({ followerCount: sql`GREATEST(${hashtags.followerCount} - 1, 0)` })
+    .where(eq(hashtags.tag, normalizedTag));
+
+  return c.json({ success: true, tag: normalizedTag, following: false });
+});
+
+/**
+ * Get the current user's followed hashtags
+ * GET /xrpc/io.exprsn.social.getFollowedHashtags
+ */
+socialRouter.get('/io.exprsn.social.getFollowedHashtags', authMiddleware, async (c) => {
+  const userDid = c.get('did');
+  const limit = Math.min(parseInt(c.req.query('limit') || '50', 10), 100);
+  const cursor = c.req.query('cursor');
+
+  const conditions = [eq(hashtagFollows.userDid, userDid)];
+  if (cursor) {
+    conditions.push(lt(hashtagFollows.createdAt, new Date(cursor)));
+  }
+
+  const follows = await db
+    .select({
+      tag: hashtagFollows.tag,
+      followedAt: hashtagFollows.createdAt,
+    })
+    .from(hashtagFollows)
+    .where(and(...conditions))
+    .orderBy(desc(hashtagFollows.createdAt))
+    .limit(limit);
+
+  if (follows.length === 0) {
+    return c.json({ tags: [], cursor: undefined });
+  }
+
+  // Enrich with video counts from the hashtags table
+  const tags = follows.map((f) => f.tag);
+  const hashtagRows = await db
+    .select({ tag: hashtags.tag, videoCount: hashtags.videoCount })
+    .from(hashtags)
+    .where(inArray(hashtags.tag, tags));
+  const videoCountMap = new Map(hashtagRows.map((h) => [h.tag, h.videoCount]));
+
+  const lastItem = follows[follows.length - 1];
+  const nextCursor =
+    follows.length === limit && lastItem ? lastItem.followedAt.toISOString() : undefined;
+
+  return c.json({
+    tags: follows.map((f) => ({
+      tag: f.tag,
+      videoCount: videoCountMap.get(f.tag) ?? 0,
+      followedAt: f.followedAt.toISOString(),
+    })),
+    cursor: nextCursor,
+  });
+});
+
+/**
+ * Get detailed info for a hashtag including trending data and follow state
+ * GET /xrpc/io.exprsn.social.getHashtagInfo
+ */
+socialRouter.get('/io.exprsn.social.getHashtagInfo', optionalAuthMiddleware, async (c) => {
+  const rawTag = c.req.query('tag');
+  const viewerDid = c.get('did');
+
+  if (!rawTag) {
+    throw badRequest('tag query parameter is required');
+  }
+
+  const normalizedTag = rawTag.toLowerCase().replace(/^#/, '').trim();
+
+  const hashtagRow = await db.query.hashtags.findFirst({
+    where: eq(hashtags.tag, normalizedTag),
+  });
+
+  const trendingRow = await db.query.trendingHashtags.findFirst({
+    where: eq(trendingHashtags.tag, normalizedTag),
+  });
+
+  let isFollowing = false;
+  if (viewerDid) {
+    const follow = await db.query.hashtagFollows.findFirst({
+      where: and(eq(hashtagFollows.userDid, viewerDid), eq(hashtagFollows.tag, normalizedTag)),
+    });
+    isFollowing = !!follow;
+  }
+
+  return c.json({
+    tag: normalizedTag,
+    videoCount: hashtagRow?.videoCount ?? 0,
+    viewCount: hashtagRow?.viewCount ?? 0,
+    followerCount: hashtagRow?.followerCount ?? 0,
+    trending: trendingRow
+      ? {
+          velocity: trendingRow.velocity,
+          rank: trendingRow.rank,
+          direction: trendingRow.direction,
+        }
+      : null,
+    isFollowing,
+  });
 });
 
 // =============================================================================

@@ -227,12 +227,12 @@ export class MentionService {
       // Create notification
       await this.db.insert(schema.notifications).values({
         id: nanoid(),
-        recipientDid: mention.did,
-        type: 'mention',
+        userDid: mention.did,
+        reason: 'mention',
         actorDid: authorDid,
         subjectUri: sourceUri,
         subjectType: sourceType,
-        read: false,
+        isRead: false,
         createdAt: new Date(),
       }).onConflictDoNothing();
     }
@@ -268,8 +268,8 @@ export class MentionService {
       .from(schema.notifications)
       .where(
         and(
-          eq(schema.notifications.recipientDid, userDid),
-          eq(schema.notifications.type, 'mention')
+          eq(schema.notifications.userDid, userDid),
+          eq(schema.notifications.reason, 'mention')
         )
       )
       .orderBy(desc(schema.notifications.createdAt))

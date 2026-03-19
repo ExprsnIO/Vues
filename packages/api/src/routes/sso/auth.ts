@@ -14,6 +14,9 @@ import { db } from '../../db/index.js';
 import { users, actorRepos } from '../../db/schema.js';
 import { eq } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
+import { generateKeyPair } from '../../services/ca/crypto.js';
+import { optionalAuthMiddleware } from '../../auth/middleware.js';
+import type { TokenExchangeResult, ExternalUserInfo, ExternalProvider } from '../../services/sso/OIDCConsumerService.js';
 
 const ssoAuth = new Hono();
 
@@ -405,11 +408,27 @@ ssoAuth.get('/authorize', async (c) => {
   const requestedScopes = scope.split(' ');
   const hasConsent = await OIDCProviderService.hasConsent(userDid, clientId, requestedScopes);
 
-  // If no consent or prompt=consent, show consent screen
+  // If no consent or prompt=consent, redirect to consent screen
   if (!hasConsent || prompt === 'consent') {
-    // In a real implementation, render a consent page
-    // For now, auto-consent
-    await OIDCProviderService.grantConsent(userDid, clientId, requestedScopes);
+    // Build consent page URL with authorization parameters
+    const baseUrl = process.env.APP_URL || 'https://exprsn.io';
+    const consentUrl = new URL(`${baseUrl}/sso/consent`);
+
+    // Pass authorization request parameters
+    consentUrl.searchParams.set('client_id', clientId);
+    consentUrl.searchParams.set('redirect_uri', redirectUri);
+    consentUrl.searchParams.set('scope', scope);
+    consentUrl.searchParams.set('response_type', responseType);
+    if (state) consentUrl.searchParams.set('state', state);
+    if (nonce) consentUrl.searchParams.set('nonce', nonce);
+    if (codeChallenge) consentUrl.searchParams.set('code_challenge', codeChallenge);
+    if (codeChallengeMethod) consentUrl.searchParams.set('code_challenge_method', codeChallengeMethod);
+
+    // Include client info for display
+    consentUrl.searchParams.set('client_name', client.clientName);
+    if (client.logoUri) consentUrl.searchParams.set('client_logo', client.logoUri);
+
+    return c.redirect(consentUrl.toString());
   }
 
   // Create authorization code
@@ -432,6 +451,90 @@ ssoAuth.get('/authorize', async (c) => {
   }
 
   return c.redirect(redirectUrl.toString());
+});
+
+/**
+ * Consent confirmation endpoint
+ * Called by frontend after user approves consent
+ */
+ssoAuth.post('/consent', optionalAuthMiddleware, async (c) => {
+  const userDid = c.get('userDid');
+  if (!userDid) {
+    return c.json({ error: 'unauthorized', message: 'Authentication required' }, 401);
+  }
+
+  const body = await c.req.json<{
+    client_id: string;
+    redirect_uri: string;
+    scope: string;
+    response_type: string;
+    state?: string;
+    nonce?: string;
+    code_challenge?: string;
+    code_challenge_method?: string;
+    approved: boolean;
+  }>();
+
+  const {
+    client_id: clientId,
+    redirect_uri: redirectUri,
+    scope,
+    response_type: responseType,
+    state,
+    nonce,
+    code_challenge: codeChallenge,
+    code_challenge_method: codeChallengeMethod,
+    approved,
+  } = body;
+
+  if (!clientId || !redirectUri || !scope) {
+    return c.json({ error: 'invalid_request', message: 'Missing required parameters' }, 400);
+  }
+
+  // Validate client
+  const client = await OIDCProviderService.getClient(clientId);
+  if (!client || client.status !== 'active') {
+    return c.json({ error: 'invalid_client', message: 'Client not found or inactive' }, 400);
+  }
+
+  // Validate redirect URI
+  if (!OIDCProviderService.validateRedirectUri(client, redirectUri)) {
+    return c.json({ error: 'invalid_redirect_uri', message: 'Invalid redirect URI' }, 400);
+  }
+
+  // Handle denial
+  if (!approved) {
+    const denyUrl = new URL(redirectUri);
+    denyUrl.searchParams.set('error', 'access_denied');
+    denyUrl.searchParams.set('error_description', 'User denied the request');
+    if (state) denyUrl.searchParams.set('state', state);
+    return c.json({ redirect_uri: denyUrl.toString() });
+  }
+
+  // Grant consent
+  const requestedScopes = scope.split(' ');
+  await OIDCProviderService.grantConsent(userDid, clientId, requestedScopes);
+
+  // Create authorization code
+  const code = await OIDCProviderService.createAuthorizationCode(userDid, {
+    clientId,
+    redirectUri,
+    responseType: responseType || 'code',
+    scope,
+    state,
+    nonce,
+    codeChallenge,
+    codeChallengeMethod,
+  });
+
+  // Build redirect URL
+  const redirectUrl = new URL(redirectUri);
+  redirectUrl.searchParams.set('code', code);
+  if (state) {
+    redirectUrl.searchParams.set('state', state);
+  }
+
+  return c.json({ redirect_uri: redirectUrl.toString() });
 });
 
 /**
@@ -591,34 +694,64 @@ ssoAuth.get('/.well-known/openid-configuration', async (c) => {
 // ==========================================
 
 async function createUserFromExternalIdentity(
-  userInfo: { id: string; email?: string; name?: string; picture?: string },
-  provider: { id: string; defaultRole: string; domainId?: string },
-  tokens: { accessToken: string; refreshToken?: string; expiresIn?: number }
+  userInfo: ExternalUserInfo,
+  provider: ExternalProvider,
+  tokens: TokenExchangeResult
 ): Promise<string> {
+  const isExprsnProvider =
+    provider.providerKey === 'exprsn' || provider.providerKey.startsWith('exprsn:');
+
+  // For Exprsn providers, the remote sub is already a DID - use it as a reference
+  // but still create a local identity anchored to our PLC.
   const did = `did:plc:${nanoid(24)}`;
   const handle = generateHandleFromEmail(userInfo.email || userInfo.id);
+
+  // Determine the effective role, applying roleMapping when available
+  let effectiveRole = provider.defaultRole || 'member';
+  if (isExprsnProvider && provider.roleMapping) {
+    const remoteRole = userInfo.raw.role as string | undefined;
+    if (remoteRole && provider.roleMapping[remoteRole]) {
+      effectiveRole = provider.roleMapping[remoteRole]!;
+    }
+  }
+
+  // Determine account type for Exprsn providers
+  const accountType = isExprsnProvider
+    ? (provider.defaultAccountType ?? 'personal')
+    : 'personal';
+
+  // Generate signing keypair for the actor
+  const { privateKey, publicKey } = await generateKeyPair({
+    algorithm: 'RSA',
+    keySize: 2048,
+  });
 
   // Create actor repo
   await db.insert(actorRepos).values({
     did,
     handle,
     email: userInfo.email,
+    signingKeyPublic: publicKey,
+    signingKeyPrivate: privateKey,
     createdAt: new Date(),
   });
 
-  // Create user
+  // Create user, attaching account type for Exprsn-sourced accounts
   await db.insert(users).values({
     did,
     handle,
     displayName: userInfo.name,
     avatar: userInfo.picture,
-    domainId: provider.domainId,
     createdAt: new Date(),
     updatedAt: new Date(),
   });
 
+  console.log(
+    `[SSO] Created user ${did} via ${provider.providerKey} (role=${effectiveRole}, accountType=${accountType})`
+  );
+
   // Link external identity
-  await OIDCConsumerService.linkIdentity(did, provider as any, { ...userInfo, raw: {} }, tokens);
+  await OIDCConsumerService.linkIdentity(did, provider, userInfo, tokens);
 
   return did;
 }

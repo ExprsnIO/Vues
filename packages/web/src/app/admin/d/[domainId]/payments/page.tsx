@@ -35,10 +35,21 @@ interface PaymentConfig {
   updatedAt: string;
 }
 
+interface CredentialField {
+  field: string;
+  label: string;
+  description: string;
+  placeholder?: string;
+}
+
 interface ProviderMetadata {
   provider: PaymentProvider;
+  displayName: string;
+  description: string;
   requiredCredentials: string[];
   optionalCredentials: string[];
+  requiredFields: CredentialField[];
+  optionalFields: CredentialField[];
 }
 
 export default function DomainPaymentsPage() {
@@ -61,7 +72,7 @@ export default function DomainPaymentsPage() {
   const { data, isLoading, error } = useQuery({
     queryKey: ['admin', 'domain', domainId, 'payments'],
     queryFn: async () => {
-      const response = await fetch(`/xrpc/io.exprsn.admin.payments.domain.config.get?domainId=${domainId}`, {
+      const response = await fetch(`/xrpc/io.exprsn.admin.payments.providers.list?organizationId=${domainId}`, {
         credentials: 'include',
       });
       if (!response.ok) throw new Error('Failed to fetch payment config');
@@ -198,8 +209,8 @@ export default function DomainPaymentsPage() {
     );
   }
 
-  const configs = data?.configs || [];
-  const recentTransactions = data?.recentTransactions || [];
+  const configs = data?.providers || [];
+  const recentTransactions = data?.transactions || [];
 
   // Calculate stats from transactions
   const stats = {
@@ -548,33 +559,47 @@ function AddProviderModal({
 
           <div className="border-t border-border pt-4 space-y-4">
             <h4 className="text-sm font-medium text-text-primary">Credentials</h4>
+            {providerMeta && (
+              <p className="text-sm text-text-muted">{providerMeta.description}</p>
+            )}
 
-            {providerMeta?.requiredCredentials.map((field) => (
-              <div key={field}>
-                <label className="block text-sm font-medium text-text-primary mb-2">
-                  {field} <span className="text-red-500">*</span>
+            {providerMeta?.requiredFields?.map((fieldMeta) => (
+              <div key={fieldMeta.field}>
+                <label className="block text-sm font-medium text-text-primary mb-1">
+                  {fieldMeta.label} <span className="text-red-500">*</span>
                 </label>
+                <p className="text-xs text-text-muted mb-2">{fieldMeta.description}</p>
                 <input
                   type="password"
                   required
-                  value={credentials[field] || ''}
-                  onChange={(e) => setCredentials({ ...credentials, [field]: e.target.value })}
-                  className="w-full px-4 py-2 bg-surface border border-border rounded-lg text-text-primary focus:outline-none focus:border-accent font-mono text-sm"
+                  value={credentials[fieldMeta.field] || ''}
+                  onChange={(e) => setCredentials({ ...credentials, [fieldMeta.field]: e.target.value })}
+                  placeholder={fieldMeta.placeholder}
+                  className="w-full px-4 py-2 bg-surface border border-border rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent font-mono text-sm"
                 />
               </div>
             ))}
 
-            {providerMeta?.optionalCredentials.map((field) => (
-              <div key={field}>
-                <label className="block text-sm font-medium text-text-primary mb-2">{field}</label>
-                <input
-                  type="password"
-                  value={credentials[field] || ''}
-                  onChange={(e) => setCredentials({ ...credentials, [field]: e.target.value })}
-                  className="w-full px-4 py-2 bg-surface border border-border rounded-lg text-text-primary focus:outline-none focus:border-accent font-mono text-sm"
-                />
-              </div>
-            ))}
+            {providerMeta?.optionalFields && providerMeta.optionalFields.length > 0 && (
+              <>
+                <h5 className="text-xs text-text-muted uppercase tracking-wide mt-4">Optional</h5>
+                {providerMeta.optionalFields.map((fieldMeta) => (
+                  <div key={fieldMeta.field}>
+                    <label className="block text-sm font-medium text-text-primary mb-1">
+                      {fieldMeta.label}
+                    </label>
+                    <p className="text-xs text-text-muted mb-2">{fieldMeta.description}</p>
+                    <input
+                      type="password"
+                      value={credentials[fieldMeta.field] || ''}
+                      onChange={(e) => setCredentials({ ...credentials, [fieldMeta.field]: e.target.value })}
+                      placeholder={fieldMeta.placeholder}
+                      className="w-full px-4 py-2 bg-surface border border-border rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent font-mono text-sm"
+                    />
+                  </div>
+                ))}
+              </>
+            )}
           </div>
 
           <div className="flex gap-3 pt-4">

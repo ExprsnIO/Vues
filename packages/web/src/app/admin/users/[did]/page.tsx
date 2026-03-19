@@ -23,7 +23,26 @@ export default function AdminUserDetailPage() {
   const [showAddRoleModal, setShowAddRoleModal] = useState<string | null>(null); // domainId
   const [showAddGroupModal, setShowAddGroupModal] = useState<string | null>(null); // domainId
   const [activeModal, setActiveModal] = useState<'suspend' | 'ban' | null>(null);
-  const [activeTab, setActiveTab] = useState<'overview' | 'moderation' | 'domains' | 'organizations' | 'roles'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'moderation' | 'domains' | 'organizations' | 'roles' | 'certificates' | 'tokens' | 'invite-codes'>('overview');
+
+  const [showIssueCertModal, setShowIssueCertModal] = useState(false);
+  const [newCertType, setNewCertType] = useState<'client' | 'code_signing'>('client');
+  const [newCertName, setNewCertName] = useState('');
+
+  const [showCreateTokenModal, setShowCreateTokenModal] = useState(false);
+  const [newTokenName, setNewTokenName] = useState('');
+  const [newTokenScopes, setNewTokenScopes] = useState<string[]>(['read']);
+  const [newTokenType, setNewTokenType] = useState<'personal' | 'service'>('personal');
+  const [newTokenCertId, setNewTokenCertId] = useState('');
+  const [newTokenExpiresIn, setNewTokenExpiresIn] = useState<number | ''>('');
+  const [newTokenValue, setNewTokenValue] = useState('');
+
+  const [showCreateInviteModal, setShowCreateInviteModal] = useState(false);
+  const [newInviteMaxUses, setNewInviteMaxUses] = useState<number | ''>(1);
+  const [newInviteExpiresIn, setNewInviteExpiresIn] = useState<number | ''>('');
+  const [newInviteName, setNewInviteName] = useState('');
+  const [newInviteDescription, setNewInviteDescription] = useState('');
+  const [newInviteCode, setNewInviteCode] = useState('');
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['admin', 'user', did],
@@ -43,6 +62,30 @@ export default function AdminUserDetailPage() {
   const { data: moderationHistory } = useQuery({
     queryKey: ['admin', 'user', 'moderation-history', did],
     queryFn: () => api.adminUsersModerationHistory({ userDid: did, limit: 50 }),
+  });
+
+  const { data: certsData, refetch: refetchCerts } = useQuery({
+    queryKey: ['admin', 'user', 'certificates', did],
+    queryFn: () => api.adminUserCertificates(did),
+  });
+
+  const { data: sessionsData, refetch: refetchSessions } = useQuery({
+    queryKey: ['admin', 'user', 'sessions', did],
+    queryFn: () => api.adminUserSessions(did),
+  });
+
+  const { data: inviteCodesData, refetch: refetchInviteCodes } = useQuery({
+    queryKey: ['admin', 'user', 'invite-codes', did],
+    queryFn: () => api.adminUserInviteCodes(did),
+  });
+
+  const revokeInviteCodeMutation = useMutation({
+    mutationFn: (codeId: string) => api.adminUserInviteCodeRevoke(codeId),
+    onSuccess: () => {
+      refetchInviteCodes();
+      toast.success('Invite code revoked');
+    },
+    onError: () => toast.error('Failed to revoke invite code'),
   });
 
   const setPasswordMutation = useMutation({
@@ -202,6 +245,69 @@ export default function AdminUserDetailPage() {
     onError: () => toast.error('Failed to remove user from group'),
   });
 
+  const revokeCertMutation = useMutation({
+    mutationFn: ({ certId, reason }: { certId: string; reason: string }) =>
+      api.adminUserCertificateRevoke(certId, reason),
+    onSuccess: () => {
+      refetchCerts();
+      toast.success('Certificate revoked');
+    },
+    onError: () => toast.error('Failed to revoke certificate'),
+  });
+
+  const revokeSessionMutation = useMutation({
+    mutationFn: (sessionId: string) => api.adminUserSessionRevoke(sessionId),
+    onSuccess: () => {
+      refetchSessions();
+      toast.success('Session revoked');
+    },
+    onError: () => toast.error('Failed to revoke session'),
+  });
+
+  const revokeTokenMutation = useMutation({
+    mutationFn: (tokenId: string) => api.adminUserTokenRevoke(tokenId),
+    onSuccess: () => {
+      refetchSessions();
+      toast.success('Token revoked');
+    },
+    onError: () => toast.error('Failed to revoke token'),
+  });
+
+  const issueCertMutation = useMutation({
+    mutationFn: (data: { type: 'client' | 'code_signing'; commonName?: string }) =>
+      api.adminUserCertificateIssue({ did, ...data }),
+    onSuccess: () => {
+      refetchCerts();
+      toast.success('Certificate issued successfully');
+      setShowIssueCertModal(false);
+      setNewCertName('');
+      setNewCertType('client');
+    },
+    onError: () => toast.error('Failed to issue certificate'),
+  });
+
+  const createTokenMutation = useMutation({
+    mutationFn: (data: { name: string; scopes: string[]; tokenType?: 'personal' | 'service'; certificateId?: string; expiresIn?: number }) =>
+      api.adminUserTokenCreate({ did, ...data }),
+    onSuccess: (result: any) => {
+      refetchSessions();
+      setNewTokenValue(result.token);
+      toast.success('API token created');
+    },
+    onError: () => toast.error('Failed to create token'),
+  });
+
+  const createInviteCodeMutation = useMutation({
+    mutationFn: (data: { maxUses?: number; expiresIn?: number; domainId?: string; metadata?: { name?: string; description?: string } }) =>
+      api.adminUserInviteCodeCreate({ did, ...data }),
+    onSuccess: (result: any) => {
+      refetchInviteCodes();
+      setNewInviteCode(result.inviteCode.code);
+      toast.success('Invite code generated');
+    },
+    onError: () => toast.error('Failed to generate invite code'),
+  });
+
   if (isLoading) {
     return (
       <div className="space-y-6">
@@ -337,6 +443,9 @@ export default function AdminUserDetailPage() {
           {[
             { id: 'overview', label: 'Overview' },
             { id: 'moderation', label: 'Moderation History' },
+            { id: 'certificates', label: 'Certificates' },
+            { id: 'tokens', label: 'Sessions & Tokens' },
+            { id: 'invite-codes', label: 'Invite Codes' },
             { id: 'domains', label: 'Domains' },
             { id: 'organizations', label: 'Organizations' },
             { id: 'roles', label: 'Roles & Groups' },
@@ -375,7 +484,7 @@ export default function AdminUserDetailPage() {
       {activeTab === 'overview' && (
         <div className="space-y-6">
           {/* Stats & Info */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
             <div className="bg-surface border border-border rounded-xl p-4">
               <p className="text-sm text-text-muted mb-1">Joined</p>
               <p className="text-text-primary font-medium">
@@ -392,6 +501,133 @@ export default function AdminUserDetailPage() {
               <p className="text-sm text-text-muted mb-1">DID</p>
               <p className="text-text-primary font-mono text-xs truncate">{user.did}</p>
             </div>
+            <div className="bg-surface border border-border rounded-xl p-4">
+              <p className="text-sm text-text-muted mb-1">Identity Method</p>
+              <div className="flex items-center gap-2">
+                {user.did.startsWith('did:exprsn:') ? (
+                  <>
+                    <svg className="w-4 h-4 text-accent" viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M12 1L3 5v6c0 5.25 3.75 10.15 9 11.35C17.25 21.15 21 16.25 21 11V5l-9-4zm-1 13l-3-3 1.41-1.41L11 11.17l4.59-4.58L17 8l-6 6z" />
+                    </svg>
+                    <span className="text-accent font-medium">did:exprsn</span>
+                  </>
+                ) : user.did.startsWith('did:web:') ? (
+                  <>
+                    <svg className="w-4 h-4 text-blue-400" viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z" />
+                    </svg>
+                    <span className="text-blue-400 font-medium">did:web</span>
+                  </>
+                ) : (
+                  <>
+                    <svg className="w-4 h-4 text-blue-400" viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z" />
+                    </svg>
+                    <span className="text-blue-400 font-medium">did:plc</span>
+                  </>
+                )}
+              </div>
+            </div>
+            <div className="bg-surface border border-border rounded-xl p-4">
+              <p className="text-sm text-text-muted mb-1">Rate Limit Tier</p>
+              <p className="font-medium text-text-primary">
+                {user.did.startsWith('did:exprsn:') ? (
+                  <span className="text-accent">Exprsn (90/min)</span>
+                ) : (
+                  <span>User (60/min)</span>
+                )}
+              </p>
+            </div>
+            <div className="bg-surface border border-border rounded-xl p-4">
+              <p className="text-sm text-text-muted mb-1">Feed Boost</p>
+              <p className="font-medium text-text-primary">
+                {user.did.startsWith('did:exprsn:') ? (
+                  <span className="text-accent">1.15x active</span>
+                ) : (
+                  <span className="text-text-muted">None</span>
+                )}
+              </p>
+            </div>
+          </div>
+
+          {/* Credentials Summary */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {/* Certificates Card */}
+            <button
+              onClick={() => setActiveTab('certificates')}
+              className="bg-surface border border-border rounded-xl p-5 text-left hover:border-accent/50 transition-colors group"
+            >
+              <div className="flex items-center gap-3 mb-3">
+                <div className="p-2 bg-purple-500/10 rounded-lg">
+                  <CertificateIcon className="w-5 h-5 text-purple-500" />
+                </div>
+                <h4 className="font-semibold text-text-primary group-hover:text-accent transition-colors">Certificates</h4>
+              </div>
+              <div className="flex items-baseline gap-2">
+                <span className="text-2xl font-bold text-text-primary">
+                  {certsData?.certificates?.length ?? 0}
+                </span>
+                <span className="text-sm text-text-muted">issued</span>
+              </div>
+              <div className="flex gap-3 mt-2 text-xs text-text-muted">
+                <span className="text-green-500">
+                  {certsData?.certificates?.filter((c: any) => c.status === 'active').length ?? 0} active
+                </span>
+                {certsData?.didCertificate && (
+                  <span className="text-accent">did:exprsn</span>
+                )}
+              </div>
+            </button>
+
+            {/* Tokens Card */}
+            <button
+              onClick={() => setActiveTab('tokens')}
+              className="bg-surface border border-border rounded-xl p-5 text-left hover:border-accent/50 transition-colors group"
+            >
+              <div className="flex items-center gap-3 mb-3">
+                <div className="p-2 bg-blue-500/10 rounded-lg">
+                  <TokenIcon className="w-5 h-5 text-blue-500" />
+                </div>
+                <h4 className="font-semibold text-text-primary group-hover:text-accent transition-colors">Sessions & Tokens</h4>
+              </div>
+              <div className="flex items-baseline gap-2">
+                <span className="text-2xl font-bold text-text-primary">
+                  {(sessionsData?.sessions?.filter((s: any) => s.isActive).length ?? 0) + (sessionsData?.tokens?.filter((t: any) => t.status === 'active').length ?? 0)}
+                </span>
+                <span className="text-sm text-text-muted">active</span>
+              </div>
+              <div className="flex gap-3 mt-2 text-xs text-text-muted">
+                <span>{sessionsData?.sessions?.filter((s: any) => s.isActive).length ?? 0} sessions</span>
+                <span>{sessionsData?.tokens?.filter((t: any) => t.status === 'active').length ?? 0} API tokens</span>
+              </div>
+            </button>
+
+            {/* Invite Codes Card */}
+            <button
+              onClick={() => setActiveTab('invite-codes')}
+              className="bg-surface border border-border rounded-xl p-5 text-left hover:border-accent/50 transition-colors group"
+            >
+              <div className="flex items-center gap-3 mb-3">
+                <div className="p-2 bg-green-500/10 rounded-lg">
+                  <InviteCodeIcon className="w-5 h-5 text-green-500" />
+                </div>
+                <h4 className="font-semibold text-text-primary group-hover:text-accent transition-colors">Invite Codes</h4>
+              </div>
+              <div className="flex items-baseline gap-2">
+                <span className="text-2xl font-bold text-text-primary">
+                  {inviteCodesData?.inviteCodes?.length ?? 0}
+                </span>
+                <span className="text-sm text-text-muted">issued</span>
+              </div>
+              <div className="flex gap-3 mt-2 text-xs text-text-muted">
+                <span className="text-green-500">
+                  {inviteCodesData?.inviteCodes?.filter((c: any) => c.status === 'active').length ?? 0} active
+                </span>
+                <span>
+                  {inviteCodesData?.inviteCodes?.reduce((sum: number, c: any) => sum + c.usedCount, 0) ?? 0} uses
+                </span>
+              </div>
+            </button>
           </div>
 
           {/* Sanction History */}
@@ -456,7 +692,7 @@ export default function AdminUserDetailPage() {
       {activeTab === 'moderation' && (
         <div className="space-y-6">
           {/* Active Sanctions */}
-          {moderationHistory?.sanctions?.filter((s: any) => s.active).length > 0 && (
+          {(moderationHistory?.sanctions?.filter((s: any) => s.active)?.length ?? 0) > 0 && (
             <div className="bg-surface border border-border rounded-xl p-6">
               <h3 className="text-lg font-semibold text-text-primary mb-4">Active Sanctions</h3>
               <div className="space-y-3">
@@ -782,6 +1018,807 @@ export default function AdminUserDetailPage() {
                 ))}
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Certificates Tab */}
+      {activeTab === 'certificates' && (
+        <div className="space-y-6">
+          {/* did:exprsn Certificate */}
+          {certsData?.didCertificate && (
+            <div className="bg-surface border border-accent/20 rounded-xl p-6">
+              <div className="flex items-center gap-3 mb-4">
+                <div className="p-2 bg-accent/10 rounded-lg">
+                  <ShieldCheckIcon className="w-5 h-5 text-accent" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-semibold text-text-primary">did:exprsn Identity Certificate</h3>
+                  <p className="text-sm text-text-muted">Certificate-backed platform identity</p>
+                </div>
+                <span className={`ml-auto px-2.5 py-0.5 rounded-full text-xs font-medium ${
+                  certsData.didCertificate.status === 'active'
+                    ? 'bg-green-500/10 text-green-500'
+                    : 'bg-red-500/10 text-red-500'
+                }`}>
+                  {certsData.didCertificate.status}
+                </span>
+              </div>
+              <dl className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                <div>
+                  <dt className="text-text-muted">Type</dt>
+                  <dd className="text-text-primary font-medium">{certsData.didCertificate.certificateType}</dd>
+                </div>
+                <div>
+                  <dt className="text-text-muted">Created</dt>
+                  <dd className="text-text-primary">{new Date(certsData.didCertificate.createdAt).toLocaleDateString()}</dd>
+                </div>
+                <div className="col-span-2">
+                  <dt className="text-text-muted">Public Key</dt>
+                  <dd className="text-text-primary font-mono text-xs truncate">{certsData.didCertificate.publicKeyMultibase}</dd>
+                </div>
+              </dl>
+              <div className="mt-4 p-3 bg-accent/5 rounded-lg">
+                <p className="text-xs text-text-muted">
+                  This identity enables 1.15x feed ranking boost, 90 req/min rate limit tier, and content signing capability.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* Entity Certificates */}
+          <div className="bg-surface border border-border rounded-xl p-6">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold text-text-primary">CA Entity Certificates</h3>
+              <button
+                onClick={() => setShowIssueCertModal(true)}
+                className="px-4 py-2 bg-accent text-text-inverse rounded-lg hover:bg-accent/90 transition-colors text-sm"
+              >
+                Issue Certificate
+              </button>
+            </div>
+            {!certsData?.certificates?.length ? (
+              <div className="text-center py-8">
+                <CertificateIcon className="w-12 h-12 text-text-muted mx-auto mb-3" />
+                <p className="text-text-muted">No certificates issued</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {certsData.certificates.map((cert: any) => {
+                  const isExpired = new Date(cert.notAfter) < new Date();
+                  const isExpiringSoon = !isExpired && new Date(cert.notAfter) < new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+                  const linkedTokenCount = (certsData as any).tokensByCert?.[cert.id] ?? 0;
+                  return (
+                    <div key={cert.id} className="flex items-start gap-4 p-4 bg-surface-hover rounded-lg">
+                      <div className={`p-2 rounded-lg ${
+                        cert.certType === 'code_signing' ? 'bg-purple-500/10' :
+                        cert.certType === 'client' ? 'bg-blue-500/10' : 'bg-green-500/10'
+                      }`}>
+                        {cert.certType === 'code_signing' ? (
+                          <CodeSignIcon className="w-4 h-4 text-purple-500" />
+                        ) : cert.certType === 'client' ? (
+                          <UserCertIcon className="w-4 h-4 text-blue-500" />
+                        ) : (
+                          <ServerCertIcon className="w-4 h-4 text-green-500" />
+                        )}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 mb-1">
+                          <span className="font-medium text-text-primary text-sm">{cert.commonName}</span>
+                          <span className={`px-2 py-0.5 text-xs rounded-full ${
+                            cert.status === 'active' && !isExpired
+                              ? 'bg-green-500/10 text-green-500'
+                              : cert.status === 'revoked'
+                              ? 'bg-red-500/10 text-red-500'
+                              : 'bg-yellow-500/10 text-yellow-500'
+                          }`}>
+                            {cert.status === 'active' && isExpired ? 'expired' : cert.status}
+                          </span>
+                          <span className="px-2 py-0.5 text-xs bg-surface rounded-full text-text-muted">
+                            {cert.certType.replace('_', ' ')}
+                          </span>
+                          {isExpiringSoon && (
+                            <span className="px-2 py-0.5 text-xs bg-amber-500/10 text-amber-500 rounded-full">
+                              expiring soon
+                            </span>
+                          )}
+                          {linkedTokenCount > 0 && (
+                            <span className="px-2 py-0.5 text-xs bg-blue-500/10 text-blue-400 rounded-full">
+                              {linkedTokenCount} token{linkedTokenCount !== 1 ? 's' : ''}
+                            </span>
+                          )}
+                        </div>
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs text-text-muted mt-2">
+                          <div>
+                            <span className="block text-text-muted">Serial</span>
+                            <span className="font-mono text-text-secondary truncate block">{cert.serialNumber}</span>
+                          </div>
+                          <div>
+                            <span className="block text-text-muted">Fingerprint</span>
+                            <span className="font-mono text-text-secondary truncate block">{cert.fingerprint}</span>
+                          </div>
+                          <div>
+                            <span className="block text-text-muted">Valid from</span>
+                            <span className="text-text-secondary">{new Date(cert.notBefore).toLocaleDateString()}</span>
+                          </div>
+                          <div>
+                            <span className="block text-text-muted">Expires</span>
+                            <span className={isExpiringSoon || isExpired ? 'text-amber-500 font-medium' : 'text-text-secondary'}>
+                              {new Date(cert.notAfter).toLocaleDateString()}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                      {cert.status === 'active' && !isExpired && (
+                        <button
+                          onClick={() => {
+                            const cascadeMsg = linkedTokenCount > 0
+                              ? `This will also revoke ${linkedTokenCount} active token${linkedTokenCount !== 1 ? 's' : ''} linked to this certificate.\n\n`
+                              : '';
+                            if (confirm(`${cascadeMsg}Revoke certificate "${cert.commonName}"? This cannot be undone.`)) {
+                              revokeCertMutation.mutate(
+                                { certId: cert.id, reason: 'Administrative revocation' },
+                                {
+                                  onSuccess: (result: any) => {
+                                    refetchCerts();
+                                    const n = result?.cascadedTokens ?? 0;
+                                    if (n > 0) {
+                                      toast.success(`Certificate revoked. ${n} associated token${n !== 1 ? 's' : ''} also revoked.`);
+                                    } else {
+                                      toast.success('Certificate revoked');
+                                    }
+                                  },
+                                }
+                              );
+                            }
+                          }}
+                          disabled={revokeCertMutation.isPending}
+                          className="px-3 py-1.5 text-xs bg-red-500/10 hover:bg-red-500/20 text-red-500 rounded-lg transition-colors"
+                        >
+                          Revoke
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Sessions & Tokens Tab */}
+      {activeTab === 'tokens' && (
+        <div className="space-y-6">
+          {/* Active Sessions */}
+          <div className="bg-surface border border-border rounded-xl p-6">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold text-text-primary">Active Sessions</h3>
+              <span className="text-sm text-text-muted">
+                {sessionsData?.sessions?.filter((s: any) => s.isActive).length || 0} active
+              </span>
+            </div>
+            {!sessionsData?.sessions?.length ? (
+              <div className="text-center py-8">
+                <SessionIcon className="w-12 h-12 text-text-muted mx-auto mb-3" />
+                <p className="text-text-muted">No active sessions</p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {sessionsData.sessions.map((session: any) => (
+                  <div key={session.id} className="flex items-center gap-4 p-3 bg-surface-hover rounded-lg">
+                    <div className={`w-2 h-2 rounded-full flex-shrink-0 ${session.isActive ? 'bg-green-500' : 'bg-gray-500'}`} />
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-medium text-text-primary">{session.tokenType}</span>
+                        {session.ipAddress && (
+                          <span className="text-xs text-text-muted font-mono">{session.ipAddress}</span>
+                        )}
+                      </div>
+                      <div className="flex gap-4 text-xs text-text-muted mt-0.5">
+                        <span>Created {new Date(session.createdAt).toLocaleString()}</span>
+                        {session.lastUsedAt && (
+                          <span>Last used {new Date(session.lastUsedAt).toLocaleString()}</span>
+                        )}
+                        {session.expiresAt && (
+                          <span>Expires {new Date(session.expiresAt).toLocaleString()}</span>
+                        )}
+                      </div>
+                      {session.userAgent && (
+                        <p className="text-xs text-text-muted mt-0.5 truncate">{session.userAgent}</p>
+                      )}
+                    </div>
+                    {session.isActive && (
+                      <button
+                        onClick={() => revokeSessionMutation.mutate(session.id)}
+                        disabled={revokeSessionMutation.isPending}
+                        className="px-3 py-1.5 text-xs bg-red-500/10 hover:bg-red-500/20 text-red-500 rounded-lg transition-colors flex-shrink-0"
+                      >
+                        Revoke
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* API Tokens */}
+          <div className="bg-surface border border-border rounded-xl p-6">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h3 className="text-lg font-semibold text-text-primary">API Tokens</h3>
+                <p className="text-sm text-text-muted mt-0.5">
+                  {sessionsData?.tokens?.filter((t: any) => t.status === 'active').length || 0} active
+                </p>
+              </div>
+              <button
+                onClick={() => {
+                  setNewTokenValue('');
+                  setNewTokenName('');
+                  setNewTokenScopes(['read']);
+                  setNewTokenType('personal');
+                  setNewTokenCertId('');
+                  setNewTokenExpiresIn('');
+                  setShowCreateTokenModal(true);
+                }}
+                className="px-4 py-2 bg-accent text-text-inverse rounded-lg hover:bg-accent/90 transition-colors text-sm"
+              >
+                Create Token
+              </button>
+            </div>
+
+            {newTokenValue && (
+              <div className="mb-4 p-4 bg-amber-500/10 border border-amber-500/30 rounded-lg">
+                <p className="text-sm font-medium text-amber-500 mb-2">
+                  Copy this token now. It will not be shown again.
+                </p>
+                <div className="flex items-center gap-2">
+                  <code className="flex-1 text-xs font-mono bg-surface px-3 py-2 rounded border border-border text-text-primary break-all">
+                    {newTokenValue}
+                  </code>
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText(newTokenValue);
+                      toast.success('Copied!');
+                    }}
+                    className="flex-shrink-0 px-3 py-2 bg-surface-hover hover:bg-border text-text-primary rounded-lg text-xs transition-colors"
+                  >
+                    Copy
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {!sessionsData?.tokens?.length ? (
+              <div className="text-center py-8">
+                <TokenIcon className="w-12 h-12 text-text-muted mx-auto mb-3" />
+                <p className="text-text-muted">No API tokens</p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {sessionsData.tokens.map((token: any) => {
+                  const linkedCert = certsData?.certificates?.find((c: any) => c.id === token.certificateId);
+                  return (
+                    <div key={token.id} className="flex items-start gap-4 p-3 bg-surface-hover rounded-lg">
+                      <div className={`p-1.5 rounded-lg ${
+                        token.status === 'active' ? 'bg-green-500/10' : 'bg-gray-500/10'
+                      }`}>
+                        <TokenIcon className={`w-4 h-4 ${
+                          token.status === 'active' ? 'text-green-500' : 'text-gray-500'
+                        }`} />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 mb-1">
+                          <span className="text-sm font-medium text-text-primary">{token.name}</span>
+                          <span className="font-mono text-xs text-text-muted">{token.prefix}...</span>
+                          <span className={`px-2 py-0.5 text-xs rounded-full ${
+                            token.status === 'active'
+                              ? 'bg-green-500/10 text-green-500'
+                              : token.status === 'revoked'
+                              ? 'bg-red-500/10 text-red-500'
+                              : 'bg-yellow-500/10 text-yellow-500'
+                          }`}>
+                            {token.status}
+                          </span>
+                          {token.tokenType && (
+                            <span className="px-2 py-0.5 text-xs bg-surface rounded-full text-text-muted capitalize">
+                              {token.tokenType}
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex flex-wrap gap-1 mb-1.5">
+                          {token.scopes.map((scope: string) => (
+                            <span key={scope} className="px-1.5 py-0.5 text-[10px] bg-surface rounded text-text-muted">
+                              {scope}
+                            </span>
+                          ))}
+                        </div>
+                        {linkedCert && (
+                          <p className="text-xs text-blue-400 mb-1">
+                            Linked cert: {linkedCert.commonName}
+                          </p>
+                        )}
+                        <div className="flex gap-4 text-xs text-text-muted">
+                          <span>Created {new Date(token.createdAt).toLocaleDateString()}</span>
+                          {token.lastUsedAt && (
+                            <span>Last used {new Date(token.lastUsedAt).toLocaleDateString()}</span>
+                          )}
+                          <span>{token.usageCount} requests</span>
+                          {token.expiresAt && (
+                            <span>Expires {new Date(token.expiresAt).toLocaleDateString()}</span>
+                          )}
+                        </div>
+                      </div>
+                      {token.status === 'active' && (
+                        <button
+                          onClick={() => {
+                            if (confirm(`Revoke token "${token.name}"?`)) {
+                              revokeTokenMutation.mutate(token.id);
+                            }
+                          }}
+                          disabled={revokeTokenMutation.isPending}
+                          className="px-3 py-1.5 text-xs bg-red-500/10 hover:bg-red-500/20 text-red-500 rounded-lg transition-colors flex-shrink-0"
+                        >
+                          Revoke
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Invite Codes Tab */}
+      {activeTab === 'invite-codes' && (
+        <div className="space-y-6">
+          <div className="bg-surface border border-border rounded-xl p-6">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold text-text-primary">Invite Codes</h3>
+              <button
+                onClick={() => {
+                  setNewInviteCode('');
+                  setNewInviteName('');
+                  setNewInviteDescription('');
+                  setNewInviteMaxUses(1);
+                  setNewInviteExpiresIn('');
+                  setShowCreateInviteModal(true);
+                }}
+                className="px-4 py-2 bg-accent text-text-inverse rounded-lg hover:bg-accent/90 transition-colors text-sm"
+              >
+                Generate Invite Code
+              </button>
+            </div>
+
+            {newInviteCode && (
+              <div className="mb-4 p-4 bg-green-500/10 border border-green-500/30 rounded-lg">
+                <p className="text-sm font-medium text-green-500 mb-2">New invite code generated</p>
+                <div className="flex items-center gap-2">
+                  <code className="flex-1 text-sm font-mono bg-surface px-3 py-2 rounded border border-border text-text-primary tracking-widest">
+                    {newInviteCode}
+                  </code>
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText(newInviteCode);
+                      toast.success('Copied!');
+                    }}
+                    className="flex-shrink-0 px-3 py-2 bg-surface-hover hover:bg-border text-text-primary rounded-lg text-xs transition-colors"
+                  >
+                    Copy
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {!inviteCodesData?.inviteCodes?.length ? (
+              <div className="text-center py-8">
+                <InviteCodeIcon className="w-12 h-12 text-text-muted mx-auto mb-3" />
+                <p className="text-text-muted">No invite codes issued by this user</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {inviteCodesData.inviteCodes.map((code: any) => {
+                  const maxUses = code.maxUses ?? null;
+                  const usagePct = maxUses ? Math.min(100, Math.round((code.usedCount / maxUses) * 100)) : 0;
+                  return (
+                    <div key={code.id} className="flex items-start gap-4 p-4 bg-surface-hover rounded-lg">
+                      <div className={`p-2 rounded-lg ${
+                        code.status === 'active' ? 'bg-green-500/10' : 'bg-gray-500/10'
+                      }`}>
+                        <InviteCodeIcon className={`w-4 h-4 ${
+                          code.status === 'active' ? 'text-green-500' : 'text-gray-500'
+                        }`} />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 mb-1">
+                          <span className="font-mono text-sm font-medium text-text-primary">{code.code}</span>
+                          <button
+                            onClick={() => {
+                              navigator.clipboard.writeText(code.code);
+                              toast.success('Copied!');
+                            }}
+                            className="text-text-muted hover:text-text-primary transition-colors"
+                            title="Copy code"
+                          >
+                            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M15.666 3.888A2.25 2.25 0 0013.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 01-.75.75H9a.75.75 0 01-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 01-2.25 2.25H6.75A2.25 2.25 0 014.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 011.927-.184" />
+                            </svg>
+                          </button>
+                          <span className={`px-2 py-0.5 text-xs rounded-full ${
+                            code.status === 'active'
+                              ? 'bg-green-500/10 text-green-500'
+                              : code.status === 'revoked'
+                              ? 'bg-red-500/10 text-red-500'
+                              : code.status === 'expired'
+                              ? 'bg-yellow-500/10 text-yellow-500'
+                              : 'bg-gray-500/10 text-gray-500'
+                          }`}>
+                            {code.status}
+                          </span>
+                          {code.domainId && (
+                            <span className="px-2 py-0.5 text-xs bg-accent/10 text-accent rounded-full">
+                              Domain-scoped
+                            </span>
+                          )}
+                        </div>
+                        {code.metadata?.name && (
+                          <p className="text-sm text-text-secondary mb-1">{code.metadata.name}</p>
+                        )}
+                        {code.metadata?.description && (
+                          <p className="text-xs text-text-muted mb-1.5">{code.metadata.description}</p>
+                        )}
+
+                        {/* Usage progress */}
+                        <div className="mb-2">
+                          <div className="flex items-center justify-between text-xs text-text-muted mb-1">
+                            <span>
+                              Used {code.usedCount}/{maxUses ?? '\u221E'}
+                            </span>
+                            {maxUses && (
+                              <span>{usagePct}%</span>
+                            )}
+                          </div>
+                          {maxUses && (
+                            <div className="h-1.5 bg-surface rounded-full overflow-hidden">
+                              <div
+                                className={`h-full rounded-full transition-all ${
+                                  usagePct >= 100 ? 'bg-red-500' : usagePct >= 75 ? 'bg-amber-500' : 'bg-green-500'
+                                }`}
+                                style={{ width: `${usagePct}%` }}
+                              />
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="flex gap-4 text-xs text-text-muted">
+                          <span>Created {new Date(code.createdAt).toLocaleDateString()}</span>
+                          {code.expiresAt && (
+                            <span>Expires {new Date(code.expiresAt).toLocaleDateString()}</span>
+                          )}
+                        </div>
+                        {code.usedBy.length > 0 && (
+                          <div className="mt-2 flex flex-wrap gap-1">
+                            {code.usedBy.map((usedDid: string) => (
+                              <span key={usedDid} className="px-1.5 py-0.5 text-[10px] bg-surface rounded text-text-muted font-mono">
+                                {usedDid.length > 24 ? `${usedDid.slice(0, 12)}...${usedDid.slice(-8)}` : usedDid}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                      {code.status === 'active' && (
+                        <button
+                          onClick={() => {
+                            if (confirm(`Revoke invite code "${code.code}"?`)) {
+                              revokeInviteCodeMutation.mutate(code.id);
+                            }
+                          }}
+                          disabled={revokeInviteCodeMutation.isPending}
+                          className="px-3 py-1.5 text-xs bg-red-500/10 hover:bg-red-500/20 text-red-500 rounded-lg transition-colors flex-shrink-0"
+                        >
+                          Revoke
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Issue Certificate Modal */}
+      {showIssueCertModal && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-surface border border-border rounded-xl w-full max-w-md p-6">
+            <h3 className="text-lg font-semibold text-text-primary mb-4">Issue Certificate</h3>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-text-muted mb-2">Certificate Type</label>
+                <div className="flex gap-3">
+                  {(['client', 'code_signing'] as const).map((type) => (
+                    <button
+                      key={type}
+                      onClick={() => setNewCertType(type)}
+                      className={`flex-1 px-4 py-2.5 rounded-lg text-sm font-medium transition-colors border ${
+                        newCertType === type
+                          ? 'bg-accent/10 border-accent text-accent'
+                          : 'bg-surface-hover border-border text-text-secondary hover:text-text-primary'
+                      }`}
+                    >
+                      {type === 'client' ? 'Client' : 'Code Signing'}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-xs text-text-muted mt-1.5">
+                  {newCertType === 'client'
+                    ? 'Client certificates are used for user authentication.'
+                    : 'Code signing certificates are used to sign content and verify authorship.'}
+                </p>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-text-muted mb-2">
+                  Common Name <span className="text-text-muted font-normal">(optional)</span>
+                </label>
+                <input
+                  type="text"
+                  value={newCertName}
+                  onChange={(e) => setNewCertName(e.target.value)}
+                  placeholder={`Defaults to @${user.handle}`}
+                  className="w-full px-3 py-2 text-sm bg-surface-hover border border-border rounded-lg text-text-primary focus:outline-none focus:ring-1 focus:ring-accent"
+                />
+              </div>
+            </div>
+            <div className="flex gap-3 mt-6">
+              <button
+                onClick={() => {
+                  setShowIssueCertModal(false);
+                  setNewCertName('');
+                  setNewCertType('client');
+                }}
+                className="flex-1 py-2 bg-surface-hover hover:bg-border text-text-primary rounded-lg text-sm transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() =>
+                  issueCertMutation.mutate({
+                    type: newCertType,
+                    ...(newCertName ? { commonName: newCertName } : {}),
+                  })
+                }
+                disabled={issueCertMutation.isPending}
+                className="flex-1 py-2 bg-accent text-text-inverse rounded-lg hover:bg-accent/90 transition-colors text-sm disabled:opacity-50"
+              >
+                {issueCertMutation.isPending ? 'Issuing...' : 'Issue Certificate'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Create Token Modal */}
+      {showCreateTokenModal && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-surface border border-border rounded-xl w-full max-w-md p-6 max-h-[90vh] overflow-y-auto">
+            <h3 className="text-lg font-semibold text-text-primary mb-4">Create API Token</h3>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-text-muted mb-1.5">
+                  Token Name <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={newTokenName}
+                  onChange={(e) => setNewTokenName(e.target.value)}
+                  placeholder="e.g. CI Deploy, Mobile App"
+                  className="w-full px-3 py-2 text-sm bg-surface-hover border border-border rounded-lg text-text-primary focus:outline-none focus:ring-1 focus:ring-accent"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-text-muted mb-2">Token Type</label>
+                <div className="flex gap-3">
+                  {(['personal', 'service'] as const).map((type) => (
+                    <button
+                      key={type}
+                      onClick={() => setNewTokenType(type)}
+                      className={`flex-1 px-4 py-2 rounded-lg text-sm font-medium transition-colors border ${
+                        newTokenType === type
+                          ? 'bg-accent/10 border-accent text-accent'
+                          : 'bg-surface-hover border-border text-text-secondary hover:text-text-primary'
+                      }`}
+                    >
+                      {type.charAt(0).toUpperCase() + type.slice(1)}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-text-muted mb-2">Scopes</label>
+                <div className="grid grid-cols-3 gap-2">
+                  {['read', 'write', 'admin', 'upload', 'stream'].map((scope) => (
+                    <label
+                      key={scope}
+                      className={`flex items-center gap-2 px-3 py-2 rounded-lg border cursor-pointer transition-colors ${
+                        newTokenScopes.includes(scope)
+                          ? 'bg-accent/10 border-accent'
+                          : 'bg-surface-hover border-border hover:border-accent/50'
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={newTokenScopes.includes(scope)}
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            setNewTokenScopes((prev) => [...prev, scope]);
+                          } else {
+                            setNewTokenScopes((prev) => prev.filter((s) => s !== scope));
+                          }
+                        }}
+                        className="sr-only"
+                      />
+                      <div className={`w-3.5 h-3.5 rounded border flex-shrink-0 flex items-center justify-center ${
+                        newTokenScopes.includes(scope) ? 'bg-accent border-accent' : 'border-border'
+                      }`}>
+                        {newTokenScopes.includes(scope) && (
+                          <svg className="w-2.5 h-2.5 text-white" fill="none" stroke="currentColor" strokeWidth={3} viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+                          </svg>
+                        )}
+                      </div>
+                      <span className="text-xs text-text-primary">{scope}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+              {(certsData?.certificates?.filter((c: any) => c.status === 'active')?.length ?? 0) > 0 && (
+                <div>
+                  <label className="block text-sm font-medium text-text-muted mb-1.5">
+                    Link to Certificate <span className="text-text-muted font-normal">(optional)</span>
+                  </label>
+                  <select
+                    value={newTokenCertId}
+                    onChange={(e) => setNewTokenCertId(e.target.value)}
+                    className="w-full px-3 py-2 text-sm bg-surface-hover border border-border rounded-lg text-text-primary focus:outline-none focus:ring-1 focus:ring-accent"
+                  >
+                    <option value="">No certificate</option>
+                    {certsData?.certificates
+                      ?.filter((c: any) => c.status === 'active')
+                      .map((c: any) => (
+                        <option key={c.id} value={c.id}>
+                          {c.commonName} ({c.certType.replace('_', ' ')})
+                        </option>
+                      ))}
+                  </select>
+                </div>
+              )}
+              <div>
+                <label className="block text-sm font-medium text-text-muted mb-1.5">
+                  Expiration <span className="text-text-muted font-normal">(days, optional)</span>
+                </label>
+                <input
+                  type="number"
+                  value={newTokenExpiresIn}
+                  onChange={(e) => setNewTokenExpiresIn(e.target.value ? parseInt(e.target.value) : '')}
+                  placeholder="Leave empty for no expiration"
+                  min={1}
+                  className="w-full px-3 py-2 text-sm bg-surface-hover border border-border rounded-lg text-text-primary focus:outline-none focus:ring-1 focus:ring-accent"
+                />
+              </div>
+            </div>
+            <div className="flex gap-3 mt-6">
+              <button
+                onClick={() => setShowCreateTokenModal(false)}
+                className="flex-1 py-2 bg-surface-hover hover:bg-border text-text-primary rounded-lg text-sm transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() =>
+                  createTokenMutation.mutate({
+                    name: newTokenName,
+                    scopes: newTokenScopes,
+                    tokenType: newTokenType,
+                    ...(newTokenCertId ? { certificateId: newTokenCertId } : {}),
+                    ...(newTokenExpiresIn !== '' ? { expiresIn: newTokenExpiresIn as number } : {}),
+                  }, {
+                    onSuccess: () => setShowCreateTokenModal(false),
+                  })
+                }
+                disabled={createTokenMutation.isPending || !newTokenName.trim() || newTokenScopes.length === 0}
+                className="flex-1 py-2 bg-accent text-text-inverse rounded-lg hover:bg-accent/90 transition-colors text-sm disabled:opacity-50"
+              >
+                {createTokenMutation.isPending ? 'Creating...' : 'Create Token'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Generate Invite Code Modal */}
+      {showCreateInviteModal && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-surface border border-border rounded-xl w-full max-w-md p-6">
+            <h3 className="text-lg font-semibold text-text-primary mb-4">Generate Invite Code</h3>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-text-muted mb-1.5">
+                  Name / Label <span className="text-text-muted font-normal">(optional)</span>
+                </label>
+                <input
+                  type="text"
+                  value={newInviteName}
+                  onChange={(e) => setNewInviteName(e.target.value)}
+                  placeholder="e.g. Friend invite, Beta access"
+                  className="w-full px-3 py-2 text-sm bg-surface-hover border border-border rounded-lg text-text-primary focus:outline-none focus:ring-1 focus:ring-accent"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-text-muted mb-1.5">
+                  Description <span className="text-text-muted font-normal">(optional)</span>
+                </label>
+                <input
+                  type="text"
+                  value={newInviteDescription}
+                  onChange={(e) => setNewInviteDescription(e.target.value)}
+                  placeholder="Internal note about this invite"
+                  className="w-full px-3 py-2 text-sm bg-surface-hover border border-border rounded-lg text-text-primary focus:outline-none focus:ring-1 focus:ring-accent"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-text-muted mb-1.5">Max Uses</label>
+                <input
+                  type="number"
+                  value={newInviteMaxUses}
+                  onChange={(e) => setNewInviteMaxUses(e.target.value ? parseInt(e.target.value) : '')}
+                  min={1}
+                  placeholder="Default: 1"
+                  className="w-full px-3 py-2 text-sm bg-surface-hover border border-border rounded-lg text-text-primary focus:outline-none focus:ring-1 focus:ring-accent"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-text-muted mb-1.5">
+                  Expiration <span className="text-text-muted font-normal">(days, optional)</span>
+                </label>
+                <input
+                  type="number"
+                  value={newInviteExpiresIn}
+                  onChange={(e) => setNewInviteExpiresIn(e.target.value ? parseInt(e.target.value) : '')}
+                  placeholder="Leave empty for no expiration"
+                  min={1}
+                  className="w-full px-3 py-2 text-sm bg-surface-hover border border-border rounded-lg text-text-primary focus:outline-none focus:ring-1 focus:ring-accent"
+                />
+              </div>
+            </div>
+            <div className="flex gap-3 mt-6">
+              <button
+                onClick={() => setShowCreateInviteModal(false)}
+                className="flex-1 py-2 bg-surface-hover hover:bg-border text-text-primary rounded-lg text-sm transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() =>
+                  createInviteCodeMutation.mutate({
+                    ...(newInviteMaxUses !== '' ? { maxUses: newInviteMaxUses as number } : {}),
+                    ...(newInviteExpiresIn !== '' ? { expiresIn: newInviteExpiresIn as number } : {}),
+                    ...(newInviteName || newInviteDescription
+                      ? { metadata: { name: newInviteName || undefined, description: newInviteDescription || undefined } }
+                      : {}),
+                  }, {
+                    onSuccess: () => setShowCreateInviteModal(false),
+                  })
+                }
+                disabled={createInviteCodeMutation.isPending}
+                className="flex-1 py-2 bg-accent text-text-inverse rounded-lg hover:bg-accent/90 transition-colors text-sm disabled:opacity-50"
+              >
+                {createInviteCodeMutation.isPending ? 'Generating...' : 'Generate Code'}
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -1569,6 +2606,70 @@ function ShieldIcon({ className }: { className?: string }) {
   return (
     <svg className={className} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
       <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" />
+    </svg>
+  );
+}
+
+function ShieldCheckIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="currentColor">
+      <path d="M12 1L3 5v6c0 5.25 3.75 10.15 9 11.35C17.25 21.15 21 16.25 21 11V5l-9-4zm-1 13l-3-3 1.41-1.41L11 11.17l4.59-4.58L17 8l-6 6z" />
+    </svg>
+  );
+}
+
+function CertificateIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+    </svg>
+  );
+}
+
+function CodeSignIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M17.25 6.75L22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3l-4.5 16.5" />
+    </svg>
+  );
+}
+
+function UserCertIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />
+    </svg>
+  );
+}
+
+function ServerCertIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M5.25 14.25h13.5m-13.5 0a3 3 0 01-3-3m3 3a3 3 0 100 6h13.5a3 3 0 100-6m-16.5-3a3 3 0 013-3h13.5a3 3 0 013 3m-19.5 0a4.5 4.5 0 01.9-2.7L5.737 5.1a3.375 3.375 0 012.7-1.35h7.126c1.062 0 2.062.5 2.7 1.35l2.587 3.45a4.5 4.5 0 01.9 2.7m0 0a3 3 0 01-3 3m0 3h.008v.008h-.008v-.008zm0-6h.008v.008h-.008v-.008zm-3 6h.008v.008h-.008v-.008zm0-6h.008v.008h-.008v-.008z" />
+    </svg>
+  );
+}
+
+function SessionIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M9 17.25v1.007a3 3 0 01-.879 2.122L7.5 21h9l-.621-.621A3 3 0 0115 18.257V17.25m6-12V15a2.25 2.25 0 01-2.25 2.25H5.25A2.25 2.25 0 013 15V5.25m18 0A2.25 2.25 0 0018.75 3H5.25A2.25 2.25 0 003 5.25m18 0V12a2.25 2.25 0 01-2.25 2.25H5.25A2.25 2.25 0 013 12V5.25" />
+    </svg>
+  );
+}
+
+function TokenIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z" />
+    </svg>
+  );
+}
+
+function InviteCodeIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 01-2.25 2.25h-15a2.25 2.25 0 01-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25m19.5 0v.243a2.25 2.25 0 01-1.07 1.916l-7.5 4.615a2.25 2.25 0 01-2.36 0L3.32 8.91a2.25 2.25 0 01-1.07-1.916V6.75" />
     </svg>
   );
 }

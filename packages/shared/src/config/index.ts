@@ -4,7 +4,7 @@ import type { HosterConfig, ThemeId, ColorMode } from '../types/index.js';
 export const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
 
-  // Database (optional - will fallback to localhost PostgreSQL or SQLite)
+  // Database (optional - will fallback to localhost PostgreSQL)
   DATABASE_URL: z.string().url().optional(),
 
   // Redis (optional - will fallback to in-memory cache)
@@ -92,6 +92,11 @@ export const COLLECTIONS = {
   VIDEO_FOLLOW: 'io.exprsn.video.follow',
   VIDEO_SOUND: 'io.exprsn.video.sound',
   VIDEO_DUET: 'io.exprsn.video.duet',
+} as const;
+
+export const DID_EXPRSN_BOOST = {
+  FEED_MULTIPLIER: 1.15,
+  SEARCH_MULTIPLIER: 1.15,
 } as const;
 
 export const CACHE_TTL = {

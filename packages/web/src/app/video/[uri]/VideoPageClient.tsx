@@ -8,12 +8,105 @@ import { Sidebar } from '@/components/Sidebar';
 import { useLoginModal } from '@/components/LoginModal';
 import { VideoPlayer } from '@/components/VideoPlayer';
 import { CommentThread } from '@/components/comments/CommentThread';
-import { api } from '@/lib/api';
+import { api, API_BASE } from '@/lib/api';
 import { useAuth } from '@/lib/auth-context';
 import { useVideoShare } from '@/hooks/useVideoShare';
 import { formatCount } from '@/lib/utils';
 import type { CommentsPosition } from '@exprsn/shared';
 import toast from 'react-hot-toast';
+
+// ---------------------------------------------------------------------------
+// Content integrity panel
+// ---------------------------------------------------------------------------
+interface ContentIntegrityProps {
+  video: {
+    author: { handle: string };
+    signature?: {
+      signed?: boolean;
+      verified?: boolean;
+      timestamp?: string;
+    };
+  };
+}
+
+function ContentIntegritySection({ video }: ContentIntegrityProps) {
+  const [showIntegrity, setShowIntegrity] = useState(false);
+
+  if (!video.signature?.signed) return null;
+
+  return (
+    <div className="border-t border-border pt-3 mt-3">
+      <button
+        onClick={() => setShowIntegrity((v) => !v)}
+        className="flex items-center gap-2 text-sm text-text-muted hover:text-text-secondary transition-colors"
+        aria-expanded={showIntegrity}
+        aria-controls="content-integrity-panel"
+      >
+        <ContentIntegrityShieldIcon className="w-4 h-4" />
+        <span>Content Integrity</span>
+        <svg
+          className={`w-3 h-3 transition-transform ${showIntegrity ? 'rotate-180' : ''}`}
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={2}
+          viewBox="0 0 24 24"
+          aria-hidden="true"
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
+        </svg>
+      </button>
+
+      {showIntegrity && (
+        <div
+          id="content-integrity-panel"
+          className="mt-2 p-3 bg-surface rounded-lg text-xs space-y-2"
+        >
+          <div className="flex justify-between">
+            <span className="text-text-muted">Signed by</span>
+            <span className="text-text-primary">@{video.author.handle}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-text-muted">Signature</span>
+            <span
+              className={
+                video.signature.verified ? 'text-green-500' : 'text-amber-500'
+              }
+            >
+              {video.signature.verified ? 'Valid' : 'Unverified'}
+            </span>
+          </div>
+          {video.signature.timestamp && (
+            <div className="flex justify-between">
+              <span className="text-text-muted">Signed at</span>
+              <span className="text-text-primary">
+                {new Date(video.signature.timestamp).toLocaleString()}
+              </span>
+            </div>
+          )}
+          <Link
+            href="/about/verification"
+            className="text-accent hover:underline block"
+          >
+            Learn about content integrity &rarr;
+          </Link>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ContentIntegrityShieldIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      aria-hidden="true"
+    >
+      <path d="M12 1L3 5v6c0 5.25 3.75 10.15 9 11.35C17.25 21.15 21 16.25 21 11V5l-9-4zm-1 13l-3-3 1.41-1.41L11 11.17l4.59-4.58L17 8l-6 6z" />
+    </svg>
+  );
+}
 
 interface VideoPageClientProps {
   uri: string;
@@ -137,7 +230,7 @@ export function VideoPageClient({ uri }: VideoPageClientProps) {
     if (!video) return '';
     const url = video.video?.hlsPlaylist || video.hlsPlaylist || video.video?.cdnUrl || video.cdnUrl;
     if (!url) return '';
-    return url.startsWith('/') ? `http://localhost:3002${url}` : url;
+    return url.startsWith('/') ? `${API_BASE}${url}` : url;
   };
 
   const renderVideoContent = () => {
@@ -314,6 +407,7 @@ export function VideoPageClient({ uri }: VideoPageClientProps) {
             Opened from a shared link. If it lands, follow the creator or pass it on.
           </p>
         )}
+        <ContentIntegritySection video={video} />
       </div>
     );
   };

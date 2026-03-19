@@ -502,7 +502,7 @@ async function generateECDSACertificate(options: {
   const subjectAttrs = buildSubjectAttributes(subject);
 
   // Create version (v3 = 2)
-  const versionAsn = asn1.create(asn1.Class.CONTEXT, 0, true, [
+  const versionAsn = asn1.create(asn1.Class.CONTEXT_SPECIFIC, 0, true, [
     asn1.create(asn1.Class.UNIVERSAL, asn1.Type.INTEGER, false, asn1.integerToDer(2).getBytes()),
   ]);
 
@@ -624,14 +624,14 @@ async function generateECDSACertificate(options: {
   if (subjectAltNames && subjectAltNames.length > 0) {
     const sanEntries = subjectAltNames.map((san) => {
       if (san.startsWith('DNS:')) {
-        return asn1.create(asn1.Class.CONTEXT, 2, false, san.substring(4));
+        return asn1.create(asn1.Class.CONTEXT_SPECIFIC, 2, false, san.substring(4));
       } else if (san.startsWith('email:')) {
-        return asn1.create(asn1.Class.CONTEXT, 1, false, san.substring(6));
+        return asn1.create(asn1.Class.CONTEXT_SPECIFIC, 1, false, san.substring(6));
       } else if (san.startsWith('URI:')) {
-        return asn1.create(asn1.Class.CONTEXT, 6, false, san.substring(4));
+        return asn1.create(asn1.Class.CONTEXT_SPECIFIC, 6, false, san.substring(4));
       }
       // Default to DNS
-      return asn1.create(asn1.Class.CONTEXT, 2, false, san);
+      return asn1.create(asn1.Class.CONTEXT_SPECIFIC, 2, false, san);
     });
 
     extensions.push(
@@ -650,7 +650,7 @@ async function generateECDSACertificate(options: {
   // Build extensions wrapper
   const extensionsAsn =
     extensions.length > 0
-      ? asn1.create(asn1.Class.CONTEXT, 3, true, [
+      ? asn1.create(asn1.Class.CONTEXT_SPECIFIC, 3, true, [
           asn1.create(asn1.Class.UNIVERSAL, asn1.Type.SEQUENCE, true, extensions),
         ])
       : null;

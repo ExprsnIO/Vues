@@ -207,12 +207,7 @@ certificatesDidRoutes.post('/io.exprsn.did.revokeDid', authMiddleware, async (c)
     const [adminUser] = await db
       .select()
       .from(adminUsers)
-      .where(
-        and(
-          eq(adminUsers.userDid, userDid),
-          eq(adminUsers.status, 'active')
-        )
-      )
+      .where(eq(adminUsers.userDid, userDid))
       .limit(1);
 
     // Only super_admin and admin roles can revoke other users' DIDs

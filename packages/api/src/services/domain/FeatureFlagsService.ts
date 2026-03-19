@@ -306,16 +306,15 @@ export class FeatureFlagsService {
       return cached;
     }
 
-    // Get domain settings
+    // Get domain features
     const domain = await this.db.query.domains.findFirst({
       where: eq(schema.domains.id, domainId),
     });
 
     const features = new Map<string, DomainFeatureOverride>();
 
-    if (domain) {
-      const settings = (domain.settings as Record<string, unknown>) || {};
-      const featureOverrides = (settings.features as Record<string, DomainFeatureOverride>) || {};
+    if (domain && domain.features) {
+      const featureOverrides = domain.features as unknown as Record<string, DomainFeatureOverride>;
 
       for (const [key, override] of Object.entries(featureOverrides)) {
         features.set(key, override);
@@ -466,8 +465,7 @@ export class FeatureFlagsService {
       throw new Error('Domain not found');
     }
 
-    const settings = (domain.settings as Record<string, unknown>) || {};
-    const features = (settings.features as Record<string, DomainFeatureOverride>) || {};
+    const features = (domain.features as unknown as Record<string, DomainFeatureOverride>) || {};
 
     // Merge with existing override
     const existing = features[featureKey] || { featureKey, enabled: false };
@@ -482,7 +480,7 @@ export class FeatureFlagsService {
     await this.db
       .update(schema.domains)
       .set({
-        settings: { ...settings, features },
+        features: features as unknown as schema.DomainFeatures,
         updatedAt: new Date(),
       })
       .where(eq(schema.domains.id, domainId));
@@ -504,15 +502,14 @@ export class FeatureFlagsService {
       throw new Error('Domain not found');
     }
 
-    const settings = (domain.settings as Record<string, unknown>) || {};
-    const features = (settings.features as Record<string, DomainFeatureOverride>) || {};
+    const features = (domain.features as unknown as Record<string, DomainFeatureOverride>) || {};
 
     delete features[featureKey];
 
     await this.db
       .update(schema.domains)
       .set({
-        settings: { ...settings, features },
+        features: features as unknown as schema.DomainFeatures,
         updatedAt: new Date(),
       })
       .where(eq(schema.domains.id, domainId));
@@ -538,8 +535,7 @@ export class FeatureFlagsService {
       throw new Error('Domain not found');
     }
 
-    const settings = (domain.settings as Record<string, unknown>) || {};
-    const features = (settings.features as Record<string, DomainFeatureOverride>) || {};
+    const features = (domain.features as unknown as Record<string, DomainFeatureOverride>) || {};
 
     for (const override of overrides) {
       const existing = features[override.featureKey] || { featureKey: override.featureKey };
@@ -555,7 +551,7 @@ export class FeatureFlagsService {
     await this.db
       .update(schema.domains)
       .set({
-        settings: { ...settings, features },
+        features: features as unknown as schema.DomainFeatures,
         updatedAt: new Date(),
       })
       .where(eq(schema.domains.id, domainId));

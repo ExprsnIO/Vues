@@ -5,8 +5,14 @@ import { uploadRateLimiter, recordUpload, getUploadQuota, sanitizeText, sanitize
 import { db, videos, users, likes, comments, commentReactions, sounds, follows, trendingVideos, userInteractions, blocks, mutes, userContentFeedback, uploadJobs } from '../db/index.js';
 import { createUserPreferenceModel } from '../services/preferences/index.js';
 import { createForYouAlgorithm } from '../services/feed/index.js';
+import { RepositoryService } from '../services/repository/index.js';
+import { queueVideoSegmentPrefetch } from '../services/prefetch/producer.js';
+import { trackUserActivity } from '../services/prefetch/activity-bridge.js';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import * as schema from '../db/schema.js';
+
+// Initialize repository service for AT Protocol record operations
+const repositoryService = new RepositoryService();
 
 // Initialize preference model and FYP algorithm for personalized feeds
 const preferenceModel = createUserPreferenceModel(db as PostgresJsDatabase<typeof schema>);
@@ -15,6 +21,7 @@ import { cacheService, CacheKeys, CACHE_TTL } from '../cache/redis.js';
 import { eq, desc, inArray, and, sql, lt, asc, or, ilike } from 'drizzle-orm';
 import type { VideoView, AuthorView, FeedResult, CommentView, ReactionType, CommentSortType } from '@exprsn/shared';
 import { nanoid } from 'nanoid';
+import { createMentionService } from '../services/social/MentionService.js';
 
 export const xrpcRouter = new Hono();
 
@@ -609,7 +616,7 @@ xrpcRouter.post('/io.exprsn.video.createPost', authMiddleware, async (c) => {
 
   // Log suspicious input attempts
   if (data.caption && isSuspiciousInput(data.caption)) {
-    const clientIP = c.req.header('x-forwarded-for')?.split(',')[0].trim() || 'unknown';
+    const clientIP = c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown';
     logSuspiciousActivity(clientIP, '/io.exprsn.video.createPost', 'Suspicious caption', data.caption);
   }
 
@@ -629,8 +636,6 @@ xrpcRouter.post('/io.exprsn.video.createPost', authMiddleware, async (c) => {
   if (uploadJob.status !== 'completed') {
     throw new HTTPException(400, {
       message: `Upload not ready. Status: ${uploadJob.status}`,
-      status: uploadJob.status,
-      progress: uploadJob.progress,
     });
   }
 
@@ -673,8 +678,8 @@ xrpcRouter.post('/io.exprsn.video.createPost', authMiddleware, async (c) => {
     .where(eq(users.did, userDid));
 
   // Invalidate feed cache
-  await cacheService.delete(CacheKeys.trendingFeed());
-  await cacheService.delete(CacheKeys.followingFeed(userDid));
+  await cacheService.del(CacheKeys.feedTrending());
+  await cacheService.del(CacheKeys.feedFollowing(userDid));
 
   return c.json({
     uri: videoUri,
@@ -690,17 +695,20 @@ xrpcRouter.post('/io.exprsn.video.createPost', authMiddleware, async (c) => {
  * POST /xrpc/io.exprsn.video.like
  */
 xrpcRouter.post('/io.exprsn.video.like', authMiddleware, async (c) => {
-  const session = c.get('session');
+  const userDid = c.get('did');
   const { uri, cid } = await c.req.json<{ uri: string; cid: string }>();
 
   if (!uri || !cid) {
     throw new HTTPException(400, { message: 'URI and CID are required' });
   }
 
-  // @ts-expect-error - Agent integration not yet implemented
-  const agent = session.agent;
-  const result = await agent.api.com.atproto.repo.createRecord({
-    repo: session.did,
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
+  // Create like record using repository service
+  const result = await repositoryService.createRecord({
+    did: userDid,
     collection: 'io.exprsn.video.like',
     record: {
       $type: 'io.exprsn.video.like',
@@ -712,7 +720,28 @@ xrpcRouter.post('/io.exprsn.video.like', authMiddleware, async (c) => {
   // Increment cached like count
   await cacheService.incrementCounter(CacheKeys.likeCount(uri));
 
-  return c.json({ uri: result.data.uri });
+  // Send like notification to video author (fire-and-forget)
+  db.select({ authorDid: videos.authorDid })
+    .from(videos)
+    .where(eq(videos.uri, uri))
+    .limit(1)
+    .then(([videoAuthor]) => {
+      if (videoAuthor && videoAuthor.authorDid !== userDid) {
+        return db.insert(schema.notifications).values({
+          id: nanoid(),
+          userDid: videoAuthor.authorDid,
+          actorDid: userDid,
+          reason: 'like',
+          reasonSubject: uri,
+          isRead: false,
+          createdAt: new Date(),
+          indexedAt: new Date(),
+        });
+      }
+    })
+    .catch(() => {});
+
+  return c.json({ uri: result.uri });
 });
 
 /**
@@ -720,23 +749,30 @@ xrpcRouter.post('/io.exprsn.video.like', authMiddleware, async (c) => {
  * POST /xrpc/io.exprsn.video.unlike
  */
 xrpcRouter.post('/io.exprsn.video.unlike', authMiddleware, async (c) => {
-  const session = c.get('session');
+  const userDid = c.get('did');
   const { likeUri } = await c.req.json<{ likeUri: string }>();
 
   if (!likeUri) {
     throw new HTTPException(400, { message: 'Like URI is required' });
   }
 
+  if (!userDid) {
+    throw new HTTPException(401, { message: 'Authentication required' });
+  }
+
   // Parse the URI to get rkey
   const parts = likeUri.split('/');
   const rkey = parts[parts.length - 1];
 
-  // @ts-expect-error - Agent integration not yet implemented
-  const agent = session.agent;
-  await agent.api.com.atproto.repo.deleteRecord({
-    repo: session.did,
+  if (!rkey) {
+    throw new HTTPException(400, { message: 'Invalid like URI' });
+  }
+
+  // Delete like record using repository service
+  await repositoryService.deleteRecord({
+    did: userDid,
     collection: 'io.exprsn.video.like',
-    rkey: rkey!,
+    rkey,
   });
 
   return c.json({ success: true });
@@ -847,6 +883,24 @@ xrpcRouter.post('/io.exprsn.video.trackView', optionalAuthMiddleware, async (c) 
         createdAt: new Date(),
       })
       .onConflictDoNothing();
+
+    // Track activity for prefetch strategy
+    trackUserActivity(userDid);
+  }
+
+  // Queue video segment prefetch if HLS playlist is available (fire-and-forget)
+  if (videoUri) {
+    try {
+      const videoRecord = await db.query.videos.findFirst({
+        where: eq(videos.uri, videoUri),
+        columns: { hlsPlaylist: true },
+      });
+      if (videoRecord?.hlsPlaylist) {
+        queueVideoSegmentPrefetch(videoUri, userDid || 'anon', videoRecord.hlsPlaylist).catch(() => {});
+      }
+    } catch {
+      // Don't block view tracking on prefetch failure
+    }
   }
 
   return c.json({ success: true });
@@ -1040,7 +1094,7 @@ xrpcRouter.post('/io.exprsn.video.createComment', authMiddleware, async (c) => {
 
   // Log suspicious input attempts
   if (isSuspiciousInput(body.text)) {
-    const clientIP = c.req.header('x-forwarded-for')?.split(',')[0].trim() || 'unknown';
+    const clientIP = c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown';
     logSuspiciousActivity(clientIP, '/io.exprsn.video.createComment', 'Suspicious comment text', body.text);
   }
 
@@ -1102,6 +1156,27 @@ xrpcRouter.post('/io.exprsn.video.createComment', authMiddleware, async (c) => {
       .update(comments)
       .set({ replyCount: sql`${comments.replyCount} + 1` })
       .where(eq(comments.uri, parentUri));
+  }
+
+  // Parse @mentions and create notifications (non-blocking)
+  createMentionService(db as PostgresJsDatabase<typeof schema>)
+    .processMentions(text, commentUri, 'comment', userDid)
+    .catch((err) => console.error('[xrpc] Mention notification failed:', err));
+
+  // Send comment notification to video author (fire-and-forget)
+  if (video.authorDid !== userDid) {
+    db.insert(schema.notifications).values({
+      id: nanoid(),
+      userDid: video.authorDid,
+      actorDid: userDid,
+      reason: 'comment',
+      reasonSubject: commentUri,
+      targetUri: videoUri,
+      subjectType: 'video',
+      isRead: false,
+      createdAt: new Date(),
+      indexedAt: new Date(),
+    }).catch(() => {});
   }
 
   return c.json({ uri: commentUri, cid: commentCid });
@@ -1895,7 +1970,10 @@ async function getSoundFeed(
     const cursorTs = new Date(parseInt(tsStr!, 10));
     whereCondition = and(
       eq(videos.soundUri, soundId),
-      sql`(${videos.likeCount} < ${cursorLikes}) OR (${videos.likeCount} = ${cursorLikes} AND ${videos.createdAt} < ${cursorTs})`
+      or(
+        lt(videos.likeCount, cursorLikes),
+        and(eq(videos.likeCount, cursorLikes), lt(videos.createdAt, cursorTs))
+      )
     )!;
   }
 
@@ -2003,3 +2081,59 @@ async function hydrateVideos(
     })
     .filter((v): v is NonNullable<typeof v> => v !== null);
 }
+
+// =============================================================================
+// Signature Verification Endpoint (did:exprsn content signing)
+// =============================================================================
+
+/**
+ * Get cryptographic signature info for a video post
+ * GET /xrpc/io.exprsn.video.getSignatureInfo
+ *
+ * Returns signature details and signer identity for did:exprsn signed video posts.
+ */
+xrpcRouter.get('/io.exprsn.video.getSignatureInfo', optionalAuthMiddleware, async (c) => {
+  const uri = c.req.query('uri');
+  if (!uri) return c.json({ error: 'uri required' }, 400);
+
+  const [video] = await db.select({
+    contentSignature: videos.contentSignature,
+    contentSignatureTimestamp: videos.contentSignatureTimestamp,
+    signingCertificateId: videos.signingCertificateId,
+    signatureVerified: videos.signatureVerified,
+    authorDid: videos.authorDid,
+  }).from(videos).where(eq(videos.uri, uri)).limit(1);
+
+  if (!video) return c.json({ error: 'Video not found' }, 404);
+
+  if (!video.contentSignature) {
+    return c.json({ signed: false, verified: false });
+  }
+
+  // Look up signer info from certificate chain
+  let signer = null;
+  if (video.signingCertificateId) {
+    const [cert] = await db.select().from(schema.caEntityCertificates)
+      .where(eq(schema.caEntityCertificates.id, video.signingCertificateId)).limit(1);
+    const [user] = await db.select({ handle: users.handle, displayName: users.displayName })
+      .from(users).where(eq(users.did, video.authorDid)).limit(1);
+
+    if (cert) {
+      signer = {
+        did: video.authorDid,
+        handle: user?.handle,
+        certificateFingerprint: cert.fingerprint,
+        certificateIssuer: cert.issuerId || 'Vues Root CA',
+        certificateStatus: cert.status,
+      };
+    }
+  }
+
+  return c.json({
+    signed: true,
+    verified: video.signatureVerified,
+    signature: video.contentSignature,
+    timestamp: video.contentSignatureTimestamp,
+    signer,
+  });
+});
