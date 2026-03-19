@@ -80,5 +80,5 @@ sprints/
 exprsn-competitive-brief.html
 exprsn-investor-pitch.html
 
-# Claude Code worktrees
-.claude/worktrees/
+# Claude Code
+.claude/
