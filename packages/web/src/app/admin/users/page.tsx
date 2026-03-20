@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { Suspense, useMemo, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import Link from 'next/link';
 import { api } from '@/lib/api';
@@ -31,6 +31,14 @@ type ModalType = 'suspend' | 'ban' | null;
 type ModalUser = { did: string; handle: string; displayName?: string } | null;
 
 export default function AdminUsersPage() {
+  return (
+    <Suspense>
+      <AdminUsersContent />
+    </Suspense>
+  );
+}
+
+function AdminUsersContent() {
   const queryClient = useQueryClient();
   const [activeModal, setActiveModal] = useState<ModalType>(null);
   const [selectedUser, setSelectedUser] = useState<ModalUser>(null);

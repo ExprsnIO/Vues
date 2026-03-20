@@ -1,3 +1,4 @@
+import { Suspense } from 'react';
 import type { Metadata, ResolvingMetadata } from 'next';
 import { VideoPageClient } from './VideoPageClient';
 
@@ -117,5 +118,5 @@ export default async function VideoPage({ params }: VideoPageProps) {
   const resolvedParams = await params;
   const uri = decodeURIComponent(resolvedParams.uri);
 
-  return <VideoPageClient uri={uri} />;
+  return <Suspense><VideoPageClient uri={uri} /></Suspense>;
 }

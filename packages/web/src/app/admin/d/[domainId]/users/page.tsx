@@ -1,7 +1,7 @@
 // @ts-nocheck
 'use client';
 
-import { useState, useEffect, useMemo } from 'react';
+import { Suspense, useState, useEffect, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
@@ -41,6 +41,14 @@ interface DomainUser {
 }
 
 export default function DomainUsersPage() {
+  return (
+    <Suspense>
+      <DomainUsersContent />
+    </Suspense>
+  );
+}
+
+function DomainUsersContent() {
   const params = useParams();
   const domainId = params.domainId as string;
   const { setSelectedDomain } = useAdminDomain();

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { Suspense, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
@@ -23,7 +23,9 @@ export default function ModUsersPage() {
     <div className="flex min-h-screen bg-background">
       <Sidebar />
       <main className="flex-1 ml-0 lg:ml-60 pt-14 lg:pt-0 pb-16 lg:pb-0">
-        <UsersContent />
+        <Suspense>
+          <UsersContent />
+        </Suspense>
       </main>
     </div>
   );

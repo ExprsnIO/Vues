@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo } from 'react';
+import { Suspense, useState, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api';
 import { ExportButton } from '@/components/admin/ExportModal';
@@ -9,6 +9,14 @@ import { useAdminFilters } from '@/hooks/useAdminFilters';
 import toast from 'react-hot-toast';
 
 export default function AdminReportsPage() {
+  return (
+    <Suspense>
+      <AdminReportsContent />
+    </Suspense>
+  );
+}
+
+function AdminReportsContent() {
   const [selectedReport, setSelectedReport] = useState<any>(null);
   const queryClient = useQueryClient();
 

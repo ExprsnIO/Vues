@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo } from 'react';
+import { Suspense, useState, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api';
 import { FilterBar } from '@/components/admin/ui/FilterBar';
@@ -31,6 +31,14 @@ interface ContentItem {
 }
 
 export default function AdminContentPage() {
+  return (
+    <Suspense>
+      <AdminContentContent />
+    </Suspense>
+  );
+}
+
+function AdminContentContent() {
   const [selectedContent, setSelectedContent] = useState<ContentItem | null>(null);
   const [actionModal, setActionModal] = useState<'remove' | 'restore' | null>(null);
   const queryClient = useQueryClient();
