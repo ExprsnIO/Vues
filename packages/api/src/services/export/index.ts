@@ -1,4 +1,4 @@
-import * as XLSX from 'xlsx';
+import ExcelJS from 'exceljs';
 import Database from 'better-sqlite3';
 import { db } from '../../db/index.js';
 import {
@@ -63,31 +63,31 @@ function toCSV(data: Record<string, unknown>[], columns?: string[]): string {
 /**
  * Convert data array to XLSX buffer
  */
-function toXLSX(data: Record<string, unknown>[], sheetName: string, columns?: string[]): Buffer {
-  const workbook = XLSX.utils.book_new();
+async function toXLSX(data: Record<string, unknown>[], sheetName: string, columns?: string[]): Promise<Buffer> {
+  const workbook = new ExcelJS.Workbook();
+  const worksheet = workbook.addWorksheet(sheetName);
 
   if (data.length === 0) {
-    const worksheet = XLSX.utils.aoa_to_sheet([columns || ['No data']]);
-    XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
+    worksheet.addRow(columns || ['No data']);
   } else {
     const headers = columns || Object.keys(data[0] || {});
-    const rows = data.map((row) => headers.map((h) => {
-      const value = row[h];
-      if (value === null || value === undefined) return '';
-      if (typeof value === 'object') return JSON.stringify(value);
-      return value;
-    }));
 
-    const worksheet = XLSX.utils.aoa_to_sheet([headers, ...rows]);
+    // Set column widths and headers
+    worksheet.columns = headers.map((h) => ({ header: h, width: Math.max(h.length, 15) }));
 
-    // Set column widths
-    const colWidths = headers.map((h) => ({ wch: Math.max(h.length, 15) }));
-    worksheet['!cols'] = colWidths;
-
-    XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
+    for (const row of data) {
+      const values = headers.map((h) => {
+        const value = row[h];
+        if (value === null || value === undefined) return '';
+        if (typeof value === 'object') return JSON.stringify(value);
+        return value;
+      });
+      worksheet.addRow(values);
+    }
   }
 
-  return Buffer.from(XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' }));
+  const arrayBuffer = await workbook.xlsx.writeBuffer();
+  return Buffer.from(arrayBuffer);
 }
 
 /**
@@ -151,12 +151,12 @@ function toSQLite(data: Record<string, unknown>[], tableName: string, columns?: 
 /**
  * Export data in the specified format
  */
-function exportData(
+async function exportData(
   data: Record<string, unknown>[],
   options: ExportOptions,
   tableName: string,
   filenamePrefix: string
-): ExportResult {
+): Promise<ExportResult> {
   const timestamp = new Date().toISOString().slice(0, 10);
 
   switch (options.format) {
@@ -170,7 +170,7 @@ function exportData(
       };
     }
     case 'xlsx': {
-      const xlsx = toXLSX(data, tableName, options.columns);
+      const xlsx = await toXLSX(data, tableName, options.columns);
       return {
         buffer: xlsx,
         filename: `${filenamePrefix}_${timestamp}.xlsx`,

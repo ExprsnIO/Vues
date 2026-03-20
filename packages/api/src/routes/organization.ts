@@ -38,7 +38,7 @@ import {
 } from '../services/bulk-import.js';
 import { authMiddleware, optionalAuthMiddleware } from '../auth/middleware.js';
 import bcrypt from 'bcryptjs';
-import * as XLSX from 'xlsx';
+import ExcelJS from 'exceljs';
 import { ExprsnDidService } from '../services/did/index.js';
 import { zValidator, getValidatedData } from '../utils/zod-validator.js';
 import {
@@ -1066,7 +1066,7 @@ organizationRoutes.get('/io.exprsn.org.import.template', authMiddleware, async (
   const format = c.req.query('format') || 'csv';
 
   if (format === 'xlsx') {
-    const buffer = generateXLSXTemplate();
+    const buffer = await generateXLSXTemplate();
     return new Response(buffer, {
       headers: {
         'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -1405,10 +1405,14 @@ organizationRoutes.get('/io.exprsn.org.members.export', authMiddleware, async (c
   }));
 
   if (format === 'xlsx') {
-    const ws = XLSX.utils.json_to_sheet(exportData);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Members');
-    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Members');
+    const headers = Object.keys(exportData[0] || {});
+    ws.columns = headers.map((h) => ({ header: h, key: h, width: 20 }));
+    for (const row of exportData) {
+      ws.addRow(row);
+    }
+    const buffer = Buffer.from(await wb.xlsx.writeBuffer());
 
     return new Response(buffer, {
       headers: {

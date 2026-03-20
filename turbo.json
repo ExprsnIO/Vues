@@ -5,10 +5,6 @@
       "dependsOn": ["^build"],
       "outputs": ["dist/**", ".next/**", "!.next/cache/**"]
     },
-    "@exprsn/setup#build": {
-      "dependsOn": [],
-      "outputs": []
-    },
     "dev": {
       "cache": false,
       "persistent": true

@@ -1,4 +1,4 @@
-import * as XLSX from 'xlsx';
+import ExcelJS from 'exceljs';
 import { parse as csvParse } from 'csv-parse/sync';
 import Database from 'better-sqlite3';
 import { nanoid } from 'nanoid';
@@ -206,19 +206,38 @@ export function validateRow(row: Record<string, unknown>, rowNumber: number): Va
 /**
  * Parse XLSX file and extract rows
  */
-export function parseXLSX(buffer: Buffer): Record<string, unknown>[] {
-  const workbook = XLSX.read(buffer, { type: 'buffer' });
-  const firstSheetName = workbook.SheetNames[0];
+export async function parseXLSX(buffer: Buffer): Promise<Record<string, unknown>[]> {
+  const workbook = new ExcelJS.Workbook();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  await workbook.xlsx.load(buffer as any);
 
-  if (!firstSheetName) {
+  const worksheet = workbook.worksheets[0];
+  if (!worksheet || worksheet.rowCount === 0) {
     throw new Error('XLSX file has no sheets');
   }
 
-  const worksheet = workbook.Sheets[firstSheetName];
-  if (!worksheet) {
-    throw new Error('XLSX worksheet not found');
+  const headers: string[] = [];
+  const headerRow = worksheet.getRow(1);
+  headerRow.eachCell((cell, colNumber) => {
+    headers[colNumber - 1] = String(cell.value ?? '');
+  });
+
+  if (headers.length === 0) {
+    throw new Error('XLSX worksheet has no headers');
   }
-  const rows = XLSX.utils.sheet_to_json(worksheet) as Record<string, unknown>[];
+
+  const rows: Record<string, unknown>[] = [];
+  worksheet.eachRow((row, rowNumber) => {
+    if (rowNumber === 1) return; // skip header
+    const record: Record<string, unknown> = {};
+    row.eachCell((cell, colNumber) => {
+      const header = headers[colNumber - 1];
+      if (header) {
+        record[header] = cell.value;
+      }
+    });
+    rows.push(record);
+  });
 
   if (rows.length === 0) {
     throw new Error('XLSX file has no data rows');
@@ -487,7 +506,7 @@ export async function createImportJob(
 
   switch (file.type) {
     case 'xlsx':
-      rows = parseXLSX(file.buffer);
+      rows = await parseXLSX(file.buffer);
       break;
     case 'csv':
       rows = parseCSV(file.buffer);
@@ -578,8 +597,9 @@ export function generateCSVTemplate(): string {
 /**
  * Generate an XLSX template for bulk import
  */
-export function generateXLSXTemplate(): Buffer {
-  const workbook = XLSX.utils.book_new();
+export async function generateXLSXTemplate(): Promise<Buffer> {
+  const workbook = new ExcelJS.Workbook();
+  const worksheet = workbook.addWorksheet('Users');
 
   const headers = [
     'email',
@@ -605,13 +625,12 @@ export function generateXLSXTemplate(): Buffer {
     '{"department": "Engineering"}',
   ];
 
-  const data = [headers, exampleRow];
-  const worksheet = XLSX.utils.aoa_to_sheet(data);
+  worksheet.addRow(headers);
+  worksheet.addRow(exampleRow);
 
   // Set column widths
-  worksheet['!cols'] = headers.map(() => ({ wch: 25 }));
+  worksheet.columns = headers.map(() => ({ width: 25 }));
 
-  XLSX.utils.book_append_sheet(workbook, worksheet, 'Users');
-
-  return XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+  const arrayBuffer = await workbook.xlsx.writeBuffer();
+  return Buffer.from(arrayBuffer);
 }
