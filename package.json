@@ -14,7 +14,7 @@
     "db:generate": "pnpm --filter @exprsn/api db:generate",
     "db:migrate": "pnpm --filter @exprsn/api db:migrate",
     "db:push": "pnpm --filter @exprsn/api db:push",
-    "docker:up": "docker compose up -d postgres redis minio createbuckets mailhog",
+    "docker:up": "docker compose up -d postgres redis opensearch minio createbuckets mailhog",
     "docker:down": "docker compose down",
     "docker:up:all": "docker compose up -d",
     "docker:up:rabbitmq": "docker compose --profile rabbitmq up -d rabbitmq",
