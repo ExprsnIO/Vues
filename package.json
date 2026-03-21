@@ -20,7 +20,8 @@
     "docker:up:rabbitmq": "docker compose --profile rabbitmq up -d rabbitmq",
     "lexicon:gen": "pnpm --filter @exprsn/lexicons generate",
     "admin": "pnpm --filter @exprsn/api admin",
-    "setup": "pnpm --filter @exprsn/api setup"
+    "setup": "pnpm --filter @exprsn/api setup",
+    "tui": "pnpm --filter @exprsn/api tui"
   },
   "devDependencies": {
     "@types/node": "^22.19.13",

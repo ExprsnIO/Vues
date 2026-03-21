@@ -41,7 +41,8 @@
     "encrypt:credentials": "tsx scripts/encrypt-payment-credentials.ts",
     "encrypt:credentials:dry-run": "tsx scripts/encrypt-payment-credentials.ts --dry-run",
     "admin": "tsx scripts/cli.ts",
-    "setup": "tsx scripts/cli.ts --setup"
+    "setup": "tsx scripts/cli.ts --setup",
+    "tui": "tsx scripts/tui.ts"
   },
   "dependencies": {
     "@atproto/api": "^0.14.5",
