@@ -11,7 +11,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.1003.0",
+    "@aws-sdk/client-s3": "^3.1014.0",
     "@exprsn/shared": "workspace:*",
     "@hono/node-server": "^1.19.11",
     "bullmq": "^5.70.2",
