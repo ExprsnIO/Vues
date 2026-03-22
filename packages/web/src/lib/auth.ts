@@ -1,3 +1,5 @@
+'use client';
+
 import { BrowserOAuthClient } from '@atproto/oauth-client-browser';
 
 const CLIENT_ID =
