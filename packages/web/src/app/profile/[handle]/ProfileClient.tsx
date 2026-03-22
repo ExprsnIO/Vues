@@ -492,7 +492,7 @@ function VideoThumbnail({ video, isPinned = false, isOwnProfile = false }: { vid
   const [showPreview, setShowPreview] = useState(false);
   const [showActions, setShowActions] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
-  const hoverTimeoutRef = useRef<NodeJS.Timeout>();
+  const hoverTimeoutRef = useRef<NodeJS.Timeout>(undefined);
 
   // Check if device supports hover (desktop)
   const supportsHover = typeof window !== 'undefined' && window.matchMedia('(hover: hover)').matches;

@@ -516,8 +516,8 @@ interface TokenCardProps {
   onGrant?: () => void;
   onRevoke?: () => void;
   onRegenerate?: () => void;
-  getStatusBadge: (s: string) => JSX.Element;
-  getTypeBadge: (t: string) => JSX.Element;
+  getStatusBadge: (s: string) => React.ReactElement;
+  getTypeBadge: (t: string) => React.ReactElement;
   formatTimeAgo: (d: string) => string;
   daysUntilExpiry: (d: string) => number;
   disabled?: boolean;
@@ -1229,8 +1229,8 @@ function TokenDetailModal({
   onGrant: () => void;
   onRevoke: () => void;
   onRegenerate: () => void;
-  getStatusBadge: (s: string) => JSX.Element;
-  getTypeBadge: (t: string) => JSX.Element;
+  getStatusBadge: (s: string) => React.ReactElement;
+  getTypeBadge: (t: string) => React.ReactElement;
 }) {
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">

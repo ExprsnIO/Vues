@@ -18,7 +18,7 @@ interface MentionInputProps {
   placeholder?: string;
   maxLength?: number;
   autoFocus?: boolean;
-  textareaRef?: React.RefObject<HTMLTextAreaElement>;
+  textareaRef?: React.RefObject<HTMLTextAreaElement | null>;
 }
 
 export function MentionInput({

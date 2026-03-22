@@ -500,7 +500,7 @@ interface TrimStepProps {
   trimStart: number;
   trimEnd: number;
   onTrimChange: (start: number, end: number) => void;
-  videoRef: React.RefObject<HTMLVideoElement>;
+  videoRef: React.RefObject<HTMLVideoElement | null>;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   originalVideo: any;
   videoLoading: boolean;

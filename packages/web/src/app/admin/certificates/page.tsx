@@ -664,8 +664,8 @@ interface CertificatesTabProps {
   revokeMutation: any;
   createCertMutation: any;
   createCAMutation: any;
-  getStatusBadge: (s: string) => JSX.Element;
-  getTypeBadge: (t: string) => JSX.Element;
+  getStatusBadge: (s: string) => React.ReactElement;
+  getTypeBadge: (t: string) => React.ReactElement;
   daysUntilExpiry: (d: string) => number;
   // Batch operations
   selectedCertIds: string[];
@@ -1041,8 +1041,8 @@ interface TokensTabProps {
   setShowCreateTokenModal: (v: boolean) => void;
   revokeMutation: any;
   createTokenMutation: any;
-  getStatusBadge: (s: string) => JSX.Element;
-  getTypeBadge: (t: string) => JSX.Element;
+  getStatusBadge: (s: string) => React.ReactElement;
+  getTypeBadge: (t: string) => React.ReactElement;
   daysUntilExpiry: (d: string) => number;
 }
 
@@ -2299,8 +2299,8 @@ function CertificateDetailModal({
   onClose: () => void;
   onRevoke: () => void;
   isPending: boolean;
-  getTypeBadge: (t: string) => JSX.Element;
-  getStatusBadge: (s: string) => JSX.Element;
+  getTypeBadge: (t: string) => React.ReactElement;
+  getStatusBadge: (s: string) => React.ReactElement;
 }) {
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
@@ -2407,8 +2407,8 @@ function TokenDetailModal({
   onClose: () => void;
   onRevoke: () => void;
   isPending: boolean;
-  getTypeBadge: (t: string) => JSX.Element;
-  getStatusBadge: (s: string) => JSX.Element;
+  getTypeBadge: (t: string) => React.ReactElement;
+  getStatusBadge: (s: string) => React.ReactElement;
 }) {
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">

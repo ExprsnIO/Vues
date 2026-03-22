@@ -11,7 +11,7 @@ import type { CollaboratorPresence } from '@/services/editorCollaboration';
 interface CollaboratorCursorsProps {
   collaborators: CollaboratorPresence[];
   currentUserDid: string;
-  containerRef?: React.RefObject<HTMLElement>;
+  containerRef?: React.RefObject<HTMLElement | null>;
   scale?: number;
   offsetX?: number;
   offsetY?: number;
