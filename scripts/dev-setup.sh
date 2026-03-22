@@ -1,5 +1,15 @@
 #!/bin/bash
 
+# Ensure .env symlinks exist so all packages read from the single root .env
+if [ -f .env ]; then
+  for pkg in packages/web; do
+    if [ ! -e "$pkg/.env" ]; then
+      ln -sf ../../.env "$pkg/.env"
+      echo "Created .env symlink in $pkg"
+    fi
+  done
+fi
+
 # Check if local PostgreSQL is running
 if pg_isready -h localhost -p 5432 >/dev/null 2>&1; then
   echo "PostgreSQL is running locally"

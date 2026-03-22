@@ -1,6 +1,7 @@
 import type { NextConfig } from 'next';
 
 const nextConfig: NextConfig = {
+  allowedDevOrigins: ['exprsn.io'],
   output: 'standalone',
   transpilePackages: ['@exprsn/shared'],
   images: {

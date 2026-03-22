@@ -14,7 +14,8 @@ import { promisify } from 'util';
 const execAsync = promisify(exec);
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
-const ENV_PATH = resolve(ROOT, '.env');
+const MONOREPO_ROOT = resolve(ROOT, '../..');
+const ENV_PATH = resolve(MONOREPO_ROOT, '.env');
 
 // ---------------------------------------------------------------------------
 // ANSI color helpers
