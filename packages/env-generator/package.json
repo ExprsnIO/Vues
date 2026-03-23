@@ -1,8 +1,11 @@
 {
-  "name": "@exprsn/setup",
+  "name": "@exprsn/env-generator",
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "bin": {
+    "env-gen": "./dist/cli.js"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -10,19 +13,15 @@
     }
   },
   "scripts": {
+    "build": "tsc",
     "dev": "tsc --watch",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@exprsn/env-generator": "workspace:*",
-    "bcryptjs": "^2.4.3",
-    "drizzle-orm": "^0.38.2",
-    "hono": "^4.12.5",
-    "nanoid": "^5.0.9"
+    "zod": "^3.23.8"
   },
   "devDependencies": {
-    "@types/bcryptjs": "^2.4.6",
     "@types/node": "^22.19.13",
     "typescript": "^5.7.0"
   }

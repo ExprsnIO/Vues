@@ -21,7 +21,12 @@
     "lexicon:gen": "pnpm --filter @exprsn/lexicons generate",
     "admin": "pnpm --filter @exprsn/api admin",
     "setup": "pnpm --filter @exprsn/api setup",
-    "tui": "pnpm --filter @exprsn/api tui"
+    "tui": "pnpm --filter @exprsn/api tui",
+    "env:gen": "pnpm --filter @exprsn/env-generator build && node packages/env-generator/dist/cli.js",
+    "dev:staging": "EXPRSN_ENV=staging turbo dev --concurrency=32",
+    "dev:prod": "EXPRSN_ENV=production turbo dev --concurrency=32",
+    "start:staging": "EXPRSN_ENV=staging pnpm --filter @exprsn/api start",
+    "start:prod": "EXPRSN_ENV=production pnpm --filter @exprsn/api start"
   },
   "devDependencies": {
     "@types/node": "^22.19.13",

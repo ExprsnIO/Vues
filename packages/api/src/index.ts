@@ -4,11 +4,12 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { prettyJSON } from 'hono/pretty-json';
 import { secureHeaders } from 'hono/secure-headers';
-import { createReadStream, statSync, existsSync } from 'fs';
-import { join, dirname } from 'path';
+import { createReadStream, statSync, existsSync, readFileSync } from 'fs';
+import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { Readable } from 'stream';
 import { Server as SocketIOServer } from 'socket.io';
+import { createServer as createHttpsServer } from 'node:https';
 
 import { createOAuthClient } from './auth/oauth-client.js';
 import { xrpcRouter } from './routes/xrpc.js';
@@ -548,6 +549,40 @@ function handleJetstreamConnection(ws: WebSocket, url: URL): void {
 
 // Initialize and start server
 async function main() {
+  // ── Environment file resolution ──
+  // Resolve env file based on EXPRSN_ENV (development | staging | production)
+  const exprsnEnv = process.env.EXPRSN_ENV || 'development';
+  const __mainDirname = dirname(fileURLToPath(import.meta.url));
+  const monorepoRoot = resolve(__mainDirname, '../../..');
+  const envFileMap: Record<string, string> = {
+    development: '.env',
+    staging: '.env.staging',
+    production: '.env.production',
+  };
+  const envFileName = envFileMap[exprsnEnv] || '.env';
+  const envFilePath = resolve(monorepoRoot, envFileName);
+
+  if (existsSync(envFilePath)) {
+    try {
+      const envContent = readFileSync(envFilePath, 'utf-8');
+      for (const line of envContent.split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#')) continue;
+        const idx = trimmed.indexOf('=');
+        if (idx === -1) continue;
+        const key = trimmed.slice(0, idx).trim();
+        const value = trimmed.slice(idx + 1).trim();
+        // Non-overwriting: process.env takes precedence
+        if (!process.env[key]) process.env[key] = value;
+      }
+      console.log(`Loaded environment from ${envFileName} (EXPRSN_ENV=${exprsnEnv})`);
+    } catch (err) {
+      console.warn(`Failed to load ${envFileName}:`, err);
+    }
+  } else {
+    console.log(`No ${envFileName} found — using existing process.env (EXPRSN_ENV=${exprsnEnv})`);
+  }
+
   const port = parseInt(process.env.PORT || '3000', 10);
   const host = process.env.HOST || '0.0.0.0';
 
@@ -991,13 +1026,57 @@ async function main() {
   initRelayBridge(relayService, syncService);
   console.log('Relay bridge initialized');
 
-  console.log(`Starting Exprsn API server on ${host}:${port}`);
+  // ── Auto-bootstrap certificate chain ──
+  const caAutoBootstrap = process.env.CA_AUTO_BOOTSTRAP !== 'false';
+  if (caAutoBootstrap) {
+    try {
+      const { autoBootstrapCertificateChain } = await import('./services/ca/autoBootstrapCerts.js');
+      await autoBootstrapCertificateChain({
+        domain: process.env.SERVICE_DOMAIN || 'localhost',
+      });
+    } catch (err) {
+      console.warn('[ca-bootstrap] Certificate auto-bootstrap failed:', err instanceof Error ? err.message : err);
+    }
+  }
 
-  const server = serve({
+  // ── TLS configuration ──
+  const tlsEnabled = process.env.TLS_ENABLED === 'true';
+  const tlsCertPath = process.env.TLS_CERT_PATH
+    ? resolve(monorepoRoot, process.env.TLS_CERT_PATH)
+    : resolve(monorepoRoot, 'deploy/nginx/ssl/fullchain.pem');
+  const tlsKeyPath = process.env.TLS_KEY_PATH
+    ? resolve(monorepoRoot, process.env.TLS_KEY_PATH)
+    : resolve(monorepoRoot, 'deploy/nginx/ssl/privkey.pem');
+
+  const hasTlsCerts = existsSync(tlsCertPath) && existsSync(tlsKeyPath);
+  const useTls = tlsEnabled && hasTlsCerts;
+
+  if (useTls) {
+    console.log(`Starting Exprsn API server on https://${host}:${port} (TLS 1.3)`);
+  } else {
+    console.log(`Starting Exprsn API server on http://${host}:${port}`);
+    if (tlsEnabled && !hasTlsCerts) {
+      console.warn('TLS_ENABLED=true but certificate files not found — falling back to HTTP');
+    }
+  }
+
+  const serveOptions: Parameters<typeof serve>[0] = {
     fetch: app.fetch,
     port,
     hostname: host,
-  });
+  };
+
+  if (useTls) {
+    (serveOptions as any).createServer = createHttpsServer;
+    (serveOptions as any).serverOptions = {
+      cert: readFileSync(tlsCertPath, 'utf-8'),
+      key: readFileSync(tlsKeyPath, 'utf-8'),
+      minVersion: 'TLSv1.3' as const,
+      maxVersion: 'TLSv1.3' as const,
+    };
+  }
+
+  const server = serve(serveOptions);
 
   // ------------------------------------------------------------------
   // Raw WebSocket server for AT Protocol firehose endpoints.
@@ -1098,7 +1177,7 @@ async function main() {
     }
   }
 
-  console.log(`Server running at http://${host}:${port}`);
+  console.log(`Server running at ${useTls ? 'https' : 'http'}://${host}:${port}`);
   console.log('Raw WebSocket endpoints: /xrpc/com.atproto.sync.subscribeRepos (DAG-CBOR firehose), /jetstream/subscribe (Jetstream JSON)');
   console.log('WebSocket namespaces: /chat, /editor-collab, /render-progress, /transcode-progress, /admin, /watch-party' + (relayEnabled ? ', /xrpc/com.atproto.sync.subscribeRepos (Socket.IO)' : ''));
   console.log('Well-known endpoints: /.well-known/atproto-did, /.well-known/did.json, /.well-known/openid-configuration, /.well-known/exprsn-services, /.well-known/crl.pem');

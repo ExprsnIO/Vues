@@ -23,7 +23,9 @@
   },
   "scripts": {
     "build": "tsc",
-    "dev": "tsx watch --env-file=../../.env src/index.ts",
+    "dev": "tsx watch src/index.ts",
+    "dev:staging": "EXPRSN_ENV=staging tsx watch src/index.ts",
+    "dev:prod": "EXPRSN_ENV=production tsx watch src/index.ts",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist",
@@ -52,6 +54,7 @@
     "@aws-sdk/client-s3": "^3.1014.0",
     "@aws-sdk/s3-request-presigner": "^3.1014.0",
     "@azure/storage-blob": "^12.31.0",
+    "@exprsn/env-generator": "workspace:*",
     "@exprsn/lexicons": "workspace:*",
     "@exprsn/pds": "workspace:*",
     "@exprsn/prefetch": "workspace:*",

@@ -321,7 +321,7 @@ async function firstTimeSetup() {
   header('First-Time Setup');
 
   // Step 1 — Prerequisites
-  section('Step 1 of 5: Checking Prerequisites');
+  section('Step 1 of 6: Checking Prerequisites');
   const env = await readEnv();
 
   process.stdout.write('  Checking PostgreSQL... ');
@@ -352,7 +352,7 @@ async function firstTimeSetup() {
   }
 
   // Step 2 — Generate secrets
-  section('Step 2 of 5: Generating Secrets');
+  section('Step 2 of 6: Generating Secrets');
 
   let changed = false;
   if (!env.get('JWT_SECRET') || env.get('JWT_SECRET') === '') {
@@ -388,7 +388,7 @@ async function firstTimeSetup() {
   }
 
   // Step 3 — Create admin user
-  section('Step 3 of 5: Create Admin User');
+  section('Step 3 of 6: Create Admin User');
 
   if (!dbOk) {
     warn('Skipped — PostgreSQL not available. Run setup again after starting the database.');
@@ -470,7 +470,7 @@ async function firstTimeSetup() {
   } // end dbOk check for step 3
 
   // Step 4 — Service toggles
-  section('Step 4 of 5: Service Configuration');
+  section('Step 4 of 6: Service Configuration');
   const services: Array<[string, string]> = [
     ['PDS_ENABLED', 'AT Protocol Personal Data Server'],
     ['RELAY_ENABLED', 'Federation Relay / Firehose'],
@@ -483,8 +483,39 @@ async function firstTimeSetup() {
   await writeEnv(env);
   success('Service configuration saved');
 
-  // Step 5 — DB migrations
-  section('Step 5 of 5: Database Migrations');
+  // Step 5 — Certificate chain bootstrap
+  section('Step 5 of 6: Certificate Chain');
+  if (!dbOk) {
+    warn('Skipped — PostgreSQL not available. Certificates require the database.');
+    info('Run setup again after starting the database to generate certificates.');
+  } else {
+    const genCerts = await confirm('  Generate full certificate chain (Root CA → Intermediate → TLS + Code Signing)?');
+    if (genCerts) {
+      const domain = await ask(`  Domain name (default: localhost): `) || 'localhost';
+      try {
+        const { autoBootstrapCertificateChain } = await import('../src/services/ca/autoBootstrapCerts.js');
+        const result = await autoBootstrapCertificateChain({ domain, force: true });
+        if (result.success && !result.skipped) {
+          success('Certificate chain generated successfully');
+          if (result.rootCA) info(`  Root CA: ${result.rootCA.fingerprint.slice(0, 24)}...`);
+          if (result.intermediateCA) info(`  Intermediate CA: ${result.intermediateCA.fingerprint.slice(0, 24)}...`);
+          if (result.codeSigningCert) info(`  Code Signing: ${result.codeSigningCert.fingerprint.slice(0, 24)}...`);
+          if (result.tlsServerCert) info(`  TLS Server: ${result.tlsServerCert.fingerprint.slice(0, 24)}...`);
+        } else if (result.skipped) {
+          info('Certificate generation skipped (already exist or DB unavailable)');
+        } else {
+          warn(`Certificate generation failed: ${result.error}`);
+        }
+      } catch (e) {
+        error(`Certificate generation failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    } else {
+      info('Skipped certificate generation');
+    }
+  }
+
+  // Step 6 — DB migrations
+  section('Step 6 of 6: Database Migrations');
   if (!dbOk) {
     warn('Skipped — PostgreSQL not available. Run migrations after starting the database:');
     info('  cd packages/api && npx drizzle-kit push --force');
@@ -2389,9 +2420,18 @@ async function main() {
   console.log(`${C.cyan}║   ${C.bold}     Exprsn Administration      ${C.reset}${C.cyan}   ║${C.reset}`);
   console.log(`${C.cyan}╚══════════════════════════════════════╝${C.reset}`);
 
-  // Load .env into process.env for DB/Redis imports that read from env
+  // Load .env into process.env, respecting EXPRSN_ENV for file selection
+  const exprsnEnv = process.env.EXPRSN_ENV || 'development';
+  const envFileMap: Record<string, string> = {
+    development: '.env',
+    staging: '.env.staging',
+    production: '.env.production',
+  };
+  const envFileName = envFileMap[exprsnEnv] || '.env';
+  const selectedEnvPath = resolve(MONOREPO_ROOT, envFileName);
+
   try {
-    const content = await readFile(ENV_PATH, 'utf-8');
+    const content = await readFile(selectedEnvPath, 'utf-8');
     for (const line of content.split('\n')) {
       const t = line.trim();
       if (!t || t.startsWith('#')) continue;
@@ -2401,6 +2441,7 @@ async function main() {
       const v = t.slice(idx + 1).trim();
       if (!process.env[k]) process.env[k] = v;
     }
+    info(`Loaded environment from ${envFileName} (EXPRSN_ENV=${exprsnEnv})`);
   } catch { /* .env may not exist */ }
 
   // --setup flag: jump straight to first-time setup
