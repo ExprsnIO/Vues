@@ -51,19 +51,30 @@ export interface ImportResult {
 export function sanitizeInput(value: string | undefined | null): string {
   if (!value) return '';
 
-  return value
+  let result = value
     .toString()
     .trim()
     // Remove null bytes
     .replace(/\0/g, '')
     // Escape single quotes for SQL
-    .replace(/'/g, "''")
-    // Remove potential script tags
-    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
-    // Remove on* event handlers
-    .replace(/\bon\w+\s*=/gi, '')
-    // Limit length
-    .substring(0, 1000);
+    .replace(/'/g, "''");
+
+  // Remove all HTML tags (loop until stable to prevent bypass via nesting)
+  let previous = result;
+  do {
+    previous = result;
+    result = result.replace(/<[^>]*>/g, '');
+  } while (result !== previous);
+
+  // Remove on* event handlers (loop until stable to prevent bypass via nesting)
+  previous = result;
+  do {
+    previous = result;
+    result = result.replace(/\bon\w+\s*=/gi, '');
+  } while (result !== previous);
+
+  // Limit length
+  return result.substring(0, 1000);
 }
 
 /**

@@ -14,7 +14,8 @@ export async function GET(request: NextRequest) {
   }
 
   // Extract video URI from a URL like: https://exprsn.io/video/<encoded-uri>
-  const match = url.match(/\/video\/(.+?)(?:\?.*)?$/);
+  // Use [^?]+ to avoid catastrophic backtracking (no overlap with query string)
+  const match = url.match(/\/video\/([^?]+)/);
   if (!match) {
     return NextResponse.json({ error: 'Invalid video URL' }, { status: 404 });
   }

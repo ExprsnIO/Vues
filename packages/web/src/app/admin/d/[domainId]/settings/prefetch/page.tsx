@@ -90,8 +90,10 @@ export default function DomainPrefetchSettingsPage() {
   const hasOverrides = domainData?.hasOverrides || Object.keys(overrides).length > 0;
 
   const updateOverride = (path: string, value: any) => {
+    const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
     setOverrides(prev => {
       const keys = path.split('.');
+      if (keys.some(k => UNSAFE_KEYS.has(k))) return prev;
       const result = { ...prev };
       let current: any = result;
       for (let i = 0; i < keys.length - 1; i++) {
@@ -105,8 +107,10 @@ export default function DomainPrefetchSettingsPage() {
   };
 
   const removeOverride = (path: string) => {
+    const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
     setOverrides(prev => {
       const keys = path.split('.');
+      if (keys.some(k => UNSAFE_KEYS.has(k))) return prev;
       const result = JSON.parse(JSON.stringify(prev));
       let current: any = result;
       for (let i = 0; i < keys.length - 1; i++) {

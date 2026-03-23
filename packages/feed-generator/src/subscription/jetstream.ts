@@ -155,7 +155,7 @@ export class JetstreamConsumer {
           break;
       }
     } catch (error) {
-      console.error(`Error handling ${collection} ${operation}:`, error);
+      console.error('Error handling %s %s:', collection, operation, error);
     }
   }
 
@@ -398,7 +398,7 @@ export class JetstreamConsumer {
       }
     } catch (error) {
       // Silently fail and use DID as handle
-      console.warn(`[Jetstream] Failed to fetch profile for ${did}:`, error);
+      console.warn('[Jetstream] Failed to fetch profile for %s:', did, error);
     }
 
     // Insert user with fetched or default profile data

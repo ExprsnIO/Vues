@@ -250,7 +250,7 @@ export class PlcService {
     // If specific org type provided, validate against that type's suffix
     if (orgType) {
       const suffix = await this.getOrgTypeHandleSuffix(orgType);
-      const escapedSuffix = suffix.replace(/\./g, '\\.');
+      const escapedSuffix = suffix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const orgTypeRegex = new RegExp(`^[a-z0-9][a-z0-9-]{0,28}[a-z0-9]\\.${escapedSuffix}$`);
 
       if (orgTypeRegex.test(normalizedHandle)) {
@@ -266,7 +266,7 @@ export class PlcService {
     // Check against all valid org handle suffixes
     const allSuffixes = await this.getAllOrgHandleSuffixes();
     for (const suffix of allSuffixes) {
-      const escapedSuffix = suffix.replace(/\./g, '\\.');
+      const escapedSuffix = suffix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const orgRegex = new RegExp(`^[a-z0-9][a-z0-9-]{0,28}[a-z0-9]\\.${escapedSuffix}$`);
 
       if (orgRegex.test(normalizedHandle)) {

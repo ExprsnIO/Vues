@@ -508,7 +508,13 @@ export function escapeHtml(str: string): string {
  * Strip HTML tags from a string
  */
 export function stripHtml(str: string): string {
-  return str.replace(/<[^>]*>/g, '');
+  let result = str;
+  let previous = result;
+  do {
+    previous = result;
+    result = result.replace(/<[^>]*>/g, '');
+  } while (result !== previous);
+  return result;
 }
 
 /**

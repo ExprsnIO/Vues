@@ -39,7 +39,13 @@ function EditProfileContent() {
       setTwitter(user.socialLinks?.twitter || '');
       setInstagram(user.socialLinks?.instagram || '');
       setYoutube(user.socialLinks?.youtube || '');
-      setAvatarPreview(user.avatar || null);
+      const avatar = user.avatar || null;
+      // Only allow safe URL schemes for avatar preview
+      if (avatar && /^(https?:|blob:|data:image\/)/i.test(avatar)) {
+        setAvatarPreview(avatar);
+      } else {
+        setAvatarPreview(null);
+      }
     }
   }, [user]);
 
@@ -179,7 +185,7 @@ function EditProfileContent() {
                 onClick={() => fileInputRef.current?.click()}
                 className="w-24 h-24 rounded-full bg-surface flex items-center justify-center overflow-hidden cursor-pointer hover:opacity-80 transition-opacity"
               >
-                {avatarPreview ? (
+                {avatarPreview && /^(https?:|blob:|data:image\/)/i.test(avatarPreview) ? (
                   <img
                     src={avatarPreview}
                     alt="Avatar preview"

@@ -659,11 +659,20 @@ export class EmailProvider {
   }
 
   private stripHtml(html: string): string {
-    return html
-      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
-      .replace(/<[^>]+>/g, '')
-      .replace(/\s+/g, ' ')
-      .trim();
+    let result = html;
+    // Loop until no more style tags can be removed (prevents bypass via nested fragments)
+    let prev = '';
+    while (prev !== result) {
+      prev = result;
+      result = result.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '');
+    }
+    // Loop until no more HTML tags can be removed
+    prev = '';
+    while (prev !== result) {
+      prev = result;
+      result = result.replace(/<[^>]+>/g, '');
+    }
+    return result.replace(/\s+/g, ' ').trim();
   }
 
   private formatFileSize(bytes: number): string {
