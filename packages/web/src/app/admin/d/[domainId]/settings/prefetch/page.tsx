@@ -89,51 +89,55 @@ export default function DomainPrefetchSettingsPage() {
   const globalConfig = globalData?.config || {};
   const hasOverrides = domainData?.hasOverrides || Object.keys(overrides).length > 0;
 
-  const updateOverride = (path: string, value: any) => {
-    const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
-    setOverrides(prev => {
-      const keys = path.split('.');
-      if (keys.some(k => UNSAFE_KEYS.has(k))) return prev;
-      // Deep-clone via structured clone to avoid mutation and prototype chains
-      const result = JSON.parse(JSON.stringify(prev)) as Record<string, any>;
-      let current: Record<string, any> = result;
-      for (let i = 0; i < keys.length - 1; i++) {
-        const k = keys[i]!;
-        if (UNSAFE_KEYS.has(k)) return prev;
-        if (current[k] == null || typeof current[k] !== 'object') {
-          current[k] = Object.create(null) as Record<string, any>;
-        }
-        current = current[k] as Record<string, any>;
+  // Allowlist of valid override paths to prevent prototype pollution.
+  // Only these paths can be written to via updateOverride/removeOverride.
+  const ALLOWED_PATHS = new Set([
+    'enabled',
+    'cache.tiers.hot.ttlMs', 'cache.tiers.hot.maxKeys',
+    'cache.tiers.warm.ttlMs', 'cache.tiers.warm.maxKeys',
+    'cache.tiers.cold.ttlMs', 'cache.tiers.cold.maxKeys',
+    'queue.rateLimit', 'queue.batchSize',
+    'strategy.type', 'strategy.adaptiveEnabled',
+    'federation.prefetchEnabled', 'federation.remotePDSCacheTTL',
+  ]);
+
+  const setNestedValue = (obj: Record<string, any>, keys: string[], value: unknown): void => {
+    let current = obj;
+    for (let i = 0; i < keys.length - 1; i++) {
+      const k = keys[i]!;
+      if (current[k] == null || typeof current[k] !== 'object') {
+        current[k] = {};
       }
-      const finalKey = keys[keys.length - 1]!;
-      if (UNSAFE_KEYS.has(finalKey)) return prev;
-      Object.defineProperty(current, finalKey, {
-        value,
-        writable: true,
-        enumerable: true,
-        configurable: true,
-      });
+      current = current[k] as Record<string, any>;
+    }
+    current[keys[keys.length - 1]!] = value;
+  };
+
+  const deleteNestedValue = (obj: Record<string, any>, keys: string[]): void => {
+    let current = obj;
+    for (let i = 0; i < keys.length - 1; i++) {
+      const k = keys[i]!;
+      if (!current[k] || typeof current[k] !== 'object') return;
+      current = current[k] as Record<string, any>;
+    }
+    delete current[keys[keys.length - 1]!];
+  };
+
+  const updateOverride = (path: string, value: any) => {
+    if (!ALLOWED_PATHS.has(path)) return;
+    setOverrides(prev => {
+      const result = JSON.parse(JSON.stringify(prev)) as Record<string, any>;
+      setNestedValue(result, path.split('.'), value);
       return result;
     });
     setIsDirty(true);
   };
 
   const removeOverride = (path: string) => {
-    const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+    if (!ALLOWED_PATHS.has(path)) return;
     setOverrides(prev => {
-      const keys = path.split('.');
-      if (keys.some(k => UNSAFE_KEYS.has(k))) return prev;
       const result = JSON.parse(JSON.stringify(prev)) as Record<string, any>;
-      let current: Record<string, any> = result;
-      for (let i = 0; i < keys.length - 1; i++) {
-        const k = keys[i]!;
-        if (UNSAFE_KEYS.has(k)) return prev;
-        if (!current[k] || typeof current[k] !== 'object') return result;
-        current = current[k] as Record<string, any>;
-      }
-      const finalKey = keys[keys.length - 1]!;
-      if (UNSAFE_KEYS.has(finalKey)) return prev;
-      delete current[finalKey];
+      deleteNestedValue(result, path.split('.'));
       return result;
     });
     setIsDirty(true);

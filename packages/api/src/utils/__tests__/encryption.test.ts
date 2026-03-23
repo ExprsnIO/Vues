@@ -1,15 +1,19 @@
 import { describe, it, expect, beforeAll } from 'vitest';
+import crypto from 'crypto';
 import { encrypt, decrypt, encryptCredentials, decryptCredentials, isEncrypted, canDecrypt } from '../encryption.js';
+
+// Generate a deterministic-but-not-hardcoded test key from the test suite name.
+// This avoids committing real-looking secrets while remaining reproducible.
+const TEST_KEY = crypto.createHash('sha256').update('exprsn-encryption-test-suite').digest('hex');
 
 describe('Encryption Utility', () => {
   beforeAll(() => {
-    // Set a test encryption key
-    process.env.ENCRYPTION_KEY = 'test-encryption-key-for-unit-tests-minimum-32-chars';
+    process.env.ENCRYPTION_KEY = TEST_KEY;
   });
 
   describe('encrypt/decrypt', () => {
     it('should encrypt and decrypt text correctly', () => {
-      const plaintext = 'my-secret-api-key-12345';
+      const plaintext = 'test-plaintext-value';
       const encrypted = encrypt(plaintext);
       const decrypted = decrypt(encrypted);
 
@@ -42,12 +46,12 @@ describe('Encryption Utility', () => {
       const encrypted = encrypt(plaintext);
 
       // Change the encryption key
-      process.env.ENCRYPTION_KEY = 'different-key-that-is-at-least-32-characters-long';
+      process.env.ENCRYPTION_KEY = crypto.createHash('sha256').update('different-test-key').digest('hex');
 
       expect(() => decrypt(encrypted)).toThrow();
 
       // Restore original key
-      process.env.ENCRYPTION_KEY = 'test-encryption-key-for-unit-tests-minimum-32-chars';
+      process.env.ENCRYPTION_KEY = TEST_KEY;
     });
 
     it('should throw error when encrypting empty string', () => {
@@ -83,9 +87,9 @@ describe('Encryption Utility', () => {
   describe('encryptCredentials/decryptCredentials', () => {
     it('should encrypt and decrypt credential objects', () => {
       const credentials = {
-        apiKey: 'sk_test_12345',
-        secret: 'whsec_abcdef',
-        clientId: 'client_xyz',
+        apiKey: 'test-api-key',
+        secret: 'test-webhook-secret',
+        clientId: 'test-client-id',
       };
 
       const encrypted = encryptCredentials(credentials);
@@ -132,8 +136,8 @@ describe('Encryption Utility', () => {
 
     it('should preserve keys when encrypting', () => {
       const credentials = {
-        stripe_key: 'sk_test',
-        webhook_secret: 'whsec_test',
+        stripe_key: 'test-stripe-key',
+        webhook_secret: 'test-webhook-secret',
       };
 
       const encrypted = encryptCredentials(credentials);
@@ -159,8 +163,8 @@ describe('Encryption Utility', () => {
   describe('isEncrypted', () => {
     it('should detect encrypted credentials', () => {
       const credentials = {
-        apiKey: 'sk_test_12345',
-        secret: 'secret_value',
+        apiKey: 'test-api-key',
+        secret: 'test-secret-value',
       };
 
       const encrypted = encryptCredentials(credentials);
@@ -170,8 +174,8 @@ describe('Encryption Utility', () => {
 
     it('should detect unencrypted credentials', () => {
       const credentials = {
-        apiKey: 'sk_test_12345',
-        secret: 'secret_value',
+        apiKey: 'test-api-key',
+        secret: 'test-secret-value',
       };
 
       expect(isEncrypted(credentials)).toBe(false);
@@ -195,7 +199,7 @@ describe('Encryption Utility', () => {
   describe('canDecrypt', () => {
     it('should return true for valid encrypted credentials', () => {
       const credentials = {
-        apiKey: 'test_key',
+        apiKey: 'test-key',
       };
 
       const encrypted = encryptCredentials(credentials);
@@ -213,7 +217,7 @@ describe('Encryption Utility', () => {
 
     it('should return false for unencrypted credentials', () => {
       const credentials = {
-        apiKey: 'plain_text_key',
+        apiKey: 'plain-text-key',
       };
 
       // Unencrypted credentials will fail to decrypt (wrong format)
@@ -256,15 +260,15 @@ describe('Encryption Utility', () => {
   });
 
   describe('real-world scenarios', () => {
-    // Ensure ENCRYPTION_KEY is set for these tests
     beforeAll(() => {
-      process.env.ENCRYPTION_KEY = 'test-encryption-key-for-unit-tests-minimum-32-chars';
+      process.env.ENCRYPTION_KEY = TEST_KEY;
     });
-    it('should handle Stripe credentials', () => {
+
+    it('should handle Stripe-like credentials', () => {
       const credentials = {
-        secretKey: 'sk_test_51234567890abcdefghijklmnop',
-        publishableKey: 'pk_test_51234567890abcdefghijklmnop',
-        webhookSecret: 'whsec_1234567890abcdefghijklmnop',
+        secretKey: 'test-secret-key-' + crypto.randomBytes(16).toString('hex'),
+        publishableKey: 'test-pub-key-' + crypto.randomBytes(16).toString('hex'),
+        webhookSecret: 'test-webhook-' + crypto.randomBytes(16).toString('hex'),
       };
 
       const encrypted = encryptCredentials(credentials);
@@ -273,11 +277,11 @@ describe('Encryption Utility', () => {
       expect(decrypted).toEqual(credentials);
     });
 
-    it('should handle PayPal credentials', () => {
+    it('should handle PayPal-like credentials', () => {
       const credentials = {
-        clientId: 'AeB1234567890abcdefghijklmnopqrstuvwxyz',
-        clientSecret: 'EFG1234567890abcdefghijklmnopqrstuvwxyz',
-        webhookId: 'WH-12345678AB-12345678CD',
+        clientId: 'test-client-' + crypto.randomBytes(20).toString('hex'),
+        clientSecret: 'test-secret-' + crypto.randomBytes(20).toString('hex'),
+        webhookId: 'test-webhook-' + crypto.randomBytes(10).toString('hex'),
       };
 
       const encrypted = encryptCredentials(credentials);
@@ -286,11 +290,11 @@ describe('Encryption Utility', () => {
       expect(decrypted).toEqual(credentials);
     });
 
-    it('should handle Authorize.Net credentials', () => {
+    it('should handle payment gateway credentials', () => {
       const credentials = {
-        apiLoginId: '1234567890AB',
-        transactionKey: '1234567890abcdefghij',
-        signatureKey: 'ABCD1234567890EFGH1234567890IJKL1234567890MNOP1234567890QRST1234567890',
+        apiLoginId: 'test-login-' + crypto.randomBytes(6).toString('hex'),
+        transactionKey: 'test-txn-' + crypto.randomBytes(10).toString('hex'),
+        signatureKey: 'test-sig-' + crypto.randomBytes(32).toString('hex'),
       };
 
       const encrypted = encryptCredentials(credentials);

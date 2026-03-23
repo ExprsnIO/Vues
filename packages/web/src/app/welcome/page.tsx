@@ -21,6 +21,14 @@ function sanitizeImageUrl(url: string | null | undefined): string | null {
   }
 }
 
+/** Renders a sanitized <img> — breaks the taint chain at the render boundary. */
+function SafeImg({ src, alt, className }: { src: string | null; alt: string; className?: string }) {
+  const safeSrc = sanitizeImageUrl(src);
+  if (!safeSrc) return null;
+  // eslint-disable-next-line @next/next/no-img-element
+  return <img src={safeSrc} alt={alt} className={className} />;
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -625,8 +633,7 @@ function StepProfileSetup({
             className="relative w-24 h-24 rounded-full overflow-hidden bg-[var(--color-surface-hover)] border-2 border-dashed border-[var(--color-border)] hover:border-[var(--color-accent)] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)] group"
           >
             {avatarPreview ? (
-              /* eslint-disable-next-line @next/next/no-img-element -- avatar preview from sanitizeImageUrl() */
-              <img src={avatarPreview} alt="Avatar preview" className="w-full h-full object-cover" />
+              <SafeImg src={avatarPreview} alt="Avatar preview" className="w-full h-full object-cover" />
             ) : (
               <div className="flex flex-col items-center justify-center w-full h-full gap-1 text-[var(--color-text-muted)] group-hover:text-[var(--color-accent)] transition-colors">
                 <svg className="w-6 h-6" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">

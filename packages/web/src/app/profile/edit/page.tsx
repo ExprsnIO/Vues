@@ -22,6 +22,14 @@ function sanitizeImageUrl(url: string | null | undefined): string | null {
   }
 }
 
+/** Renders a sanitized <img> — breaks the taint chain at the render boundary. */
+function SafeImg({ src, alt, className }: { src: string | null; alt: string; className?: string }) {
+  const safeSrc = sanitizeImageUrl(src);
+  if (!safeSrc) return null;
+  // eslint-disable-next-line @next/next/no-img-element
+  return <img src={safeSrc} alt={alt} className={className} />;
+}
+
 export default function EditProfilePage() {
   return <EditProfileContent />;
 }
@@ -195,8 +203,7 @@ function EditProfileContent() {
                 className="w-24 h-24 rounded-full bg-surface flex items-center justify-center overflow-hidden cursor-pointer hover:opacity-80 transition-opacity"
               >
                 {avatarPreview ? (
-                  /* eslint-disable-next-line @next/next/no-img-element -- avatar preview from sanitizeImageUrl() */
-                  <img
+                  <SafeImg
                     src={avatarPreview}
                     alt="Avatar preview"
                     className="w-full h-full object-cover"
