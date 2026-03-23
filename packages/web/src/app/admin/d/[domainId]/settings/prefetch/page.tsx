@@ -94,13 +94,25 @@ export default function DomainPrefetchSettingsPage() {
     setOverrides(prev => {
       const keys = path.split('.');
       if (keys.some(k => UNSAFE_KEYS.has(k))) return prev;
-      const result = { ...prev };
-      let current: any = result;
+      // Deep-clone via structured clone to avoid mutation and prototype chains
+      const result = JSON.parse(JSON.stringify(prev)) as Record<string, any>;
+      let current: Record<string, any> = result;
       for (let i = 0; i < keys.length - 1; i++) {
-        current[keys[i]] = { ...(current[keys[i]] || {}) };
-        current = current[keys[i]];
+        const k = keys[i]!;
+        if (UNSAFE_KEYS.has(k)) return prev;
+        if (current[k] == null || typeof current[k] !== 'object') {
+          current[k] = Object.create(null) as Record<string, any>;
+        }
+        current = current[k] as Record<string, any>;
       }
-      current[keys[keys.length - 1]] = value;
+      const finalKey = keys[keys.length - 1]!;
+      if (UNSAFE_KEYS.has(finalKey)) return prev;
+      Object.defineProperty(current, finalKey, {
+        value,
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      });
       return result;
     });
     setIsDirty(true);
@@ -111,13 +123,17 @@ export default function DomainPrefetchSettingsPage() {
     setOverrides(prev => {
       const keys = path.split('.');
       if (keys.some(k => UNSAFE_KEYS.has(k))) return prev;
-      const result = JSON.parse(JSON.stringify(prev));
-      let current: any = result;
+      const result = JSON.parse(JSON.stringify(prev)) as Record<string, any>;
+      let current: Record<string, any> = result;
       for (let i = 0; i < keys.length - 1; i++) {
-        if (!current[keys[i]]) return result;
-        current = current[keys[i]];
+        const k = keys[i]!;
+        if (UNSAFE_KEYS.has(k)) return prev;
+        if (!current[k] || typeof current[k] !== 'object') return result;
+        current = current[k] as Record<string, any>;
       }
-      delete current[keys[keys.length - 1]];
+      const finalKey = keys[keys.length - 1]!;
+      if (UNSAFE_KEYS.has(finalKey)) return prev;
+      delete current[finalKey];
       return result;
     });
     setIsDirty(true);

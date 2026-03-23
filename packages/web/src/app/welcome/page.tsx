@@ -8,6 +8,19 @@ import { useAuth } from '@/lib/auth-context';
 import { cn } from '@/lib/utils';
 import { formatCount } from '@/lib/utils';
 
+/** Validate and sanitize an image URL to prevent XSS via dangerous URI schemes. */
+function sanitizeImageUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  try {
+    if (url.startsWith('blob:') || /^data:image\//i.test(url)) return url;
+    const parsed = new URL(url);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return url;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -561,7 +574,7 @@ function StepProfileSetup({
     }
 
     setAvatarError('');
-    const objectUrl = URL.createObjectURL(file);
+    const objectUrl = sanitizeImageUrl(URL.createObjectURL(file));
     setAvatarPreview(objectUrl);
     setIsUploadingAvatar(true);
 
@@ -611,7 +624,8 @@ function StepProfileSetup({
             aria-label="Upload profile picture"
             className="relative w-24 h-24 rounded-full overflow-hidden bg-[var(--color-surface-hover)] border-2 border-dashed border-[var(--color-border)] hover:border-[var(--color-accent)] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)] group"
           >
-            {avatarPreview && /^(https?:|blob:|data:image\/)/i.test(avatarPreview) ? (
+            {avatarPreview ? (
+              /* eslint-disable-next-line @next/next/no-img-element -- avatar preview from sanitizeImageUrl() */
               <img src={avatarPreview} alt="Avatar preview" className="w-full h-full object-cover" />
             ) : (
               <div className="flex flex-col items-center justify-center w-full h-full gap-1 text-[var(--color-text-muted)] group-hover:text-[var(--color-accent)] transition-colors">

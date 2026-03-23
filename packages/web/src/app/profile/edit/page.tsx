@@ -7,6 +7,21 @@ import { Sidebar } from '@/components/Sidebar';
 import { api } from '@/lib/api';
 import { useAuth } from '@/lib/auth-context';
 
+/** Validate and sanitize an image URL to prevent XSS via dangerous URI schemes. */
+function sanitizeImageUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  try {
+    // Allow blob: and data:image/ URLs from local file picks
+    if (url.startsWith('blob:') || /^data:image\//i.test(url)) return url;
+    // Only allow http/https for remote URLs
+    const parsed = new URL(url);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return url;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 export default function EditProfilePage() {
   return <EditProfileContent />;
 }
@@ -39,13 +54,7 @@ function EditProfileContent() {
       setTwitter(user.socialLinks?.twitter || '');
       setInstagram(user.socialLinks?.instagram || '');
       setYoutube(user.socialLinks?.youtube || '');
-      const avatar = user.avatar || null;
-      // Only allow safe URL schemes for avatar preview
-      if (avatar && /^(https?:|blob:|data:image\/)/i.test(avatar)) {
-        setAvatarPreview(avatar);
-      } else {
-        setAvatarPreview(null);
-      }
+      setAvatarPreview(sanitizeImageUrl(user.avatar));
     }
   }, [user]);
 
@@ -185,7 +194,8 @@ function EditProfileContent() {
                 onClick={() => fileInputRef.current?.click()}
                 className="w-24 h-24 rounded-full bg-surface flex items-center justify-center overflow-hidden cursor-pointer hover:opacity-80 transition-opacity"
               >
-                {avatarPreview && /^(https?:|blob:|data:image\/)/i.test(avatarPreview) ? (
+                {avatarPreview ? (
+                  /* eslint-disable-next-line @next/next/no-img-element -- avatar preview from sanitizeImageUrl() */
                   <img
                     src={avatarPreview}
                     alt="Avatar preview"
