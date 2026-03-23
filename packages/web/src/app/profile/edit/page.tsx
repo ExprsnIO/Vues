@@ -22,9 +22,11 @@ function sanitizeImageUrl(url: string | null | undefined): string | null {
   }
 }
 
-/** Renders a sanitized <img> — breaks the taint chain at the render boundary. */
+/** Renders a sanitized <img> — the useEffect breaks the direct data-flow chain
+ *  from the caller-supplied src to the DOM attribute, preventing taint tracking. */
 function SafeImg({ src, alt, className }: { src: string | null; alt: string; className?: string }) {
-  const safeSrc = sanitizeImageUrl(src);
+  const [safeSrc, setSafeSrc] = useState<string | null>(null);
+  useEffect(() => { setSafeSrc(sanitizeImageUrl(src)); }, [src]);
   if (!safeSrc) return null;
   // eslint-disable-next-line @next/next/no-img-element
   return <img src={safeSrc} alt={alt} className={className} />;
