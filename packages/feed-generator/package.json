@@ -15,7 +15,7 @@
     "@exprsn/shared": "workspace:*",
     "better-sqlite3": "^11.7.0",
     "cron": "^3.2.0",
-    "drizzle-orm": "^0.38.2",
+    "drizzle-orm": "^0.45.2",
     "ioredis": "^5.10.0",
     "openai": "^4.73.0",
     "postgres": "^3.4.5",
