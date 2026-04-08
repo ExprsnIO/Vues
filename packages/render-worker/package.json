@@ -13,7 +13,7 @@
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1014.0",
     "@exprsn/shared": "workspace:*",
-    "@hono/node-server": "^1.19.11",
+    "@hono/node-server": "^1.19.13",
     "bullmq": "^5.70.2",
     "drizzle-orm": "^0.39.0",
     "fluent-ffmpeg": "^2.1.2",
