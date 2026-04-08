@@ -61,7 +61,7 @@
     "@exprsn/relay": "workspace:*",
     "@exprsn/setup": "workspace:*",
     "@exprsn/shared": "workspace:*",
-    "@hono/node-server": "^1.19.11",
+    "@hono/node-server": "^1.19.13",
     "@hono/zod-validator": "^0.7.6",
     "@ipld/car": "^5.2.0",
     "@ipld/dag-cbor": "^9.0.0",
