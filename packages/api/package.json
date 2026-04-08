@@ -78,7 +78,7 @@
     "date-fns": "^4.1.0",
     "drizzle-orm": "^0.38.2",
     "exceljs": "^4.4.0",
-    "hono": "^4.12.5",
+    "hono": "^4.12.12",
     "ioredis": "^5.10.0",
     "jose": "^6.2.0",
     "multiformats": "^13.0.0",
