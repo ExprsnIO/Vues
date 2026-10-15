@@ -107,7 +107,7 @@ export class StripeGateway extends BasePaymentGateway {
         success: paymentIntent.status === 'succeeded' || paymentIntent.status === 'requires_capture',
         transactionId: paymentIntent.id,
         status: this.mapStripeStatus(paymentIntent.status),
-        amount: paymentIntent.amount,
+        amount: paymentIntent.status === 'succeeded' ? paymentIntent.amount_received : paymentIntent.amount,
         currency: paymentIntent.currency.toUpperCase() as CurrencyCode,
         requiresAction: paymentIntent.status === 'requires_action',
         clientSecret: paymentIntent.client_secret || undefined,
@@ -336,7 +336,7 @@ export class StripeGateway extends BasePaymentGateway {
         success: true,
         transactionId: paymentIntent.id,
         status: this.mapStripeStatus(paymentIntent.status),
-        amount: paymentIntent.amount,
+        amount: paymentIntent.status === 'succeeded' ? paymentIntent.amount_received : paymentIntent.amount,
         currency: paymentIntent.currency.toUpperCase() as CurrencyCode,
         raw: paymentIntent,
       };
@@ -363,7 +363,7 @@ export class StripeGateway extends BasePaymentGateway {
         success: paymentIntent.status === 'succeeded',
         transactionId: paymentIntent.id,
         status: this.mapStripeStatus(paymentIntent.status),
-        amount: paymentIntent.amount,
+        amount: paymentIntent.status === 'succeeded' ? paymentIntent.amount_received : paymentIntent.amount,
         currency: paymentIntent.currency.toUpperCase() as CurrencyCode,
         raw: paymentIntent,
       };
@@ -473,3 +473,4 @@ export class StripeGateway extends BasePaymentGateway {
     }
   }
 }
+
