@@ -14,9 +14,13 @@ import {
   organizations,
   organizationMembers,
 } from '../db/schema.js';
-import { eq, and, desc, sql, gte, inArray, lt } from 'drizzle-orm';
+import { eq, and, or, desc, sql, gte, inArray, lt } from 'drizzle-orm';
 import { authMiddleware } from '../auth/middleware.js';
 import { PaymentGatewayFactory } from '../services/payments/index.js';
+import { applyPaymentResult, reverseCreatorEarnings } from '../services/payments/settlement.js';
+import { paymentSplit } from '../services/payments/accounting.js';
+import { webhookPaymentReference, paypalRefundAmount } from '../services/payments/webhooks.js';
+import type { BasePaymentGateway, PaymentResult, WebhookEvent } from '../services/payments/BasePaymentGateway.js';
 import type { PaymentProvider } from '@exprsn/shared/types';
 import { encryptCredentials, decryptCredentials } from '../utils/encryption.js';
 import { zValidator, getValidatedData } from '../utils/zod-validator.js';
@@ -407,41 +411,23 @@ paymentRoutes.post('/io.exprsn.payments.charge', authMiddleware, zValidator('jso
     type: 'charge',
     status: result.status,
     amount: body.amount,
-    currency: body.currency?.toLowerCase() || 'usd',
+    currency,
     fromDid: userDid,
     toDid: body.recipientDid || null,
     metadata: {
       description: body.description,
       ...body.metadata,
+      subscriptionId: null,
+      providerCaptureId: null,
+      ...paymentSplit(body.amount, 1000),
+      earningsCredited: false,
       errorCode: result.errorCode,
       errorMessage: result.errorMessage,
     },
     createdAt: new Date(),
   });
 
-  // If successful and has recipient, update creator earnings
-  if (result.success && body.recipientDid) {
-    const platformFee = Math.floor(body.amount * 0.1); // 10% platform fee
-    const creatorAmount = body.amount - platformFee;
-
-    await db
-      .insert(creatorEarnings)
-      .values({
-        userDid: body.recipientDid,
-        totalEarnings: creatorAmount,
-        pendingBalance: creatorAmount,
-        availableBalance: 0,
-        updatedAt: new Date(),
-      })
-      .onConflictDoUpdate({
-        target: creatorEarnings.userDid,
-        set: {
-          totalEarnings: sql`${creatorEarnings.totalEarnings} + ${creatorAmount}`,
-          pendingBalance: sql`${creatorEarnings.pendingBalance} + ${creatorAmount}`,
-          updatedAt: new Date(),
-        },
-      });
-  }
+  await applyPaymentResult(transactionId, result);
 
   return c.json({
     success: result.success,
@@ -465,102 +451,55 @@ paymentRoutes.post('/io.exprsn.payments.refund', authMiddleware, zValidator('jso
 
   const body = getValidatedData<typeof refundSchema._output>(c);
 
-  // Get original transaction
-  const txResult = await db
-    .select({
-      tx: paymentTransactions,
-      config: paymentConfigs,
-    })
-    .from(paymentTransactions)
-    .innerJoin(paymentConfigs, eq(paymentConfigs.id, paymentTransactions.configId))
-    .where(eq(paymentTransactions.id, body.transactionId))
-    .limit(1);
-
-  const txData = txResult[0];
-  if (!txData) {
-    throw new HTTPException(404, { message: 'Transaction not found' });
-  }
-
-  // Check permission (must be config owner or org admin)
-  const config = txData.config;
-  if (config.organizationId) {
-    const hasPermission = await checkOrgPaymentPermission(userDid, config.organizationId);
-    if (!hasPermission) {
+  // Serialize refunds on the original payment, including the provider call, so
+  // concurrent requests cannot both refund the same remaining balance.
+  const response = await db.transaction(async (tx) => {
+    const [txData] = await tx.select({ tx: paymentTransactions, config: paymentConfigs })
+      .from(paymentTransactions)
+      .innerJoin(paymentConfigs, eq(paymentConfigs.id, paymentTransactions.configId))
+      .where(eq(paymentTransactions.id, body.transactionId)).for('update');
+    if (!txData) throw new HTTPException(404, { message: 'Transaction not found' });
+    const config = txData.config;
+    if (config.organizationId) {
+      if (!await checkOrgPaymentPermission(userDid, config.organizationId)) {
+        throw new HTTPException(403, { message: 'Permission denied' });
+      }
+    } else if (config.userDid !== userDid) {
       throw new HTTPException(403, { message: 'Permission denied' });
     }
-  } else if (config.userDid !== userDid) {
-    throw new HTTPException(403, { message: 'Permission denied' });
-  }
-
-  if (txData.tx.status !== 'completed') {
-    throw new HTTPException(400, { message: 'Can only refund completed transactions' });
-  }
-
-  // Get gateway
-  const credentials = safeDecryptCredentials(config.credentials);
-  const gateway = PaymentGatewayFactory.getOrCreate(
-    config.id,
-    config.provider as PaymentProvider,
-    credentials,
-    config.testMode ?? true
-  );
-
-  // Process refund
-  const result = await gateway.processRefund({
-    transactionId: txData.tx.providerTransactionId || '',
-    amount: body.amount,
-    reason: body.reason,
-  });
-
-  // Record refund transaction
-  const refundTxId = nanoid();
-  await db.insert(paymentTransactions).values({
-    id: refundTxId,
-    configId: config.id,
-    providerTransactionId: result.refundId,
-    type: 'refund',
-    status: result.status === 'succeeded' ? 'completed' : result.status === 'pending' ? 'pending' : 'failed',
-    amount: result.amount,
-    currency: txData.tx.currency,
-    fromDid: txData.tx.toDid,
-    toDid: txData.tx.fromDid,
-    metadata: {
-      originalTransactionId: body.transactionId,
-      reason: body.reason,
-      errorMessage: result.errorMessage,
-    },
-    createdAt: new Date(),
-  });
-
-  // Update original transaction status
-  if (result.success) {
-    const isPartial = body.amount && body.amount < txData.tx.amount;
-    await db
-      .update(paymentTransactions)
-      .set({ status: isPartial ? 'completed' : 'refunded' })
-      .where(eq(paymentTransactions.id, body.transactionId));
-
-    // Deduct from creator earnings if applicable
-    if (txData.tx.toDid) {
-      await db
-        .update(creatorEarnings)
-        .set({
-          totalEarnings: sql`${creatorEarnings.totalEarnings} - ${result.amount}`,
-          pendingBalance: sql`GREATEST(0, ${creatorEarnings.pendingBalance} - ${result.amount})`,
-          updatedAt: new Date(),
-        })
-        .where(eq(creatorEarnings.userDid, txData.tx.toDid));
+    if (txData.tx.status !== 'completed' || txData.tx.type === 'refund') {
+      throw new HTTPException(400, { message: 'Can only refund completed payments' });
     }
-  }
-
-  return c.json({
-    success: result.success,
-    refundId: refundTxId,
-    providerRefundId: result.refundId,
-    amount: result.amount,
-    status: result.status,
-    errorMessage: result.errorMessage,
+    const remaining = txData.tx.amount - (txData.tx.refundedAmount || 0);
+    const requested = body.amount ?? remaining;
+    if (requested <= 0 || requested > remaining) {
+      throw new HTTPException(400, { message: 'Refund exceeds the remaining payment amount' });
+    }
+    const gateway = PaymentGatewayFactory.getOrCreate(
+      config.id, config.provider as PaymentProvider, safeDecryptCredentials(config.credentials), config.testMode ?? true
+    );
+    const result = await gateway.processRefund({
+      transactionId: txData.tx.providerTransactionId || '', amount: requested, reason: body.reason,
+    });
+    if (result.success && result.status === 'succeeded' && result.amount !== requested) {
+      throw new Error('Provider refund amount does not match the requested refund');
+    }
+    const refundTxId = nanoid();
+    await tx.insert(paymentTransactions).values({
+      id: refundTxId, configId: config.id, providerTransactionId: result.refundId,
+      type: 'refund', status: result.status === 'succeeded' ? 'completed' : result.status,
+      amount: result.amount, currency: txData.tx.currency, fromDid: txData.tx.toDid, toDid: txData.tx.fromDid,
+      metadata: { originalTransactionId: body.transactionId, reason: body.reason, errorMessage: result.errorMessage },
+    });
+    if (result.success && result.status === 'succeeded') {
+      await reverseCreatorEarnings(tx, txData.tx, (txData.tx.refundedAmount || 0) + result.amount);
+    }
+    return {
+      success: result.success, refundId: refundTxId, providerRefundId: result.refundId,
+      amount: result.amount, status: result.status, errorMessage: result.errorMessage,
+    };
   });
+  return c.json(response);
 });
 
 // Send a tip
@@ -630,34 +569,14 @@ paymentRoutes.post('/io.exprsn.payments.tip', authMiddleware, zValidator('json',
     toDid: body.recipientDid,
     metadata: {
       message: body.message,
+      ...paymentSplit(body.amount, 500),
+      earningsCredited: false,
       errorMessage: result.errorMessage,
     },
     createdAt: new Date(),
   });
 
-  // Update creator earnings if successful
-  if (result.success) {
-    const platformFee = Math.floor(body.amount * 0.05); // 5% platform fee for tips
-    const creatorAmount = body.amount - platformFee;
-
-    await db
-      .insert(creatorEarnings)
-      .values({
-        userDid: body.recipientDid,
-        totalEarnings: creatorAmount,
-        pendingBalance: creatorAmount,
-        availableBalance: 0,
-        updatedAt: new Date(),
-      })
-      .onConflictDoUpdate({
-        target: creatorEarnings.userDid,
-        set: {
-          totalEarnings: sql`${creatorEarnings.totalEarnings} + ${creatorAmount}`,
-          pendingBalance: sql`${creatorEarnings.pendingBalance} + ${creatorAmount}`,
-          updatedAt: new Date(),
-        },
-      });
-  }
+  await applyPaymentResult(transactionId, result);
 
   return c.json({
     success: result.success,
@@ -706,7 +625,7 @@ paymentRoutes.post('/io.exprsn.payments.capture', authMiddleware, zValidator('js
     throw new HTTPException(403, { message: 'Permission denied' });
   }
 
-  if (txData.tx.status !== 'processing') {
+  if (txData.tx.status !== 'processing' && !(config.provider === 'paypal' && txData.tx.status === 'pending')) {
     throw new HTTPException(400, { message: 'Transaction is not in authorized state' });
   }
 
@@ -722,14 +641,10 @@ paymentRoutes.post('/io.exprsn.payments.capture', authMiddleware, zValidator('js
   // Capture payment
   const result = await gateway.capturePayment(
     txData.tx.providerTransactionId || '',
-    body.amount ? { amount: body.amount } : undefined
+    { amount: body.amount ?? txData.tx.amount }
   );
 
-  // Update transaction
-  await db
-    .update(paymentTransactions)
-    .set({ status: result.status })
-    .where(eq(paymentTransactions.id, body.transactionId));
+  await applyPaymentResult(body.transactionId, result);
 
   return c.json({
     success: result.success,
@@ -791,12 +706,11 @@ paymentRoutes.post('/io.exprsn.payments.void', authMiddleware, zValidator('json'
   // Void payment
   const result = await gateway.voidPayment(txData.tx.providerTransactionId || '');
 
-  // Update transaction
   if (result.success) {
-    await db
-      .update(paymentTransactions)
-      .set({ status: 'cancelled' })
-      .where(eq(paymentTransactions.id, body.transactionId));
+    await applyPaymentResult(body.transactionId, {
+      success: false, status: 'cancelled', transactionId: txData.tx.providerTransactionId || '',
+      amount: txData.tx.amount, currency: txData.tx.currency as 'usd',
+    });
   }
 
   return c.json({
@@ -1242,22 +1156,18 @@ paymentRoutes.post('/io.exprsn.payments.webhook/stripe', async (c) => {
     const credentials = safeDecryptCredentials(config.credentials);
     if (!credentials.webhookSecret) continue;
 
+    const gateway = PaymentGatewayFactory.getOrCreate(
+      config.id, 'stripe', credentials, config.testMode ?? true
+    );
+    let event: WebhookEvent;
     try {
-      const gateway = PaymentGatewayFactory.getOrCreate(
-        config.id,
-        'stripe',
-        credentials,
-        config.testMode ?? true
-      );
-
-      if (gateway.verifyWebhookSignature(body, signature)) {
-        const event = gateway.parseWebhookEvent(body, signature);
-        await processWebhookEvent(config.id, event);
-        return c.json({ received: true });
-      }
+      if (!await gateway.verifyWebhookSignature(body, signature)) continue;
+      event = gateway.parseWebhookEvent(body, signature);
     } catch {
       continue;
     }
+    await processWebhookEvent(config.id, event, gateway);
+    return c.json({ received: true });
   }
 
   throw new HTTPException(400, { message: 'Invalid signature' });
@@ -1281,22 +1191,18 @@ paymentRoutes.post('/io.exprsn.payments.webhook/paypal', async (c) => {
     const credentials = safeDecryptCredentials(config.credentials);
     if (!credentials.webhookId) continue;
 
+    const gateway = PaymentGatewayFactory.getOrCreate(
+      config.id, 'paypal', credentials, config.testMode ?? true
+    );
+    let event: WebhookEvent;
     try {
-      const gateway = PaymentGatewayFactory.getOrCreate(
-        config.id,
-        'paypal',
-        credentials,
-        config.testMode ?? true
-      );
-
-      if (gateway.verifyWebhookSignature(body, signature)) {
-        const event = gateway.parseWebhookEvent(body);
-        await processWebhookEvent(config.id, event);
-        return c.json({ received: true });
-      }
+      if (!await gateway.verifyWebhookSignature(body, signature, c.req.header())) continue;
+      event = gateway.parseWebhookEvent(body);
     } catch {
       continue;
     }
+    await processWebhookEvent(config.id, event, gateway);
+    return c.json({ received: true });
   }
 
   throw new HTTPException(400, { message: 'Invalid signature' });
@@ -1320,68 +1226,78 @@ paymentRoutes.post('/io.exprsn.payments.webhook/authorizenet', async (c) => {
     const credentials = safeDecryptCredentials(config.credentials);
     if (!credentials.signatureKey) continue;
 
+    const gateway = PaymentGatewayFactory.getOrCreate(
+      config.id, 'authorizenet', credentials, config.testMode ?? true
+    );
+    let event: WebhookEvent;
     try {
-      const gateway = PaymentGatewayFactory.getOrCreate(
-        config.id,
-        'authorizenet',
-        credentials,
-        config.testMode ?? true
-      );
-
-      if (gateway.verifyWebhookSignature(body, signature)) {
-        const event = gateway.parseWebhookEvent(body);
-        await processWebhookEvent(config.id, event);
-        return c.json({ received: true });
-      }
+      if (!await gateway.verifyWebhookSignature(body, signature)) continue;
+      event = gateway.parseWebhookEvent(body);
     } catch {
       continue;
     }
+    await processWebhookEvent(config.id, event, gateway);
+    return c.json({ received: true });
   }
 
   throw new HTTPException(400, { message: 'Invalid signature' });
 });
 
-// Process webhook event
-async function processWebhookEvent(
-  configId: string,
-  event: { id: string; type: string; data: Record<string, unknown> }
-) {
-  // Map event types to transaction updates
-  const eventTypeMap: Record<string, string> = {
-    // Stripe
-    'payment_intent.succeeded': 'completed',
-    'payment_intent.payment_failed': 'failed',
-    'charge.refunded': 'refunded',
-    // PayPal
-    'PAYMENT.CAPTURE.COMPLETED': 'completed',
-    'PAYMENT.CAPTURE.DENIED': 'failed',
-    'PAYMENT.CAPTURE.REFUNDED': 'refunded',
-    // Authorize.Net
-    'net.authorize.payment.authcapture.created': 'completed',
-    'net.authorize.payment.refund.created': 'refunded',
-  };
-
-  const newStatus = eventTypeMap[event.type];
-  if (!newStatus) return;
-
-  // Extract provider transaction ID from event data
-  const providerTxId =
-    (event.data.id as string) ||
-    (event.data.object as { id?: string })?.id ||
-    (event.data.resource as { id?: string })?.id;
-
-  if (!providerTxId) return;
-
-  // Update transaction status
-  await db
-    .update(paymentTransactions)
-    .set({ status: newStatus as 'pending' | 'processing' | 'completed' | 'failed' | 'cancelled' | 'refunded' })
-    .where(
-      and(
-        eq(paymentTransactions.configId, configId),
-        eq(paymentTransactions.providerTransactionId, providerTxId)
-      )
-    );
+// Reconcile signed provider events through the same locked settlement path as
+// synchronous responses. PayPal capture IDs differ from the stored order IDs.
+async function processWebhookEvent(configId: string, event: WebhookEvent, gateway: BasePaymentGateway) {
+  const reference = webhookPaymentReference(event);
+  if (!reference) return;
+  const completed = ['payment_intent.succeeded', 'PAYMENT.CAPTURE.COMPLETED', 'net.authorize.payment.authcapture.created'].includes(event.type);
+  const failed = ['payment_intent.payment_failed', 'PAYMENT.CAPTURE.DENIED'].includes(event.type);
+  const refunded = ['charge.refunded', 'PAYMENT.CAPTURE.REFUNDED'].includes(event.type);
+  if (!completed && !failed && !refunded) return;
+  const [payment] = await db.select().from(paymentTransactions).where(and(
+    eq(paymentTransactions.configId, configId),
+    or(eq(paymentTransactions.providerTransactionId, reference), sql`${paymentTransactions.metadata}->>'providerCaptureId' = ${reference}`),
+    sql`${paymentTransactions.type} != 'refund'`
+  )).limit(1);
+  if (!payment) throw new Error('Webhook payment not yet recorded');
+  if (completed) {
+    const result = await gateway.getTransaction(payment.providerTransactionId || reference);
+    if (!result.success || result.status !== 'completed') throw new Error('Provider payment is not yet completed');
+    await applyPaymentResult(payment.id, result, gateway.provider === 'paypal' ? event.data.id as string : undefined);
+  } else if (failed) {
+    await applyPaymentResult(payment.id, {
+      success: false, status: 'failed', transactionId: payment.providerTransactionId || reference,
+      amount: payment.amount, currency: payment.currency as 'usd',
+    });
+  } else {
+    await db.transaction(async (tx) => {
+      const [locked] = await tx.select().from(paymentTransactions).where(eq(paymentTransactions.id, payment.id)).for('update');
+      if (!locked) throw new Error('Payment transaction not found');
+      if (event.type === 'charge.refunded') {
+        const total = event.data.amount_refunded;
+        if (!Number.isSafeInteger(total) || (total as number) < 0) throw new Error('Invalid refunded amount');
+        await reverseCreatorEarnings(tx, locked, total as number);
+      } else {
+        const refundId = event.data.id as string;
+        if (!refundId) throw new Error('Missing refund ID');
+        const [existing] = await tx.select().from(paymentTransactions).where(and(
+          eq(paymentTransactions.configId, configId), eq(paymentTransactions.providerTransactionId, refundId), eq(paymentTransactions.type, 'refund')
+        )).limit(1);
+        if (existing?.status === 'completed') return;
+        const amount = paypalRefundAmount(event.data);
+        const currency = (event.data.amount as { currency_code: string }).currency_code;
+        if (currency.toLowerCase() !== locked.currency.toLowerCase()) throw new Error('Refund currency mismatch');
+        await reverseCreatorEarnings(tx, locked, (locked.refundedAmount || 0) + amount);
+        if (existing) {
+          await tx.update(paymentTransactions).set({ status: 'completed', amount }).where(eq(paymentTransactions.id, existing.id));
+        } else {
+          await tx.insert(paymentTransactions).values({
+            id: nanoid(), configId, providerTransactionId: refundId, type: 'refund', status: 'completed',
+            amount, currency: locked.currency, fromDid: locked.toDid, toDid: locked.fromDid,
+            metadata: { originalTransactionId: payment.id },
+          });
+        }
+      }
+    });
+  }
 }
 
 // ============================================
@@ -1459,95 +1375,95 @@ paymentRoutes.post('/io.exprsn.payments.subscribe', authMiddleware, zValidator('
 
   const body = getValidatedData<typeof subscribeSchema._output>(c);
 
-  // Get tier
-  const tierResult = await db
-    .select()
-    .from(creatorSubscriptionTiers)
-    .where(eq(creatorSubscriptionTiers.id, body.tierId))
-    .limit(1);
-
-  const tier = tierResult[0];
-  if (!tier || !tier.isActive) {
-    throw new HTTPException(404, { message: 'Tier not found or inactive' });
-  }
-
-  // Check if already subscribed
-  const existingSub = await db
-    .select()
-    .from(creatorSubscriptions)
-    .where(
-      and(
-        eq(creatorSubscriptions.subscriberDid, userDid),
-        eq(creatorSubscriptions.creatorDid, tier.creatorDid),
-        eq(creatorSubscriptions.status, 'active')
-      )
-    )
-    .limit(1);
-
-  if (existingSub[0]) {
-    throw new HTTPException(400, { message: 'Already subscribed to this creator' });
-  }
-
-  // Check capacity
-  if (tier.maxSubscribers && tier.currentSubscribers >= tier.maxSubscribers) {
-    throw new HTTPException(400, { message: 'Subscription tier is at capacity' });
-  }
-
-  // Create subscription
-  const subId = nanoid();
-  const now = new Date();
-  const periodEnd = new Date(now);
-  periodEnd.setMonth(periodEnd.getMonth() + 1);
-
-  await db.insert(creatorSubscriptions).values({
-    id: subId,
-    subscriberDid: userDid,
-    creatorDid: tier.creatorDid,
-    tierId: body.tierId,
-    status: 'active',
-    currentPeriodStart: now,
-    currentPeriodEnd: periodEnd,
-  });
-
-  // Update subscriber count
-  await db
-    .update(creatorSubscriptionTiers)
-    .set({ currentSubscribers: sql`${creatorSubscriptionTiers.currentSubscribers} + 1` })
-    .where(eq(creatorSubscriptionTiers.id, body.tierId));
-
-  // Record payment (deduct from subscriber, credit to creator)
-  // Platform takes 30% of subscription revenue
-  const platformFee = Math.floor(tier.price * 0.3);
-  const creatorPayout = tier.price - platformFee;
-
-  // Update creator earnings
-  await db
-    .insert(creatorEarnings)
-    .values({
-      userDid: tier.creatorDid,
-      totalEarnings: creatorPayout,
-      pendingBalance: creatorPayout,
-      availableBalance: 0,
-    })
-    .onConflictDoUpdate({
-      target: creatorEarnings.userDid,
-      set: {
-        totalEarnings: sql`${creatorEarnings.totalEarnings} + ${creatorPayout}`,
-        pendingBalance: sql`${creatorEarnings.pendingBalance} + ${creatorPayout}`,
-        updatedAt: new Date(),
-      },
+  // Reserve the subscription and capacity before initiating payment. The user lock
+  // serializes retries, while the tier lock prevents oversubscribing its capacity.
+  const reservation = await db.transaction(async (tx) => {
+    await tx.select({ did: users.did }).from(users).where(eq(users.did, userDid)).for('update');
+    const [existing] = await tx.select().from(creatorSubscriptions).where(and(
+      eq(creatorSubscriptions.subscriberDid, userDid),
+      sql`${creatorSubscriptions.creatorDid} = (SELECT creator_did FROM creator_subscription_tiers WHERE id = ${body.tierId})`
+    ));
+    if (existing?.status === 'pending' || (existing?.status === 'active' && existing.currentPeriodEnd > new Date())) {
+      throw new HTTPException(409, { message: 'An active subscription or pending payment already exists' });
+    }
+    const [tier] = await tx.select().from(creatorSubscriptionTiers)
+      .where(eq(creatorSubscriptionTiers.id, body.tierId)).for('update');
+    if (!tier || !tier.isActive) throw new HTTPException(404, { message: 'Tier not found or inactive' });
+    if (tier.creatorDid === userDid) throw new HTTPException(400, { message: 'Cannot subscribe to yourself' });
+    if (existing?.status === 'active') {
+      await tx.update(creatorSubscriptionTiers).set({
+        currentSubscribers: sql`GREATEST(0, ${creatorSubscriptionTiers.currentSubscribers} - 1)`,
+      }).where(eq(creatorSubscriptionTiers.id, existing.tierId));
+    }
+    const reservedCount = tier.currentSubscribers - (existing?.status === 'active' && existing.tierId === tier.id ? 1 : 0);
+    if (tier.maxSubscribers !== null && reservedCount >= tier.maxSubscribers) {
+      throw new HTTPException(400, { message: 'Subscription tier is at capacity' });
+    }
+    const [config] = await tx.select().from(paymentConfigs).where(and(
+      eq(paymentConfigs.userDid, tier.creatorDid), eq(paymentConfigs.isActive, true),
+      sql`${paymentConfigs.organizationId} IS NULL`
+    )).limit(1);
+    if (!config) throw new HTTPException(400, { message: 'Creator has no active payment configuration' });
+    const gateway = PaymentGatewayFactory.getOrCreate(
+      config.id, config.provider as PaymentProvider, safeDecryptCredentials(config.credentials), config.testMode ?? true
+    );
+    if (body.paymentMethodId) {
+      const [method] = await tx.select().from(paymentMethods).where(and(
+        eq(paymentMethods.userDid, userDid), eq(paymentMethods.configId, config.id),
+        eq(paymentMethods.providerPaymentMethodId, body.paymentMethodId)
+      )).limit(1);
+      if (!method) throw new HTTPException(400, { message: 'Payment method does not belong to this subscriber and payment configuration' });
+    }
+    const [customer] = await tx.select().from(paymentCustomers).where(and(
+      eq(paymentCustomers.userDid, userDid), eq(paymentCustomers.configId, config.id)
+    )).limit(1);
+    const subId = nanoid();
+    const transactionId = nanoid();
+    const now = new Date();
+    const pending = {
+      id: subId, status: 'pending', tierId: tier.id,
+      currentPeriodStart: now, currentPeriodEnd: now, cancelledAt: null, updatedAt: now,
+    };
+    // There is one row per subscriber/creator; a new ID isolates late callbacks
+    // from previous attempts when replacing an expired or cancelled subscription.
+    await tx.insert(creatorSubscriptions).values({ ...pending, subscriberDid: userDid, creatorDid: tier.creatorDid })
+      .onConflictDoUpdate({ target: [creatorSubscriptions.subscriberDid, creatorSubscriptions.creatorDid], set: pending });
+    await tx.update(creatorSubscriptionTiers).set({
+      currentSubscribers: sql`${creatorSubscriptionTiers.currentSubscribers} + 1`,
+    }).where(eq(creatorSubscriptionTiers.id, tier.id));
+    await tx.insert(paymentTransactions).values({
+      id: transactionId, configId: config.id, type: 'subscription', status: 'pending',
+      amount: tier.price, currency: 'usd', fromDid: userDid, toDid: tier.creatorDid,
+      metadata: { ...paymentSplit(tier.price, 3000), earningsCredited: false, subscriptionId: subId },
     });
-
-  return c.json({
-    subscription: {
-      id: subId,
-      creatorDid: tier.creatorDid,
-      tierId: body.tierId,
-      tierName: tier.name,
-      status: 'active',
-      currentPeriodEnd: periodEnd.toISOString(),
-    },
+    return { gateway, tier, subId, transactionId, customerId: customer?.providerCustomerId || undefined };
   });
+
+  const { gateway, tier, subId, transactionId, customerId } = reservation;
+  let result: PaymentResult;
+  try {
+    result = await gateway.processPayment({
+      amount: tier.price, currency: 'usd', customerId, paymentMethodId: body.paymentMethodId,
+      description: `Subscription: ${tier.name}`, idempotencyKey: transactionId,
+      metadata: { subscriptionId: subId, transactionId },
+    });
+  } catch (error) {
+    // An unknown provider outcome must remain pending: retrying a charge could
+    // collect twice. Reconciliation can resolve it using the idempotency key.
+    throw new HTTPException(502, { message: 'Payment outcome is unknown; do not retry until reconciled' });
+  }
+  await applyPaymentResult(transactionId, result);
+  const [subscription] = await db.select().from(creatorSubscriptions).where(eq(creatorSubscriptions.id, subId));
+  return c.json({
+    transactionId,
+    requiresAction: result.requiresAction,
+    clientSecret: result.clientSecret,
+    errorMessage: result.errorMessage,
+    subscription: {
+      id: subId, creatorDid: tier.creatorDid, tierId: tier.id, tierName: tier.name,
+      status: subscription?.status || 'pending', currentPeriodEnd: subscription?.currentPeriodEnd.toISOString(),
+    },
+  }, result.status === 'failed' ? 402 : 200);
 });
 
 // Cancel subscription
@@ -1559,40 +1475,43 @@ paymentRoutes.post('/io.exprsn.payments.cancelSubscription', authMiddleware, zVa
 
   const body = getValidatedData<typeof cancelSubscriptionSchema._output>(c);
 
-  const subResult = await db
-    .select()
-    .from(creatorSubscriptions)
-    .where(eq(creatorSubscriptions.id, body.subscriptionId))
-    .limit(1);
+  await db.transaction(async (tx) => {
+    await tx.select({ did: users.did }).from(users).where(eq(users.did, userDid)).for('update');
+    const subResult = await tx
+      .select()
+      .from(creatorSubscriptions)
+      .where(eq(creatorSubscriptions.id, body.subscriptionId))
+      .limit(1);
 
-  const subscription = subResult[0];
-  if (!subscription) {
-    throw new HTTPException(404, { message: 'Subscription not found' });
-  }
+    const subscription = subResult[0];
+    if (!subscription) {
+      throw new HTTPException(404, { message: 'Subscription not found' });
+    }
 
-  if (subscription.subscriberDid !== userDid) {
-    throw new HTTPException(403, { message: 'Permission denied' });
-  }
+    if (subscription.subscriberDid !== userDid) {
+      throw new HTTPException(403, { message: 'Permission denied' });
+    }
 
-  if (subscription.status !== 'active') {
-    throw new HTTPException(400, { message: 'Subscription is not active' });
-  }
+    if (subscription.status !== 'active') {
+      throw new HTTPException(400, { message: 'Subscription is not active' });
+    }
 
-  // Cancel at end of period
-  await db
-    .update(creatorSubscriptions)
-    .set({
-      status: 'cancelled',
-      cancelledAt: new Date(),
-      updatedAt: new Date(),
-    })
-    .where(eq(creatorSubscriptions.id, body.subscriptionId));
+    // Preserve the current cancellation behavior; serialize with new checkouts.
+    await tx
+      .update(creatorSubscriptions)
+      .set({
+        status: 'cancelled',
+        cancelledAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .where(eq(creatorSubscriptions.id, body.subscriptionId));
 
-  // Update subscriber count
-  await db
-    .update(creatorSubscriptionTiers)
-    .set({ currentSubscribers: sql`${creatorSubscriptionTiers.currentSubscribers} - 1` })
-    .where(eq(creatorSubscriptionTiers.id, subscription.tierId));
+    // Update subscriber count
+    await tx
+      .update(creatorSubscriptionTiers)
+      .set({ currentSubscribers: sql`GREATEST(0, ${creatorSubscriptionTiers.currentSubscribers} - 1)` })
+      .where(eq(creatorSubscriptionTiers.id, subscription.tierId));
+  });
 
   return c.json({ success: true });
 });
@@ -1736,3 +1655,4 @@ paymentRoutes.get('/io.exprsn.payments.isSubscribed', authMiddleware, async (c) 
 });
 
 export default paymentRoutes;
+

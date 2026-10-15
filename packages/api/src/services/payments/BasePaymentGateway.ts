@@ -203,7 +203,11 @@ export abstract class BasePaymentGateway {
   /**
    * Verify webhook signature
    */
-  abstract verifyWebhookSignature(payload: string | Buffer, signature: string): boolean;
+  abstract verifyWebhookSignature(
+    payload: string | Buffer,
+    signature: string,
+    headers?: Record<string, string | undefined>
+  ): boolean | Promise<boolean>;
 
   /**
    * Parse webhook event
@@ -248,3 +252,4 @@ export abstract class BasePaymentGateway {
     return this.testMode;
   }
 }
+

@@ -689,36 +689,38 @@ export class PayPalGateway extends BasePaymentGateway {
     return brandMap[brandLower] || 'unknown';
   }
 
-  verifyWebhookSignature(payload: string | Buffer, signature: string): boolean {
-    if (!this.webhookId) {
-      throw new Error('Webhook ID not configured');
-    }
+  async verifyWebhookSignature(
+    payload: string | Buffer,
+    signature: string,
+    headers: Record<string, string | undefined> = {}
+  ): Promise<boolean> {
+    if (!this.webhookId) return false;
+    const transmissionId = headers['paypal-transmission-id'];
+    const transmissionTime = headers['paypal-transmission-time'];
+    const certUrl = headers['paypal-cert-url'];
+    const authAlgo = headers['paypal-auth-algo'];
+    if (!signature || !transmissionId || !transmissionTime || !certUrl || !authAlgo) return false;
 
-    try {
-      const payloadString = typeof payload === 'string' ? payload : payload.toString();
-
-      // Calculate SHA256 hash of the payload
-      const payloadHash = crypto.createHash('sha256').update(payloadString).digest('hex');
-
-      // For production, you should use PayPal's webhook verification API
-      // This is a simplified check
-      const expectedSigString = `${this.webhookId}|${payloadHash}`;
-      const expectedSig = crypto
-        .createHmac('sha256', this.webhookId)
-        .update(expectedSigString)
-        .digest('base64');
-
-      try {
-        return crypto.timingSafeEqual(
-          Buffer.from(signature, 'base64'),
-          Buffer.from(expectedSig, 'base64')
-        );
-      } catch {
-        return false;
-      }
-    } catch {
-      return false;
-    }
+    // PayPal verifies its asymmetric signature; a webhook ID is not an HMAC key.
+    const accessToken = await this.getAccessToken();
+    const baseUrl = this.testMode ? 'https://api-m.sandbox.paypal.com' : 'https://api-m.paypal.com';
+    const response = await fetch(`${baseUrl}/v1/notifications/verify-webhook-signature`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        transmission_id: transmissionId,
+        transmission_time: transmissionTime,
+        cert_url: certUrl,
+        auth_algo: authAlgo,
+        transmission_sig: signature,
+        webhook_id: this.webhookId,
+        webhook_event: JSON.parse(typeof payload === 'string' ? payload : payload.toString()),
+      }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) throw new Error(`PayPal webhook verification failed: ${response.status}`);
+    const verification = await response.json() as { verification_status?: string };
+    return verification.verification_status === 'SUCCESS';
   }
 
   parseWebhookEvent(payload: string | Buffer): WebhookEvent {
@@ -900,3 +902,4 @@ export class PayPalGateway extends BasePaymentGateway {
     }
   }
 }
+
